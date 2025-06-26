@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.0.2] - YYYY-MM-DD
+## [1.0.2] - 2025-06-26
 
 ### Added
 - Introduction of custom REST clients for exchange implementations
@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated environment sample configuration
 - Updated project documentation (README.md)
 - Updated dependency lockfile (yarn.lock)
+- @gainium/kucoin-api updated from 1.0.3 to 1.0.4
 
 ### Fixed
 - Various bug fixes and improvements across exchange implementations

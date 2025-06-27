@@ -24,6 +24,10 @@ import {
 } from '../../types'
 import {
   RestClientV2 as BitgetClient,
+  FuturesKlineInterval,
+  FuturesOrderDetailV2 as _FuturesOrderDetailV2,
+  SpotKlineInterval,
+  SpotOrderInfoV2 as _SpotOrderInfoV2,
   type RestClientOptions,
 } from 'bitget-api'
 import { RestClientV2 as BitgetOrderClient } from '../../../../bitget-custom/rest-client-v2'
@@ -31,20 +35,20 @@ import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import {
-  FuturesAllOpenOrders,
   FuturesAssets,
-  FuturesCancelOrder,
-  FuturesContractConfig,
-  FuturesOrder,
   FuturesSubmitOrderResponse,
   SpotAccountType,
   FuturesPosition,
-  FuturesAllTickers,
   FuturesSingleAccount,
-  SpotExchangeInfo,
-  SpotOrder,
-  SpotAssets,
 } from './types'
+
+type SpotOrderInfoV2 = _SpotOrderInfoV2 & {
+  basePrice?: string
+}
+
+type FuturesOrderDetailV2 = _FuturesOrderDetailV2 & {
+  status: 'live' | 'partially_filled' | 'filled' | 'canceled'
+}
 
 class BitgetError extends Error {
   code: number
@@ -179,11 +183,11 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   get productTypes() {
     return this.usdm
       ? this.demo
-        ? ['SUSDT-FUTURES', 'SUSDC-FUTURES']
-        : ['USDT-FUTURES', 'USDC-FUTURES']
+        ? (['SUSDT-FUTURES', 'SUSDC-FUTURES'] as const)
+        : (['USDT-FUTURES', 'USDC-FUTURES'] as const)
       : this.demo
-        ? ['SCOIN-FUTURES']
-        : ['COIN-FUTURES']
+        ? (['SCOIN-FUTURES'] as const)
+        : (['COIN-FUTURES'] as const)
   }
 
   private getProductTypeBySymbol(symbol: string) {
@@ -259,7 +263,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         account?.data?.marginMode === 'isolated' &&
         account?.data?.posMode === 'hedge_mode'
       if (isolatedHedge) {
-        for (const holdSide of ['long', 'short']) {
+        for (const holdSide of ['long', 'short'] as const) {
           timeProfile =
             (await this.checkLimits('setFuturesLeverage', 0, timeProfile)) ||
             timeProfile
@@ -267,7 +271,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             .setFuturesLeverage({
               symbol,
               productType,
-              leverage,
+              leverage: `${leverage}`,
               marginCoin,
               holdSide,
             })
@@ -286,7 +290,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         .setFuturesLeverage({
           symbol,
           productType,
-          leverage,
+          leverage: `${leverage}`,
           marginCoin,
         })
         .then((result) => {
@@ -474,9 +478,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesOrder
+          const data = result.data
           return this.returnGood<CommonOrder>(timeProfile)(
-            this.convertFuturesOrder(data),
+            this.convertFuturesOrder(data as unknown as FuturesOrderDetailV2),
           )
         }
         if (
@@ -569,7 +573,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesCancelOrder
+          const data = result.data
           return await this.futures_getOrder(
             { symbol: order.symbol, newClientOrderId: data.clientOid },
             timeProfile,
@@ -625,7 +629,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     }
 
     const productTypes = symbol
-      ? [this.getProductTypeBySymbol(symbol)]
+      ? ([this.getProductTypeBySymbol(symbol)] as const)
       : this.productTypes
     const res: CommonOrder[] = []
     for (const productType of productTypes) {
@@ -640,9 +644,11 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         })
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesAllOpenOrders
+          const data = result.data
           ;(data.entrustedList ?? []).map((o) =>
-            res.push(this.convertFuturesOrder(o)),
+            res.push(
+              this.convertFuturesOrder(o as unknown as FuturesOrderDetailV2),
+            ),
           )
         } else {
           return this.handleBitgetErrors(
@@ -749,7 +755,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       return this.errorFutures(timeProfile)
     }
     const productTypes = symbol
-      ? [this.getProductTypeBySymbol(symbol)]
+      ? ([this.getProductTypeBySymbol(symbol)] as const)
       : this.productTypes
     const res: PositionInfo[] = []
     for (const productType of productTypes) {
@@ -763,7 +769,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         })
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesPosition[]
+          const data = result.data
           data.map((o) => res.push(this.convertPosition(o)))
         } else {
           return this.handleBitgetErrors(
@@ -783,7 +789,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     return this.returnGood<PositionInfo[]>(timeProfile)(res)
   }
 
-  private convertInterval(interval: ExchangeIntervals): string {
+  private convertInterval(
+    interval: ExchangeIntervals,
+  ): FuturesKlineInterval | SpotKlineInterval {
     return interval === ExchangeIntervals.oneW
       ? '1Wutc'
       : interval === ExchangeIntervals.oneD
@@ -845,10 +853,10 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .getFuturesHistoricCandles({
         symbol,
         productType,
-        startTime: from,
-        endTime: to,
-        limit: 200,
-        granularity: this.convertInterval(interval),
+        startTime: `${from}`,
+        endTime: `${to}`,
+        limit: '200',
+        granularity: this.convertInterval(interval) as FuturesKlineInterval,
       })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -906,7 +914,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         })
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesAllTickers[]
+          const data = result.data
           data.map((o) =>
             res.push({
               pair: o.symbol,
@@ -1008,7 +1016,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesSingleAccount
+          const data = result.data
           return this.returnGood<boolean>(timeProfile)(
             data.posMode === 'hedge_mode',
           )
@@ -1089,7 +1097,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .getSpotAccount()
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        const data = result.data as SpotAccountType
+        const data = result.data
         return this.returnGood<boolean>(timeProfile)(
           this.futures
             ? data.authorities.includes('coow')
@@ -1210,7 +1218,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesCancelOrder
+          const data = result.data
           return await this.spot_getOrder(
             { symbol: order.symbol, newClientOrderId: data.clientOid },
             timeProfile,
@@ -1284,7 +1292,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         const get = await this.client.getFuturesContractConfig({ productType })
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (get.code === '00000') {
-          const data = get.data as FuturesContractConfig[]
+          const data = get.data
           data
             .filter((d) => d.symbolStatus === 'normal')
             .map((d) => {
@@ -1361,7 +1369,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as SpotExchangeInfo[]
+          const data = result.data
           return this.returnGood<
             (ExchangeInfo & {
               pair: string
@@ -1465,13 +1473,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as SpotOrder[]
+          const data = result.data
           return {
             timeProfile,
             usage: limitHelper.getInstance().getLimits(),
             status: StatusEnum.ok as StatusEnum.ok,
             data: returnOrders
-              ? data.map((d) => this.convertSpotOrder(d))
+              ? data.map((d) =>
+                  this.convertSpotOrder(d as unknown as SpotOrderInfoV2),
+                )
               : data.length,
           }
         }
@@ -1562,7 +1572,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       const get = await this.client.getSpotAccountAssets()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       if (get.code === '00000') {
-        const data = get.data as SpotAssets[]
+        const data = get.data
         data.map((d) => {
           res.push({
             asset: d.coin,
@@ -1636,13 +1646,12 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
       .getSpotOrder({
-        symbol: data.symbol,
         clientOid: data.newClientOrderId,
       })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          let _data = result.data?.[0] as SpotOrder
+          let _data = result.data?.[0]
           if (!_data) {
             timeProfile =
               (await this.checkLimits('getSpotOrder', 0, timeProfile)) ||
@@ -1651,9 +1660,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             _data = (
               await this.client.getSpotHistoricOrders({
                 symbol: data.symbol,
-                clientOid: data.newClientOrderId,
+                orderId: data.newClientOrderId,
               })
-            )?.data?.[0] as SpotOrder
+            )?.data?.[0]
             timeProfile = this.endProfilerTime(timeProfile, 'exchange')
           }
           if (_data) {
@@ -1810,7 +1819,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as FuturesSubmitOrderResponse
+          const data = result.data
           if (options.orderType === 'market') {
             await sleep(1000)
           }
@@ -1863,9 +1872,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       to
         ? this.client.getSpotHistoricCandles({
             symbol,
-            endTime: to,
-            limit: 200,
-            granularity: this.convertInterval(interval),
+            endTime: `${to}`,
+            limit: '200',
+            granularity: this.convertInterval(interval) as SpotKlineInterval,
           })
         : this.client.getSpotCandles({
             symbol,
@@ -1938,7 +1947,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       const result = await this.client.getSpotTicker()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       if (result.code === '00000') {
-        const data = result.data as FuturesAllTickers[]
+        const data = result.data
         data.map((o) =>
           res.push({
             pair: o.symbol,
@@ -1968,7 +1977,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
    * @param {boolean} needFills is needed to query fills
    * @returns {Promise<CommonOrder>} Common order result
    */
-  private convertFuturesOrder(order?: FuturesOrder): CommonOrder {
+  private convertFuturesOrder(order?: FuturesOrderDetailV2): CommonOrder {
     const orderStatus = (): OrderStatusType => {
       const { state, status } = order
       if (['live'].includes(state || status)) {
@@ -2032,7 +2041,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     }
   }
 
-  private convertSpotOrder(order?: SpotOrder): CommonOrder {
+  private convertSpotOrder(order?: SpotOrderInfoV2): CommonOrder {
     const orderStatus = (): OrderStatusType => {
       const { status } = order
       if (['live'].includes(status)) {

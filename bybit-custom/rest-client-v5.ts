@@ -13,7 +13,7 @@ import BaseRestClient from './BaseRestClient'
  */
 export class RestClientV5 extends BaseRestClient {
   getClientType() {
-    return REST_CLIENT_TYPE_ENUM.v3
+    return REST_CLIENT_TYPE_ENUM.v5
   }
 
   async fetchServerTime(): Promise<number> {

@@ -1,3 +1,5 @@
+import { TimeInForce_LT } from 'binance-api-node'
+
 export type ExchangeInfo = {
   baseAsset: {
     minAmount: number
@@ -275,8 +277,6 @@ export type LeverageBracket = {
   step: number
   min: number
 }
-
-export type TimeInForce_LT = 'GTC' | 'IOC' | 'FOK'
 
 export type WorkingType_LT = 'MARK_PRICE' | 'CONTRACT_PRICE'
 

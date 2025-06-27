@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Bumped module versions to fix known vulnerability
 
+### Changed
+- Bumped binance-api-node from ^0.12.0 to ^0.12.9
+- Bumped bitget-api from ^2.0.13 to ^2.3.5
+- Bumped bybit-api from ^3.3.3 to ^4.1.13
+- Bumped coinbase-advanced-node from ^3.0.1 to ^4.1.0
+- Bumped okx-api from ^1.1.3 to ^2.0.5
+- Updated exchange connector logic to accommodate new package versions
+- Updated Bybit custom REST client implementation
+- Updated exchange type definitions and implementations for Bitget, Bybit, and OKX
+- Updated Binance exchange connector implementation
+
 ## [1.0.2] - 2025-06-26
 
 ### Added

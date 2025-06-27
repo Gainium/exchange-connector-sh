@@ -1342,28 +1342,31 @@ class BybitExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('latestPrice', 'get', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .getTickers({ category: this.getCategory(), symbol })
-      .then((price) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (price.retMsg === 'OK') {
-          return this.returnGood<number>(timeProfile)(
-            parseFloat(price.result.list[0]?.lastPrice || '0'),
-          )
-        }
-        return this.handleBybitErrors(
-          this.latestPrice,
-          symbol,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BybitError(price.retMsg, price.retCode))
-      })
-      .catch(
-        this.handleBybitErrors(
-          this.latestPrice,
-          symbol,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+    return (
+      this.client
+        //@ts-ignore
+        .getTickers({ category: this.getCategory(), symbol })
+        .then((price) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (price.retMsg === 'OK') {
+            return this.returnGood<number>(timeProfile)(
+              parseFloat(price.result.list[0]?.lastPrice || '0'),
+            )
+          }
+          return this.handleBybitErrors(
+            this.latestPrice,
+            symbol,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          )(new BybitError(price.retMsg, price.retCode))
+        })
+        .catch(
+          this.handleBybitErrors(
+            this.latestPrice,
+            symbol,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
+        )
+    )
   }
 
   /** Open order function
@@ -1596,31 +1599,34 @@ class BybitExchange extends AbstractExchange implements Exchange {
       timeProfile
     const category = this.getCategory()
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .getTickers({ category })
-      .then((res) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (res.retMsg === 'OK') {
-          return this.returnGood<AllPricesResponse[]>(timeProfile)(
-            (res.result.category === category ? res.result.list : []).map(
-              (k) => ({
-                pair: k.symbol,
-                price: parseFloat(k.lastPrice),
-              }),
-            ),
-          )
-        }
-        return this.handleBybitErrors(
-          this.getAllPrices,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BybitError(res.retMsg, res.retCode))
-      })
-      .catch(
-        this.handleBybitErrors(
-          this.getAllPrices,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+    return (
+      this.client
+        //@ts-ignore
+        .getTickers({ category })
+        .then((res) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (res.retMsg === 'OK') {
+            return this.returnGood<AllPricesResponse[]>(timeProfile)(
+              (res.result.category === category ? res.result.list : []).map(
+                (k) => ({
+                  pair: k.symbol,
+                  price: parseFloat(k.lastPrice),
+                }),
+              ),
+            )
+          }
+          return this.handleBybitErrors(
+            this.getAllPrices,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          )(new BybitError(res.retMsg, res.retCode))
+        })
+        .catch(
+          this.handleBybitErrors(
+            this.getAllPrices,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
+        )
+    )
   }
 
   /**

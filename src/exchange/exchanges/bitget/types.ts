@@ -1,3 +1,5 @@
+import { FuturesOpenOrderV2 } from 'bitget-api'
+
 export type SpotAccountType = {
   userId: string
   inviterId: string
@@ -109,7 +111,7 @@ export type FuturesCancelOrder = {
 }
 
 export type FuturesAllOpenOrders = {
-  entrustedList: FuturesOrder[]
+  entrustedList: FuturesOpenOrderV2[]
   endId: string
 }
 

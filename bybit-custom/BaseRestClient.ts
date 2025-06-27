@@ -1,13 +1,19 @@
+/* eslint-disable @typescript-eslint/no-empty-object-type */
 import axios, { AxiosRequestConfig, AxiosResponse, Method } from 'axios'
+import https from 'https'
 
 import {
-  REST_CLIENT_TYPE_ENUM,
   RestClientOptions,
   RestClientType,
   getRestBaseUrl,
+  parseRateLimitHeaders,
   serializeParams,
 } from 'bybit-api/lib/util/requestUtils'
-import { signMessage } from 'bybit-api/lib/util/node-support'
+import {
+  SignAlgorithm,
+  SignEncodeMethod,
+  signMessage,
+} from 'bybit-api/lib/util/webCryptoAPI'
 
 const ENABLE_HTTP_TRACE =
   typeof process === 'object' &&
@@ -15,6 +21,14 @@ const ENABLE_HTTP_TRACE =
   process.env.BYBITTRACE
 
 if (ENABLE_HTTP_TRACE) {
+  // axios.interceptors.request.use((request) => {
+  //   console.log(
+  //     new Date(),
+  //     'Starting Request',
+  //     JSON.stringify(request, null, 2)
+  //   );
+  //   return request;
+  // });
   axios.interceptors.response.use((response) => {
     console.log(new Date(), 'Response:', {
       request: {
@@ -39,8 +53,6 @@ interface SignedRequestContext {
   timestamp?: number
   api_key?: string
   recv_window?: number
-  // spot v1 is diff from the rest...
-  recvWindow?: number
 }
 
 interface SignedRequest<T> {
@@ -55,9 +67,13 @@ interface SignedRequest<T> {
 interface UnsignedRequest<T> {
   originalParams: T
   paramsWithSign: T
+  serializedParams: string
+  sign?: string
+  timestamp?: number
+  recvWindow?: number
 }
 
-type SignMethod = 'v2auth' | 'v5auth'
+type SignMethod = 'v5auth'
 
 export default abstract class BaseRestClient {
   private timeOffset: number | null = null
@@ -88,7 +104,7 @@ export default abstract class BaseRestClient {
 
   /**
    * Create an instance of the REST client. Pass API credentials in the object in the first parameter.
-   * @param {RestClientOptions} [restClientOptions={}] options to configure REST API connectivity
+   * @param {RestClientOptions} [restOptions={}] options to configure REST API connectivity
    * @param {AxiosRequestConfig} [networkOptions={}] HTTP networking options for axios
    */
   constructor(
@@ -119,6 +135,16 @@ export default abstract class BaseRestClient {
       ...networkOptions,
     }
 
+    // If enabled, configure a https agent with keepAlive enabled
+    if (this.options.keepAlive) {
+      // For more advanced configuration, raise an issue on GitHub or use the "networkOptions"
+      // parameter to define a custom httpsAgent with the desired properties
+      this.globalRequestOptions.httpsAgent = new https.Agent({
+        keepAlive: true,
+        keepAliveMsecs: this.options.keepAliveMsecs,
+      })
+    }
+
     this.baseUrl = getRestBaseUrl(!!this.options.testnet, restOptions)
     this.key = this.options.key
     this.secret = this.options.secret
@@ -131,13 +157,8 @@ export default abstract class BaseRestClient {
 
     if (this.options.enable_time_sync) {
       this.syncTime()
-
       setInterval(this.syncTime.bind(this), +this.options.sync_interval_ms!)
     }
-  }
-
-  private isSpotV1Client() {
-    return this.clientType === REST_CLIENT_TYPE_ENUM.spot
   }
 
   get(endpoint: string, params?: any) {
@@ -173,6 +194,13 @@ export default abstract class BaseRestClient {
     params?: TParams,
     isPublicApi?: false | undefined,
   ): Promise<SignedRequest<TParams>>
+
+  private async prepareSignParams<TParams extends SignedRequestContext = any>(
+    method: Method,
+    signMethod: SignMethod,
+    params?: TParams,
+    isPublicApi?: boolean,
+  ): Promise<SignedRequest<TParams> | UnsignedRequest<TParams>>
 
   private async prepareSignParams<TParams extends SignedRequestContext = any>(
     method: Method,
@@ -228,56 +256,36 @@ export default abstract class BaseRestClient {
       }
     }
 
-    // USDC endpoints, unified margin and a few others use a different way of authenticating requests (headers instead of params)
-    if (this.clientType === REST_CLIENT_TYPE_ENUM.v3) {
-      const signResult = await this.prepareSignParams(
-        method,
-        'v5auth',
-        params,
-        false,
-      )
+    const signResult = await this.prepareSignParams(
+      method,
+      'v5auth',
+      params,
+      isPublicApi,
+    )
 
-      const headers = {
-        'X-BAPI-SIGN-TYPE': 2,
-        'X-BAPI-API-KEY': this.key,
-        'X-BAPI-TIMESTAMP': signResult.timestamp,
-        'X-BAPI-SIGN': signResult.sign,
-        'X-BAPI-RECV-WINDOW': signResult.recvWindow,
-        ...options.headers,
-      }
+    const headers: AxiosRequestConfig['headers'] = {
+      'X-BAPI-SIGN-TYPE': 2,
+      'X-BAPI-API-KEY': this.key,
+      'X-BAPI-TIMESTAMP': signResult.timestamp,
+      'X-BAPI-SIGN': signResult.sign,
+      'X-BAPI-RECV-WINDOW': signResult.recvWindow,
+      ...options.headers,
+    }
 
-      if (method === 'GET') {
-        return {
-          ...options,
-          headers,
-          params: signResult.originalParams,
-        }
-      }
-
+    if (method === 'GET') {
       return {
         ...options,
         headers,
-        data: signResult.originalParams,
-      }
-    }
-
-    const signResult = await this.prepareSignParams(
-      method,
-      'v2auth',
-      params,
-      false,
-    )
-
-    if (method === 'GET' || this.isSpotV1Client()) {
-      return {
-        ...options,
-        params: signResult.paramsWithSign,
+        url: signResult.serializedParams
+          ? options.url + '?' + signResult.serializedParams
+          : options.url,
       }
     }
 
     return {
       ...options,
-      data: signResult.paramsWithSign,
+      headers,
+      data: signResult.originalParams,
     }
   }
 
@@ -311,7 +319,17 @@ export default abstract class BaseRestClient {
     return axios(options)
       .then((response) => {
         if (response.status == 200) {
-          return response.data
+          const perAPIRateLimits = this.options.parseAPIRateLimits
+            ? parseRateLimitHeaders(
+                response.headers,
+                this.options.throwOnFailedRateLimitParse === true,
+              )
+            : undefined
+
+          return {
+            rateLimitApi: perAPIRateLimits,
+            ...response.data,
+          }
         }
 
         throw response
@@ -349,15 +367,22 @@ export default abstract class BaseRestClient {
     }
   }
 
+  private async signMessage(
+    paramsStr: string,
+    secret: string,
+    method: SignEncodeMethod,
+    algorithm: SignAlgorithm,
+  ): Promise<string> {
+    if (typeof this.options.customSignMessageFn === 'function') {
+      return this.options.customSignMessageFn(paramsStr, secret)
+    }
+    return await signMessage(paramsStr, secret, method, algorithm)
+  }
+
   /**
    * @private sign request and set recv window
    */
-  private async signRequest<
-    T extends SignedRequestContext | Record<string, unknown> = Record<
-      string,
-      unknown
-    >,
-  >(
+  private async signRequest<T extends SignedRequestContext | {} = {}>(
     data: T,
     method: Method,
     signMethod: SignMethod,
@@ -401,41 +426,19 @@ export default abstract class BaseRestClient {
 
       const paramsStr = timestamp + key + recvWindow + signRequestParams
 
-      res.sign = await signMessage(paramsStr, this.secret)
-      res.serializedParams = signRequestParams
-      return res
-    }
-
-    // spot/v2 derivatives
-    if (signMethod === 'v2auth') {
-      res.originalParams.api_key = key
-      res.originalParams.timestamp = timestamp
-
-      // Optional, set to 5000 by default. Increase if timestamp/recv_window errors are seen.
-      if (recvWindow) {
-        if (this.isSpotV1Client()) {
-          res.originalParams.recvWindow = recvWindow
-        } else {
-          res.originalParams.recv_window = recvWindow
-        }
-      }
-      const sortProperties = true
-      const encodeValues = false
-
-      res.serializedParams = serializeParams(
-        res.originalParams,
-        strictParamValidation,
-        sortProperties,
-        encodeValues,
+      res.sign = await this.signMessage(
+        paramsStr,
+        this.secret,
+        'hex',
+        'SHA-256',
       )
-      res.sign = await signMessage(res.serializedParams, this.secret)
 
-      // @ts-ignore
-      res.paramsWithSign = {
-        ...res.originalParams,
-        sign: res.sign,
-      }
+      res.serializedParams = signRequestParams
 
+      // console.log('sign req: ', {
+      //   req: paramsStr,
+      //   sign: res.sign,
+      // });
       return res
     }
 

@@ -1,8 +1,4 @@
-import {
-  APIResponseV3 as APIResponse,
-  OrderSide,
-  OrderTypeSpot,
-} from 'bybit-api'
+import { APIResponseV3 as APIResponse, OrderSide, OrderTypeV5 } from 'bybit-api'
 
 export type BybitGetOrderResponse = APIResponse<BybitOrder>
 
@@ -35,7 +31,7 @@ export type BybitCancelOrder = {
   orderQty: string
   execQty: string
   timeInForce: string
-  orderType: OrderTypeSpot
+  orderType: OrderTypeV5
   side: OrderSide
 }
 
@@ -68,7 +64,7 @@ export type BybitOrder = {
   avgPrice: string
   status: BybitOrderStatus
   timeInForce: string
-  orderType: OrderTypeSpot
+  orderType: OrderTypeV5
   side: string
   stopPrice: string
   icebergQty: string
@@ -97,7 +93,7 @@ export type BybitSubmitOrderResultData = {
   createTime: string
   orderPrice: string
   orderQty: string
-  orderType: OrderTypeSpot
+  orderType: OrderTypeV5
   side: OrderSide
   status: BybitOrderStatus
   timeInForce: string

@@ -711,7 +711,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     const category = this.getCategory()
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .getInstruments(this.futures ? 'SWAP' : 'SPOT')
+      .getInstruments({ instType: this.futures ? 'SWAP' : 'SPOT' })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res?.length) {
@@ -856,7 +856,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     await this.client
-      .getFeeRates(this.futures ? 'SWAP' : 'SPOT')
+      .getFeeRates({ instType: this.futures ? 'SWAP' : 'SPOT' })
       .then(async (fees) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (fees.length) {
@@ -1197,11 +1197,12 @@ class OKXExchange extends AbstractExchange implements Exchange {
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .getCandles(
-        this.updateSymbol(symbol),
-        this.convertInterval(interval),
-        data,
-      )
+      .getCandles({
+        instId: this.updateSymbol(symbol),
+        bar: this.convertInterval(interval),
+        before: data.before,
+        after: data.after,
+      })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<CandleResponse[]>(timeProfile)(
@@ -1273,11 +1274,12 @@ class OKXExchange extends AbstractExchange implements Exchange {
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .getHistoricCandles(
-        this.updateSymbol(symbol),
-        this.convertInterval(interval),
-        data,
-      )
+      .getHistoricCandles({
+        instId: this.updateSymbol(symbol),
+        bar: this.convertInterval(interval),
+        before: data.before,
+        after: data.after,
+      })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<CandleResponse[]>(timeProfile)(
@@ -1315,7 +1317,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .getTickers(this.futures ? 'SWAP' : 'SPOT')
+      .getTickers({ instType: this.futures ? 'SWAP' : 'SPOT' })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res.length) {

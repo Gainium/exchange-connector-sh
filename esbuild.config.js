@@ -10,7 +10,7 @@ const buildOptions = {
   target: 'node20',
   format: 'cjs',
   sourcemap: true,
-  minify: false, // Set to true for production minification
+  minify: true, // Set to true for production minification
   external: [
     // Mark all node_modules as external to avoid bundling them
     // This is important for NestJS apps as some modules need to be external

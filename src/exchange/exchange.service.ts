@@ -32,7 +32,7 @@ import verifiers from './helpers/verify'
 import { getCandles, getPrices } from './helpers/additionalApis'
 import { HttpException } from '@nestjs/common'
 import kucoinMethods from './exchanges/kucoin/api'
-import Bybit from 'src/exchange/exchanges/bybit'
+import Bybit from './exchanges/bybit'
 
 export class ExchangeService {
   async getLatestPriceInExchange(

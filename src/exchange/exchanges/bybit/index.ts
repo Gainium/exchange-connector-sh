@@ -40,7 +40,7 @@ import {
   AccountMarginModeV5,
   CategoryCursorListV5,
 } from 'bybit-api'
-import { RestClientV5 as BybitOrderClient } from '../../../../bybit-custom/rest-client-v5'
+import { RestClientV5 as BybitOrderClient } from '../../../bybit-custom/rest-client-v5'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'

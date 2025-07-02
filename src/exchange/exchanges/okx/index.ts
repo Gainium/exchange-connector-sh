@@ -36,7 +36,7 @@ import {
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
-import { RestClient as OKXOrderRestClient } from '../../../../okx-custom/rest-client'
+import { RestClient as OKXOrderRestClient } from '../../../okx-custom/rest-client'
 import { round } from '../../../utils/math'
 
 class OKXError extends Error {

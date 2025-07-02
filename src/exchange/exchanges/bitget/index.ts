@@ -30,7 +30,7 @@ import {
   SpotOrderInfoV2 as _SpotOrderInfoV2,
   type RestClientOptions,
 } from 'bitget-api'
-import { RestClientV2 as BitgetOrderClient } from '../../../../bitget-custom/rest-client-v2'
+import { RestClientV2 as BitgetOrderClient } from '../../../bitget-custom/rest-client-v2'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'

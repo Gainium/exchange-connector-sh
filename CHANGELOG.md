@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2025-07-10
+
+### Added
+
+- Added `futures_changeMarginType` method to KuCoin exchange implementation
+- Support for switching between ISOLATED and CROSS margin modes in KuCoin futures
+- Enhanced futures trading capabilities with margin mode management
+
 ## [1.0.4] - 2025-06-30
 
 ### Changed

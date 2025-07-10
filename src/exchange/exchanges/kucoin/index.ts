@@ -1097,11 +1097,57 @@ class KucoinExchange extends AbstractExchange implements Exchange {
     _symbol: string,
     margin: MarginType,
     _leverage: number,
+    timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<MarginType>> {
     if (!this.futures) {
       return this.errorFutures(this.getEmptyTimeProfile())
     }
-    return this.returnGood<MarginType>(this.getEmptyTimeProfile())(margin)
+    const symbols: string[] = []
+    if (!_symbol) {
+      const allSymbols = await this.futures_getAllExchangeInfo()
+      if (allSymbols.status !== StatusEnum.ok) {
+        return allSymbols
+      }
+      allSymbols.data.forEach((s) => {
+        symbols.push(this.convertSymbolToKucoin(s.pair))
+      })
+    } else {
+      symbols.push(this.convertSymbolToKucoin(_symbol))
+    }
+    for (const symbol of symbols) {
+      timeProfile =
+        (await this.checkLimits(
+          'futures_changeMarginMode',
+          LimitType.futures,
+          3,
+        )) || timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      const result = await this.client
+        .changeMarginMode({
+          symbol,
+          marginMode: margin === MarginType.CROSSED ? 'CROSS' : 'ISOLATED',
+        })
+        .then(async (symbols) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (symbols.status === StatusEnum.ok) {
+            return this.returnGood<MarginType>(timeProfile)(margin)
+          }
+          return this.handleKucoinErrors(
+            this.futures_changeMarginType,
+            timeProfile,
+          )(new KucoinError(symbols.reason, symbols.reasonCode))
+        })
+        .catch(
+          this.handleKucoinErrors(
+            this.futures_changeMarginType,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
+        )
+      if (result.status === StatusEnum.notok) {
+        return result
+      }
+    }
+    return this.returnGood<MarginType>(timeProfile)(margin)
   }
 
   async futures_getHedge(_symbol?: string): Promise<BaseReturn<boolean>> {

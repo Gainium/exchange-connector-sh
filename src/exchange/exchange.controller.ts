@@ -17,6 +17,7 @@ import {
   TradeTypeEnum,
   CoinbaseKeysType,
   OKXSource,
+  BybitHost,
 } from './types'
 import { ExchangeService } from './exchange.service'
 
@@ -28,6 +29,7 @@ export type AuthData = {
   keystype?: CoinbaseKeysType
   okxsource?: OKXSource
   code?: string
+  bybithost?: BybitHost
 }
 
 export type CreateOrderDto = {

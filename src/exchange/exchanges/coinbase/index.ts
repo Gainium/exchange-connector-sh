@@ -88,6 +88,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
     keysType?: CoinbaseKeysType,
     _okxSource?: string,
     _code?: string,
+    _bybitHost?: string,
   ) {
     super({ key, secret })
     const options =
@@ -504,7 +505,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
         if (balances.pagination.has_next) {
           const fullResult = await this.getBalance(
             {
-              after: balances.pagination.before,
+              cursor: balances.pagination.cursor,
               limit: 250,
             },
             timeProfile,

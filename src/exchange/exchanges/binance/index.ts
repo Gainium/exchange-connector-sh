@@ -95,6 +95,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     _passphrase?: string,
     _environment?: string,
     _code?: string,
+    _bybitHost?: string,
   ) {
     super({ key, secret })
     try {

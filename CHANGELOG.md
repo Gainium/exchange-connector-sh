@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2025-07-16
+
+### Added
+- Added support for Bybit regional hosts (com, eu, nl, tr, kz, ge)
+- New `BybitHost` enum with regional API endpoint mappings
+- Enhanced Bybit exchange implementation to support host selection
+- Added `bybitHost` parameter to exchange factory and verification helpers
+
+### Changed
+- Updated exchange service to accept `bybitHost` parameter
+- Modified exchange controller to handle Bybit host configuration
+- Enhanced verification helpers to support Bybit host validation
+- Updated Bybit exchange constructor to accept optional host parameter
+
+### Fixed
+- Coinbase pagination
+
 ## [1.0.5] - 2025-07-10
 
 ### Added

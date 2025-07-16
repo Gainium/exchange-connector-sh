@@ -5,6 +5,7 @@ import Bybit from '../exchanges/bybit'
 import OKX from '../exchanges/okx'
 import Coinbase from '../exchanges/coinbase'
 import {
+  BybitHost,
   CoinbaseKeysType,
   ExchangeDomain,
   ExchangeEnum,
@@ -111,6 +112,7 @@ const verifyBybit = async (
   tradeType: TradeTypeEnum,
   key: string,
   secret: string,
+  bybitHost?: BybitHost,
 ): Promise<VerifyResponse> => {
   const client = new Bybit(
     tradeType === TradeTypeEnum.spot
@@ -120,6 +122,12 @@ const verifyBybit = async (
         : Futures.coinm,
     key,
     secret,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    bybitHost,
   )
   return await client
     .getApiPermission()
@@ -216,6 +224,7 @@ const verifyExchange = async (
   passphrase?: string,
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
+  bybitHost?: BybitHost,
 ): Promise<VerifyResponse> => {
   if (
     [
@@ -242,7 +251,7 @@ const verifyExchange = async (
       ExchangeEnum.bybitUsdm,
     ].includes(provider)
   ) {
-    return verifyBybit(tradeType, key, secret)
+    return verifyBybit(tradeType, key, secret, bybitHost)
   }
   if (
     [

@@ -337,3 +337,21 @@ export type RebateOverview = {
   rebateVol: string
   time: number
 }
+
+export enum BybitHost {
+  eu = 'eu',
+  com = 'com',
+  nl = 'nl',
+  tr = 'tr',
+  kz = 'kz',
+  ge = 'ge',
+}
+
+export const bybitHostMap: Record<BybitHost, string> = {
+  [BybitHost.eu]: 'https://api.bybit.eu',
+  [BybitHost.com]: 'https://api.bybit.com',
+  [BybitHost.nl]: 'https://api.bybit.nl',
+  [BybitHost.tr]: 'https://api.bybit-tr.com',
+  [BybitHost.kz]: 'https://api.bybit.kz',
+  [BybitHost.ge]: 'https://api.bybitgeorgia.ge',
+}

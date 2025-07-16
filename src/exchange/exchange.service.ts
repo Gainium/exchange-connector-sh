@@ -19,6 +19,7 @@ import {
   RebateRecord,
   RebateOverview,
   OKXSource,
+  BybitHost,
 } from './types'
 import AbstractExchange from './abstractExchange'
 import ExchangeChooser from './helpers/exchangeChooser'
@@ -107,6 +108,8 @@ export class ExchangeService {
       auth.passphrase,
       auth.keystype,
       auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).cancelOrder(body)
   }
 
@@ -121,6 +124,8 @@ export class ExchangeService {
       auth.passphrase,
       auth.keystype,
       auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getOrder({ symbol: data.symbol, newClientOrderId: data.newClientOrderId })
   }
 
@@ -135,6 +140,8 @@ export class ExchangeService {
       auth.passphrase,
       auth.keystype,
       auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getAllOpenOrders(data.symbol, data.returnOrders)
   }
 
@@ -150,6 +157,7 @@ export class ExchangeService {
       auth.keystype,
       auth.okxsource,
       auth.code,
+      auth.bybithost,
     ).openOrder(body)
   }
 
@@ -163,6 +171,8 @@ export class ExchangeService {
       auth.passphrase,
       auth.keystype,
       auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getAllUserFees()
   }
 
@@ -174,6 +184,8 @@ export class ExchangeService {
       auth.passphrase,
       auth.keystype,
       auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getUserFees(symbol)
   }
 
@@ -185,6 +197,8 @@ export class ExchangeService {
       auth.passphrase,
       auth.keystype,
       auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getBalance()
   }
 
@@ -200,6 +214,7 @@ export class ExchangeService {
       auth.passphrase ?? '',
       auth.keystype,
       auth.okxsource,
+      auth.bybithost,
     )
   }
 
@@ -218,6 +233,7 @@ export class ExchangeService {
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
     code?: string,
+    bybitHost?: BybitHost,
   ): AbstractExchange {
     const factory = ExchangeChooser.chooseExchangeFactory(exchange)
     if (!factory) {
@@ -231,6 +247,7 @@ export class ExchangeService {
       keysType,
       okxSource,
       code,
+      bybitHost,
     )
   }
 
@@ -271,6 +288,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).futures_changeLeverage(data.symbol, data.leverage)
   }
 
@@ -283,6 +304,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).futures_setHedge(data.value)
   }
 
@@ -295,6 +320,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).futures_getHedge(data.symbol)
   }
 
@@ -307,6 +336,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).futures_changeMarginType(data.symbol, data.margin, data.leverage)
   }
 
@@ -318,6 +351,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).futures_leverageBracket()
   }
 
@@ -330,6 +367,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).futures_getPositions(body.symbol)
   }
 
@@ -339,6 +380,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getUid()
   }
 
@@ -351,6 +396,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getAffiliate(uid)
   }
 
@@ -365,6 +414,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getRebateRecords(timestamp, startTime, endTime)
   }
 
@@ -377,6 +430,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).getRebateOverview(timestamp)
   }
 
@@ -389,6 +446,10 @@ export class ExchangeService {
       auth.key,
       auth.secret,
       auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
     ).cancelOrderByOrderIdAndSymbol(body)
   }
 }

@@ -21,6 +21,8 @@ import {
   TimeProfile,
   RebateOverview,
   RebateRecord,
+  BybitHost,
+  bybitHostMap,
 } from '../../types'
 import {
   RestClientV5 as BybitClient,
@@ -63,8 +65,6 @@ class BybitExchange extends AbstractExchange implements Exchange {
   private retry: number
   /** Array of error codes, after which retry attempt is executed */
   private retryErrors: string[]
-  /** Error code that might mean account ip 30 minutes ban */
-  private ipBlockError: string
   private makerFee: number
   private takerFee: number
   protected futures?: Futures
@@ -75,11 +75,12 @@ class BybitExchange extends AbstractExchange implements Exchange {
     futures: Futures,
     key: string,
     secret: string,
+    _passphrase?: string,
     _environment?: string,
     _keysType?: string,
     _okxSource?: string,
-    _?: string,
     code?: string,
+    bybitHost?: BybitHost,
   ) {
     super({ key, secret })
     const options = {
@@ -87,6 +88,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
       secret: this.secret ?? '',
       testnet: process.env.ENV === 'sandbox',
       recv_window: 30000,
+      baseUrl: bybitHostMap[bybitHost ?? BybitHost.com] || bybitHostMap.com,
     }
     this.client = new BybitClient(options)
     this.orderClient = new BybitOrderClient(options, {
@@ -104,7 +106,6 @@ class BybitExchange extends AbstractExchange implements Exchange {
       '502',
       '12149',
     ]
-    this.ipBlockError = '403'
     this.makerFee = 0.001
     this.takerFee = 0.001
     this.futures = futures === Futures.null ? this.futures : futures

@@ -356,6 +356,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getBalance', 'request', 5, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getBalance ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresAccountInfo({ recvWindow: this.recvWindow })
@@ -486,6 +497,18 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('openOrder', 'order', 1, timeProfile)) ||
       timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_openOrder ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     const {
       symbol,
       side,
@@ -525,7 +548,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     if (typeof positionSide !== 'undefined') {
       orderData.positionSide = positionSide
     }
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return (
       this.usdm
         ? this.client.futuresOrder({ ...orderData, newOrderRespType: 'RESULT' })
@@ -624,13 +646,24 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('getOrder', 'request', 1, timeProfile)) ||
       timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getOrder ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     const { symbol, newClientOrderId } = data
     const input = {
       symbol,
       origClientOrderId: newClientOrderId,
       recvWindow: this.recvWindow,
     }
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return (
       this.usdm
         ? this.client.futuresGetOrder(input)
@@ -711,6 +744,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_latestPrice ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresMarkPrice()
@@ -875,6 +919,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       recvWindow: this.recvWindow,
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_cancelOrderByOrderIdAndSymbol ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresCancelOrder(input)
@@ -917,6 +972,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       recvWindow: this.recvWindow,
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_cancelOrder ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresCancelOrder(input)
@@ -1100,6 +1166,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getExchangeInfo', 'request', 1, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getExchangeInfo ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresExchangeInfo()
@@ -1289,6 +1366,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getAllExchangeInfo ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresExchangeInfo()
@@ -1501,6 +1589,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       delete input.symbol
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getAllOpenOrders ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresAllOrders(input)
@@ -1614,6 +1713,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getUserFees', 'request', 20, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getUserFees ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.privateRequest(
@@ -1882,6 +1992,18 @@ class BinanceExchange extends AbstractExchange implements Exchange {
               timeProfile,
             )) || timeProfile
           timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+          if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+            const diff =
+              timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+            if (diff >= this.timeout) {
+              Logger.error(
+                `BINANCE Queue time is too long ${diff / 1000} futures_getCandles ${
+                  this.usdm ? 'usdm' : 'coinm'
+                }`,
+              )
+              return this.returnBad(timeProfile)(new Error('Response timeout'))
+            }
+          }
           await this.client
             .deliveryCandles({
               ...options,
@@ -2067,6 +2189,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       options.endTime = endTime
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getTrades ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresAggTrades(options)
@@ -2207,6 +2340,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       )) || timeProfile
     const input = { symbol, leverage, recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_changeLeverage ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresLeverage(input)
@@ -2245,6 +2389,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       )) || timeProfile
     const input = { recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getHedge ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresPositionMode(input)
@@ -2278,6 +2433,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       timeProfile
     const input = { dualSidePosition: `${value}`, recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_setHedge ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresPositionModeChange(input)
@@ -2313,6 +2479,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       timeProfile
     const input = { symbol, marginType: margin, recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_changeMarginType ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresMarginType(input)
@@ -2354,6 +2531,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       )) || timeProfile
     const input = { recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_getPositions ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresAccountInfo(input)
@@ -2723,6 +2911,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       timeProfile
     const input = { recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_leverageBracket ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return (
       this.usdm
         ? this.client.futuresLeverageBracket(input)

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Binance futures to drop long requests
+- Bump dependencies
 
 ## [1.0.6] - 2025-07-16
 

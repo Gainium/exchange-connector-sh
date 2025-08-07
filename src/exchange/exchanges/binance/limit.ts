@@ -79,7 +79,6 @@ class RawClass {
       return 0
     } else {
       rawCount++
-      Logger.log(rawCount, 'usdmRawCount')
       if (rawCount > rawLimit) {
         return rawTimeframe - (time % rawTimeframe)
       }
@@ -95,7 +94,6 @@ class RawClass {
       return 0
     } else {
       rawCount++
-      Logger.log(rawCount, 'coinmRawCount')
       if (rawCount > rawLimit) {
         return rawTimeframe - (time % rawTimeframe)
       }

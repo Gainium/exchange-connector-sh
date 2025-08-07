@@ -109,7 +109,6 @@ class RawClass {
       return 0
     } else {
       rawCount++
-      Logger.log(rawCount, 'spotRawCount')
       if (rawCount > rawLimit) {
         return rawTimeframe - (time % rawTimeframe)
       }

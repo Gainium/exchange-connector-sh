@@ -1134,12 +1134,18 @@ class KucoinExchange extends AbstractExchange implements Exchange {
           }
           return this.handleKucoinErrors(
             this.futures_changeMarginType,
+            _symbol,
+            margin,
+            _leverage,
             timeProfile,
           )(new KucoinError(symbols.reason, symbols.reasonCode))
         })
         .catch(
           this.handleKucoinErrors(
             this.futures_changeMarginType,
+            _symbol,
+            margin,
+            _leverage,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )

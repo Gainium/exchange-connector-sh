@@ -921,8 +921,8 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
                 +(order.order_configuration as MarketOrder).market_market_ioc
                   .quote_size / +price
               }`
-          : (order.order_configuration as LimitOrderGTC).limit_limit_gtc
-              .base_size,
+          : (order.order_configuration as LimitOrderGTC)?.limit_limit_gtc
+              ?.base_size,
       executedQty: order.filled_size,
       cummulativeQuoteQty: order.filled_value,
       status: orderStatus(),

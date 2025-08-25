@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.11] - 2025-08-25
+
+### Changed
+- Bybit pre launch pairs
+
 ## [1.0.10] - 2025-08-19
 
 ### Fixed

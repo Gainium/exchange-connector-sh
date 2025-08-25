@@ -41,6 +41,7 @@ import {
   SwitchIsolatedMarginParamsV5,
   AccountMarginModeV5,
   CategoryCursorListV5,
+  InstrumentStatusV5,
 } from 'bybit-api'
 import { RestClientV5 as BybitOrderClient } from '../../../bybit-custom/rest-client-v5'
 import limitHelper from './limit'
@@ -925,27 +926,26 @@ class BybitExchange extends AbstractExchange implements Exchange {
       timeProfile
     const category = this.getCategory()
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .getInstrumentsInfo({ category, cursor })
-      .then(async (res) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (res.retMsg === 'OK') {
-          let more = []
-          if (res.result.nextPageCursor) {
-            more =
-              (
-                await this.getAllExchangeInfo(
-                  timeProfile,
-                  res.result.nextPageCursor,
-                )
-              )?.data ?? []
-          }
-          return this.returnGood<(ExchangeInfo & { pair: string })[]>(
-            timeProfile,
-          )(
-            (res.result.category === category ? res.result.list : [])
-              //@ts-ignore
-              .filter((d) => d.status === 'Trading')
+    const result: Map<string, ExchangeInfo & { pair: string }> = new Map()
+    for (const status of (this.futures
+      ? ['Trading', 'PreLaunch']
+      : ['Trading']) as InstrumentStatusV5[]) {
+      await this.client
+        .getInstrumentsInfo({ category, cursor, status })
+        .then(async (res) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (res.retMsg === 'OK') {
+            let more = []
+            if (res.result.nextPageCursor) {
+              more =
+                (
+                  await this.getAllExchangeInfo(
+                    timeProfile,
+                    res.result.nextPageCursor,
+                  )
+                )?.data ?? []
+            }
+            ;(res.result.category === category ? res.result.list : [])
               .map((s) => {
                 if (category === 'spot') {
                   const d = s as SpotInstrumentInfoV5
@@ -1005,20 +1005,26 @@ class BybitExchange extends AbstractExchange implements Exchange {
                   }
                 }
               })
-              .concat(more),
-          )
-        }
-        return this.handleBybitErrors(
-          this.getAllExchangeInfo,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BybitError(res.retMsg, res.retCode))
-      })
-      .catch(
-        this.handleBybitErrors(
-          this.getAllExchangeInfo,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+              .concat(more)
+              .forEach((p) => result.set(p.pair, p))
+            return
+          } else {
+            return this.handleBybitErrors(
+              this.getAllExchangeInfo,
+              this.endProfilerTime(timeProfile, 'exchange'),
+            )(new BybitError(res.retMsg, res.retCode))
+          }
+        })
+        .catch(
+          this.handleBybitErrors(
+            this.getAllExchangeInfo,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
+        )
+    }
+    return this.returnGood<(ExchangeInfo & { pair: string })[]>(timeProfile)([
+      ...result.values(),
+    ])
   }
 
   /** Get all open orders for given pair

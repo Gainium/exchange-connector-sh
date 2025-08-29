@@ -63,9 +63,9 @@ class BybitExchange extends AbstractExchange implements Exchange {
   /** Bybit order client */
   private orderClient: BybitOrderClient
   /** Retry count. Default 10 */
-  private retry: number
+  protected retry: number
   /** Array of error codes, after which retry attempt is executed */
-  private retryErrors: string[]
+  protected retryErrors: string[]
   private makerFee: number
   private takerFee: number
   protected futures?: Futures
@@ -1812,15 +1812,6 @@ class BybitExchange extends AbstractExchange implements Exchange {
             const time = 1000
             Logger.log(
               `Bybit Too many visits wait ${time}s ${timeProfile.attempts} ${
-                cb.name
-              } ${this.key}`,
-            )
-            await sleep(time)
-          }
-          if (`${e.code}` === '403') {
-            const time = 60000 + (timeProfile.attempts - 1) * 1000
-            Logger.log(
-              `Bybit 403 block wait ${time}s ${timeProfile.attempts} ${
                 cb.name
               } ${this.key}`,
             )

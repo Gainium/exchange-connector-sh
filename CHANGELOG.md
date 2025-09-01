@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.13] - 2025-09-01
+
+### Changed
+- Bitget futures total balance calculation
+
 ## [1.0.12] - 2025-08-29
 
 ### Changed

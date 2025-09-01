@@ -341,10 +341,11 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         if (get.code === '00000') {
           const data = get.data as FuturesAssets[]
           data.map((d) => {
+            const im = +((d as any)?.isolatedMargin ?? 0)
             res.push({
               asset: d.marginCoin,
               free: +d.available - +d.locked,
-              locked: +d.locked,
+              locked: +d.locked + im,
             })
           })
         } else {

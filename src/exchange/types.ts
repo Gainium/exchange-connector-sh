@@ -118,6 +118,8 @@ export enum ExchangeEnum {
   bitget = 'bitget',
   bitgetUsdm = 'bitgetUsdm',
   bitgetCoinm = 'bitgetCoinm',
+  hyperliquid = 'hyperliquid',
+  hyperliquidInverse = 'hyperliquidInverse',
 }
 
 export enum ExchangeDomain {

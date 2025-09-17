@@ -1,14 +1,24 @@
 process.env.NODE_ENV = 'testing'
 
-import { Hyperliquid } from 'hyperliquid'
-//let ind = 0
+import HyperliquidExchange from './index'
+import { Futures } from '../../types'
+
+let ind = 0
 
 const count = 1
 
 ;(async () => {
   for (const i of [...Array(count).keys()]) {
-    const sdk = new Hyperliquid({ enableWs: false })
-    const assets = await sdk.info.spot.getSpotMeta(true)
-    console.log(i, JSON.stringify(assets, null, 2))
+    const t = new HyperliquidExchange(Futures.null, '', '')
+    t.getAllExchangeInfo().then((res) => {
+      ind++
+      if (res.status === 'NOTOK') {
+        console.log(`${i} (${ind}) / ${count} | error`)
+        console.log(res.reason)
+      } else {
+        console.log(`${i} (${ind}) / ${count} | done`)
+        res.data.map((r) => console.log(r))
+      }
+    })
   }
 })()

@@ -22,87 +22,11 @@ import {
   RebateOverview,
   RebateRecord,
 } from '../../types'
-import {
-  ClearinghouseState,
-  Hyperliquid,
-  OrderRequest,
-  UserFees,
-  type Meta,
-} from 'hyperliquid'
+import * as hl from '@nktkas/hyperliquid'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { IdMute, IdMutex } from 'src/utils/mutex'
-
-const mutex = new IdMutex()
-
-class HyperliquidError extends Error {
-  code: number
-
-  constructor(message: string, code: number) {
-    super(message)
-    this.code = code
-  }
-}
-
-class HyperliquidAssets {
-  static HyperliquidAssetsInstance: HyperliquidAssets
-  static getInstance() {
-    if (!HyperliquidAssets.HyperliquidAssetsInstance) {
-      HyperliquidAssets.HyperliquidAssetsInstance = new HyperliquidAssets()
-    }
-    return HyperliquidAssets.HyperliquidAssetsInstance
-  }
-
-  private assets: Map<string, number> = new Map()
-  private pairs: Map<number, string> = new Map()
-  private lastUpdate = 0
-  private updateInterval = 20 * 60000
-  private client: Hyperliquid = new Hyperliquid({
-    enableWs: false,
-    disableAssetMapRefresh: true,
-    testnet: process.env.HYPERLIQUIDENV === 'demo',
-  })
-
-  @IdMute(mutex, () => 'getCoinByPair')
-  public async getCoinByPair(pair: string) {
-    if (
-      this.assets.size === 0 ||
-      this.lastUpdate + this.updateInterval < Date.now()
-    ) {
-      await this.updateAssets()
-    }
-    return `${10000 + (this.assets.get(pair) ?? 0)}` || pair.split('-')[0]
-  }
-
-  @IdMute(mutex, () => 'getCoinByPair')
-  public async getPairByCoin(coin: string) {
-    if (
-      this.assets.size === 0 ||
-      this.lastUpdate + this.updateInterval < Date.now()
-    ) {
-      await this.updateAssets()
-    }
-    return this.pairs.get(+coin.replace('@', '')) ?? coin
-  }
-
-  private async updateAssets() {
-    try {
-      const assets = await this.client.info.spot.getSpotMeta(true)
-      const { tokens, universe } = assets
-      universe.forEach((u) => {
-        const base = tokens.find((tk) => tk.index === u.tokens[0])
-        const quote = tokens.find((tk) => tk.index === u.tokens[1])
-        if (base && quote) {
-          this.assets.set(`${base.name}-${quote.name}`, u.tokens[0])
-        }
-      })
-    } catch (e) {
-      Logger.error(`Error updating Hyperliquid assets: ${e.message}`)
-      return
-    }
-  }
-}
 
 type OrderResponseMissing = {
   status: 'unknownOid'
@@ -243,9 +167,87 @@ type CancelOrderResponseError = {
 
 type CancelOrderResponse = CancelOrderResponseSuccess | CancelOrderResponseError
 
+const mutex = new IdMutex()
+
+class HyperliquidError extends Error {
+  code: number
+
+  constructor(message: string, code: number) {
+    super(message)
+    this.code = code
+  }
+}
+
+class HyperliquidAssets {
+  static HyperliquidAssetsInstance: HyperliquidAssets
+  static getInstance() {
+    if (!HyperliquidAssets.HyperliquidAssetsInstance) {
+      HyperliquidAssets.HyperliquidAssetsInstance = new HyperliquidAssets()
+    }
+    return HyperliquidAssets.HyperliquidAssetsInstance
+  }
+
+  private assets: Map<string, number> = new Map()
+  private pairs: Map<number, string> = new Map()
+  private lastUpdate = 0
+  private updateInterval = 20 * 60000
+  private client: hl.InfoClient = new hl.InfoClient({
+    transport: new hl.HttpTransport({
+      isTestnet: process.env.HYPERLIQUIDENV === 'demo',
+    }),
+  })
+
+  @IdMute(mutex, () => 'getCoinByPair')
+  public async getCoinByPair(pair: string) {
+    if (
+      this.assets.size === 0 ||
+      this.lastUpdate + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets()
+    }
+    return `${10000 + (this.assets.get(pair) ?? 0)}` || pair.split('-')[0]
+  }
+
+  @IdMute(mutex, () => 'getCoinByPair')
+  public async getPairByCoin(coin: string) {
+    if (
+      this.assets.size === 0 ||
+      this.lastUpdate + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets()
+    }
+    return this.pairs.get(+coin.replace('@', '')) ?? coin
+  }
+
+  private async updateAssets() {
+    try {
+      await limitHelper.addWeight(20)
+      const assets = await this.client.spotMeta()
+      const { tokens, universe } = assets
+      universe.forEach((u) => {
+        const base = tokens.find((tk) => tk.index === u.tokens[0])
+        const quote = tokens.find((tk) => tk.index === u.tokens[1])
+        if (base && quote) {
+          this.assets.set(`${base.name}-${quote.name}`, u.tokens[0])
+        }
+      })
+      await limitHelper.addWeight(20)
+      const futures = await this.client.meta()
+      futures.universe.forEach((u, i) => {
+        this.assets.set(`${u.name}-USD`, i)
+      })
+    } catch (e) {
+      Logger.error(`Error updating Hyperliquid assets: ${e.message}`)
+      return
+    }
+  }
+}
+
 class HyperliquidExchange extends AbstractExchange implements Exchange {
-  /** Hyperliquid client */
-  protected client: Hyperliquid
+  /** Hyperliquid info client */
+  protected infoClient: hl.InfoClient
+  /** Hyperliquid exchange client */
+  protected exchangeClient: hl.ExchangeClient
   /** Retry count. Default 10 */
   private retry: number
   /** Array of error codes, after which retry attempt is executed */
@@ -263,11 +265,12 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     _code?: string,
   ) {
     super({ key, secret, passphrase })
-    this.client = new Hyperliquid({
-      enableWs: false,
-      privateKey: this.secret,
-      testnet: this.demo,
-      disableAssetMapRefresh: true,
+    this.infoClient = new hl.InfoClient({
+      transport: new hl.HttpTransport({ isTestnet: this.demo }),
+    })
+    this.exchangeClient = new hl.ExchangeClient({
+      transport: new hl.HttpTransport({ isTestnet: this.demo }),
+      wallet: this.secret as `0x${string}`,
     })
     this.retry = 10
     this.retryErrors = ['429']
@@ -302,6 +305,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.futures === Futures.coinm
   }
 
+  get _key() {
+    return this.key as `0x${string}`
+  }
+
   private errorFutures(timeProfile: TimeProfile) {
     return this.returnBad(timeProfile)(new Error('Futures type missed'))
   }
@@ -327,14 +334,16 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('updateLeverage', 1, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      return await this.client.exchange
-        .updateLeverage(symbol, 'cross', leverage)
-        .then((result) => {
+      return await this.exchangeClient
+        .updateLeverage({
+          asset: +(await this.getCoinByPair(symbol, true)),
+          isCross: false,
+          leverage,
+        })
+        .then(() => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-          if (result.status === 'ok') {
-            return this.returnGood<number>(timeProfile)(leverage)
-          }
-          throw new HyperliquidError(result.msg, +result.code)
+
+          return this.returnGood<number>(timeProfile)(leverage)
         })
     } catch (e) {
       this.handleHyperliquidErrors(
@@ -358,10 +367,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const get = await this.client.info.perpetuals.getClearinghouseState(
-        this.key,
-        true,
-      )
+      const get = await this.infoClient.clearinghouseState({
+        user: this._key,
+      })
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       const data = get.marginSummary
@@ -381,8 +389,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.returnGood<FreeAsset>(timeProfile)(res)
   }
 
-  private async getCoinByPair(pair: string) {
-    return this.futures
+  private async getCoinByPair(pair: string, force = false) {
+    return this.futures && !force
       ? pair.split('-')[0]
       : await HyperliquidAssets.getInstance().getCoinByPair(pair)
   }
@@ -410,20 +418,25 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('placeOrder', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    const options: OrderRequest = {
-      coin: await this.getCoinByPair(order.symbol),
-      is_buy: order.side === 'BUY',
-      sz: order.quantity,
-      limit_px: order.type === 'LIMIT' ? order.price : undefined,
-      order_type: {
-        limit: order.type === 'LIMIT' ? { tif: 'Gtc' } : undefined,
-      },
-      reduce_only: order.reduceOnly,
-      cloid: order.newClientOrderId,
-    }
-    return this.client.exchange
-      .placeOrder(options)
-      .then(async (result: PlaceOrderResponse) => {
+    return this.exchangeClient
+      .order({
+        orders: [
+          {
+            a: +(await this.getCoinByPair(order.symbol)),
+            b: order.side === 'BUY',
+            s: `${order.quantity}`,
+            p: `${order.price}`,
+            t: {
+              limit: order.type === 'LIMIT' ? { tif: 'Gtc' } : undefined,
+            },
+            r: order.reduceOnly,
+            c: order.newClientOrderId as `0x${string}`,
+          },
+        ],
+        grouping: 'na',
+      })
+      .then(async (r: any) => {
+        const result: PlaceOrderResponse = r
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if ('error' in result.response.data.statuses[0]) {
           return this.handleHyperliquidErrors(
@@ -460,9 +473,13 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('getOrderStatus', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client.info
-      .getOrderStatus(this.key, data.newClientOrderId, true)
-      .then(async (result: OrderResponse) => {
+    return this.infoClient
+      .orderStatus({
+        user: this._key,
+        oid: data.newClientOrderId as `0x${string}`,
+      })
+      .then(async (r: any) => {
+        const result: OrderResponse = r
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (result.status === 'unknownOid') {
@@ -498,9 +515,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('futuresCancelOrder', 1, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client.exchange
-      .cancelOrderByCloid(order.symbol, order.newClientOrderId)
-      .then(async (result: CancelOrderResponse) => {
+    return this.exchangeClient
+      .cancelByCloid({
+        cancels: [
+          {
+            asset: +(await this.getCoinByPair(order.symbol)),
+            cloid: order.newClientOrderId as `0x${string}`,
+          },
+        ],
+      })
+      .then(async (r: any) => {
+        const result: CancelOrderResponse = r
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.response.data.statuses[0] === 'success') {
           return await this.getOrder(order, timeProfile)
@@ -556,10 +581,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     try {
-      const result = await this.client.info.getFrontendOpenOrders(
-        this.key,
-        true,
-      )
+      const result = await this.infoClient.frontendOpenOrders({
+        user: this._key,
+      })
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       const data = result
@@ -614,29 +638,22 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('placeOrder', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client.info
-      .userFees(this.key, true)
-      .then(
-        async (
-          result: UserFees & {
-            userSpotAddRate: string
-            userSpotCrossRate: string
-          },
-        ) => {
-          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-          return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
-            allPairs.data.map((p) => ({
-              pair: p.pair,
-              maker: +(this.futures
-                ? result.userAddRate
-                : result.userSpotAddRate),
-              taker: +(this.futures
-                ? result.userCrossRate
-                : result.userSpotCrossRate),
-            })),
-          )
-        },
-      )
+    return this.infoClient
+      .userFees({ user: this._key })
+      .then(async (result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
+          allPairs.data.map((p) => ({
+            pair: p.pair,
+            maker: +(this.futures
+              ? result.userAddRate
+              : result.userSpotAddRate),
+            taker: +(this.futures
+              ? result.userCrossRate
+              : result.userSpotCrossRate),
+          })),
+        )
+      })
       .catch(
         this.handleHyperliquidErrors(
           this.getAllUserFees,
@@ -658,10 +675,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     try {
-      const result = await this.client.info.perpetuals.getClearinghouseState(
-        this.key,
-        true,
-      )
+      const result = await this.infoClient.clearinghouseState({
+        user: this._key,
+      })
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       const data = result.assetPositions
@@ -691,14 +707,13 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getFuturesHistoricCandles', 20, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client.info
-      .getCandleSnapshot(
-        await this.getCoinByPair(symbol),
+    return this.infoClient
+      .candleSnapshot({
+        coin: await this.getCoinByPair(symbol),
         interval,
-        from,
-        to,
-        true,
-      )
+        startTime: from,
+        endTime: to,
+      })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -735,7 +750,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getAllMids', 2, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     try {
-      const result = await this.client.info.getAllMids(true)
+      const result = await this.infoClient.allMids()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       const data = Object.entries(result)
@@ -771,18 +786,15 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('updateLeverage', 1, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      return await this.client.exchange
-        .updateLeverage(
-          symbol,
-          margin === MarginType.CROSSED ? 'cross' : 'isolated',
+      return await this.exchangeClient
+        .updateLeverage({
+          asset: +(await this.getCoinByPair(symbol, true)),
+          isCross: margin === MarginType.CROSSED,
           leverage,
-        )
-        .then((result) => {
+        })
+        .then(() => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-          if (result.status === 'ok') {
-            return this.returnGood<MarginType>(timeProfile)(margin)
-          }
-          throw new HyperliquidError(result.msg, +result.code)
+          return this.returnGood<MarginType>(timeProfile)(margin)
         })
     } catch (e) {
       this.handleHyperliquidErrors(
@@ -914,11 +926,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       timeProfile =
         (await this.checkLimits('getMeta', 20, timeProfile)) || timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const get = await this.client.info.perpetuals.getMeta(true)
+      const get = await this.infoClient.meta()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      const data = get.universe as unknown as (Meta['universe'][0] & {
-        isDelisted: boolean
-      })[]
+      const data = get.universe
       data
         .filter((d) => !d.isDelisted)
         .map((d) => {
@@ -965,8 +975,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     timeProfile =
       (await this.checkLimits('getSpotMeta', 20, timeProfile)) || timeProfile
-    return this.client.info.spot
-      .getSpotMeta(true)
+    return this.infoClient
+      .spotMeta()
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -1044,10 +1054,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('getSpotClearinghouseState', 2, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const get = await this.client.info.spot.getSpotClearinghouseState(
-        this.key,
-        true,
-      )
+      const get = await this.infoClient.spotClearinghouseState({
+        user: this._key,
+      })
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       const data = get.balances
@@ -1107,7 +1116,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   }
 
   private async convertPosition(
-    position: ClearinghouseState['assetPositions'][0],
+    position: hl.AssetPosition,
   ): Promise<PositionInfo> {
     return {
       symbol: await this.getPairByCoin(position.position.coin),

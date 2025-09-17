@@ -22,11 +22,16 @@ import {
   RebateOverview,
   RebateRecord,
 } from '../../types'
-import { Hyperliquid, OrderRequest, type Meta } from 'hyperliquid'
+import {
+  ClearinghouseState,
+  Hyperliquid,
+  OrderRequest,
+  UserFees,
+  type Meta,
+} from 'hyperliquid'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
-import { FuturesPosition } from './types'
 import { IdMute, IdMutex } from 'src/utils/mutex'
 
 const mutex = new IdMutex()
@@ -50,6 +55,7 @@ class HyperliquidAssets {
   }
 
   private assets: Map<string, number> = new Map()
+  private pairs: Map<number, string> = new Map()
   private lastUpdate = 0
   private updateInterval = 20 * 60000
   private client: Hyperliquid = new Hyperliquid({
@@ -67,6 +73,17 @@ class HyperliquidAssets {
       await this.updateAssets()
     }
     return `${10000 + (this.assets.get(pair) ?? 0)}` || pair.split('-')[0]
+  }
+
+  @IdMute(mutex, () => 'getCoinByPair')
+  public async getPairByCoin(coin: string) {
+    if (
+      this.assets.size === 0 ||
+      this.lastUpdate + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets()
+    }
+    return this.pairs.get(+coin.replace('@', '')) ?? coin
   }
 
   private async updateAssets() {
@@ -87,6 +104,145 @@ class HyperliquidAssets {
   }
 }
 
+type OrderResponseMissing = {
+  status: 'unknownOid'
+}
+
+type OrderResponseFound = {
+  status: 'order'
+  order: {
+    order: {
+      coin: string
+      side: string
+      limitPx: string
+      sz: string
+      oid: number
+      timestamp: number
+      triggerCondition: string
+      isTrigger: boolean
+      triggerPx: string
+      children: unknown[]
+      isPositionTpsl: boolean
+      reduceOnly: boolean
+      orderType: string
+      origSz: string
+      tif: string
+      cloid: string | null
+    }
+    status:
+      | 'open'
+      | 'filled'
+      | 'canceled'
+      | 'rejected'
+      | 'marginCanceled'
+      | 'vaultWithdrawalCanceled'
+      | 'openInterestCapCanceled'
+      | 'selfTradeCanceled'
+      | 'reduceOnlyCanceled'
+      | 'siblingFilledCanceled'
+      | 'delistedCanceled'
+      | 'liquidatedCanceled'
+      | 'scheduledCancel'
+      | 'tickRejected'
+      | 'minTradeNtlRejected'
+      | 'perpMarginRejected'
+      | 'reduceOnlyRejected'
+      | 'badAloPxRejected'
+      | 'iocCancelRejected'
+      | 'badTriggerPxRejected'
+      | 'marketOrderNoLiquidityRejected'
+      | 'positionIncreaseAtOpenInterestCapRejected'
+      | 'positionFlipAtOpenInterestCapRejected'
+      | 'tooAggressiveAtOpenInterestCapRejected'
+      | 'openInterestIncreaseRejected'
+      | 'insufficientSpotBalanceRejected'
+      | 'oracleRejected'
+      | 'perpMaxPositionRejected'
+    statusTimestamp: number
+  }
+}
+
+type OrderResponse = OrderResponseMissing | OrderResponseFound
+
+type PlaceOrderResponseScheduled = {
+  status: 'ok'
+  response: {
+    type: 'order'
+    data: {
+      statuses: [
+        {
+          resting: {
+            oid: number
+          }
+        },
+      ]
+    }
+  }
+}
+
+type PalceOrderResponseError = {
+  status: 'ok'
+  response: {
+    type: 'order'
+    data: {
+      statuses: [
+        {
+          error: string
+        },
+      ]
+    }
+  }
+}
+
+type PlaceOrderResponseFilled = {
+  status: 'ok'
+  response: {
+    type: 'order'
+    data: {
+      statuses: [
+        {
+          filled: {
+            totalSz: string
+            avgPx: string
+            oid: number
+          }
+        },
+      ]
+    }
+  }
+}
+
+type PlaceOrderResponse =
+  | PlaceOrderResponseScheduled
+  | PalceOrderResponseError
+  | PlaceOrderResponseFilled
+
+type CancelOrderResponseSuccess = {
+  status: 'ok'
+  response: {
+    type: 'cancel'
+    data: {
+      statuses: ['success']
+    }
+  }
+}
+
+type CancelOrderResponseError = {
+  status: 'ok'
+  response: {
+    type: 'cancel'
+    data: {
+      statuses: [
+        {
+          error: 'Order was never placed, already canceled, or filled.'
+        },
+      ]
+    }
+  }
+}
+
+type CancelOrderResponse = CancelOrderResponseSuccess | CancelOrderResponseError
+
 class HyperliquidExchange extends AbstractExchange implements Exchange {
   /** Hyperliquid client */
   protected client: Hyperliquid
@@ -100,7 +256,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     futures: Futures,
     key: string,
     secret: string,
-    passphrase: string,
+    passphrase?: string,
     _environment?: string,
     _keysType?: string,
     _okxSource?: string,
@@ -168,7 +324,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         return this.errorFutures(timeProfile)
       }
       timeProfile =
-        (await this.checkLimits('setFuturesLeverage', 1, timeProfile)) ||
+        (await this.checkLimits('updateLeverage', 1, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       return await this.client.exchange
@@ -225,6 +381,18 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.returnGood<FreeAsset>(timeProfile)(res)
   }
 
+  private async getCoinByPair(pair: string) {
+    return this.futures
+      ? pair.split('-')[0]
+      : await HyperliquidAssets.getInstance().getCoinByPair(pair)
+  }
+
+  private async getPairByCoin(coin: string) {
+    return this.futures
+      ? coin
+      : await HyperliquidAssets.getInstance().getPairByCoin(coin)
+  }
+
   async openOrder(
     order: {
       symbol: string
@@ -239,16 +407,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
-    }
     timeProfile =
       (await this.checkLimits('placeOrder', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     const options: OrderRequest = {
-      coin: this.futures
-        ? order.symbol.split('-')[0]
-        : await HyperliquidAssets.getInstance().getCoinByPair(order.symbol),
+      coin: await this.getCoinByPair(order.symbol),
       is_buy: order.side === 'BUY',
       sz: order.quantity,
       limit_px: order.type === 'LIMIT' ? order.price : undefined,
@@ -260,76 +423,27 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     }
     return this.client.exchange
       .placeOrder(options)
-      .then(
-        async (
-          result:
-            | {
-                status: 'ok'
-                response: {
-                  type: 'order'
-                  data: {
-                    statuses: [
-                      {
-                        resting: {
-                          oid: number
-                        }
-                      },
-                    ]
-                  }
-                }
-              }
-            | {
-                status: 'ok'
-                response: {
-                  type: 'order'
-                  data: {
-                    statuses: [
-                      {
-                        error: string
-                      },
-                    ]
-                  }
-                }
-              }
-            | {
-                status: 'ok'
-                response: {
-                  type: 'order'
-                  data: {
-                    statuses: [
-                      {
-                        filled: {
-                          totalSz: string
-                          avgPx: string
-                          oid: number
-                        }
-                      },
-                    ]
-                  }
-                }
-              },
-        ) => {
-          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-          if ('error' in result.response.data.statuses[0]) {
-            return this.handleHyperliquidErrors(
-              this.openOrder,
-              order,
-              this.endProfilerTime(timeProfile, 'exchange'),
-            )(new HyperliquidError(result.response.data.statuses[0].error, 0))
-          }
-          return await this.getOrder(
-            {
-              symbol: order.symbol,
-              newClientOrderId: `${
-                'filled' in result.response.data.statuses[0]
-                  ? result.response.data.statuses[0].filled.oid
-                  : result.response.data.statuses[0].resting.oid
-              }`,
-            },
-            timeProfile,
-          )
-        },
-      )
+      .then(async (result: PlaceOrderResponse) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if ('error' in result.response.data.statuses[0]) {
+          return this.handleHyperliquidErrors(
+            this.openOrder,
+            order,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          )(new HyperliquidError(result.response.data.statuses[0].error, 0))
+        }
+        return await this.getOrder(
+          {
+            symbol: order.symbol,
+            newClientOrderId: `${
+              'filled' in result.response.data.statuses[0]
+                ? result.response.data.statuses[0].filled.oid
+                : result.response.data.statuses[0].resting.oid
+            }`,
+          },
+          timeProfile,
+        )
+      })
       .catch(
         this.handleHyperliquidErrors(
           this.openOrder,
@@ -343,41 +457,26 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     data: { symbol: string; newClientOrderId: string },
     timeProfile = this.getEmptyTimeProfile(),
   ) {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
-    }
     timeProfile =
-      (await this.checkLimits('getFuturesOrder', 0, timeProfile)) || timeProfile
+      (await this.checkLimits('getOrderStatus', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .getFuturesOrder({
-        symbol: data.symbol,
-        productType,
-        clientOid: data.newClientOrderId,
-      })
-      .then(async (result) => {
+    return this.client.info
+      .getOrderStatus(this.key, data.newClientOrderId, true)
+      .then(async (result: OrderResponse) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          return this.returnGood<CommonOrder>(timeProfile)(
-            this.convertFuturesOrder(data as unknown as FuturesOrderDetailV2),
+
+        if (result.status === 'unknownOid') {
+          return this.returnBad(timeProfile)(
+            new HyperliquidError(result.status, 0),
           )
         }
-        if (
-          result.msg.indexOf('the data of the order cannot be found') !== -1
-        ) {
-          Logger.warn(
-            `Order not found ${data.newClientOrderId}. Wait 1s and retry`,
-          )
-          await sleep(1000)
-          timeProfile.attempts = timeProfile.attempts + 1
-          return this.getOrder(data, timeProfile)
-        }
-        return this.handleHyperliquidErrors(
-          this.getOrder,
-          data,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
+        return this.returnGood<CommonOrder>(timeProfile)(
+          await this.convertOrder(
+            result.order.order,
+            result.order.status,
+            result.order.statusTimestamp,
+          ),
+        )
       })
       .catch(
         this.handleHyperliquidErrors(
@@ -388,94 +487,41 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       )
   }
 
-  async futures_cancelOrder(
+  async cancelOrder(
     order: {
       symbol: string
       newClientOrderId: string
     },
     timeProfile = this.getEmptyTimeProfile(),
   ) {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
-    }
     timeProfile =
-      (await this.checkLimits('futuresCancelOrder', 0, timeProfile)) ||
+      (await this.checkLimits('futuresCancelOrder', 1, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    const productType = this.getProductTypeBySymbol(order.symbol)
-    return this.client
-      .futuresCancelOrder({
-        symbol: order.symbol,
-        productType,
-        clientOid: order.newClientOrderId,
-      })
-      .then(async (result) => {
+    return this.client.exchange
+      .cancelOrderByCloid(order.symbol, order.newClientOrderId)
+      .then(async (result: CancelOrderResponse) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
+        if (result.response.data.statuses[0] === 'success') {
           return await this.getOrder(order, timeProfile)
         }
         return this.handleHyperliquidErrors(
-          this.futures_cancelOrder,
+          this.cancelOrder,
           order,
           this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
+        )(new HyperliquidError(result.response.data.statuses[0].error, 1))
       })
       .catch(
         this.handleHyperliquidErrors(
-          this.futures_cancelOrder,
+          this.cancelOrder,
           order,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
   }
 
-  async futures_cancelOrderByOrderIdAndSymbol(
-    order: {
-      symbol: string
-      orderId: string
-    },
-    timeProfile = this.getEmptyTimeProfile(),
-  ) {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
-    }
-    timeProfile =
-      (await this.checkLimits('futuresCancelOrder', 0, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    const productType = this.getProductTypeBySymbol(order.symbol)
-    return this.client
-      .futuresCancelOrder({
-        symbol: order.symbol,
-        productType,
-        orderId: order.orderId,
-      })
-      .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          return await this.getOrder(
-            { symbol: order.symbol, newClientOrderId: data.clientOid },
-            timeProfile,
-          )
-        }
-        return this.handleHyperliquidErrors(
-          this.futures_cancelOrderByOrderIdAndSymbol,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.futures_cancelOrderByOrderIdAndSymbol,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
-  }
-
-  async futures_latestPrice(symbol: string) {
-    const res = await this.futures_getAllPrices()
+  async latestPrice(symbol: string) {
+    const res = await this.getAllPrices()
     if (res.status === StatusEnum.notok) {
       return res
     }
@@ -484,8 +530,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     )
   }
 
-  async futures_getExchangeInfo(symbol: string) {
-    const res = await this.futures_getAllExchangeInfo()
+  async getExchangeInfo(symbol: string) {
+    const res = await this.getAllExchangeInfo()
     if (res.status === StatusEnum.notok) {
       return res
     }
@@ -494,137 +540,109 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     )
   }
 
-  async futures_getAllOpenOrders(symbol?: string): Promise<BaseReturn<number>>
-  async futures_getAllOpenOrders(
+  async getAllOpenOrders(symbol?: string): Promise<BaseReturn<number>>
+  async getAllOpenOrders(
     symbol?: string,
     returnOrders?: boolean,
   ): Promise<BaseReturn<CommonOrder[]>>
-  async futures_getAllOpenOrders(
+  async getAllOpenOrders(
     symbol?: string,
     returnOrders = false,
     timeProfile = this.getEmptyTimeProfile(),
   ) {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
+    const res: CommonOrder[] = []
+    timeProfile =
+      (await this.checkLimits('getFuturesOpenOrders', 0, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    try {
+      const result = await this.client.info.getFrontendOpenOrders(
+        this.key,
+        true,
+      )
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+      const data = result
+      await Promise.all(
+        (data ?? []).map(async (o) =>
+          res.push(
+            await this.convertOrder(
+              { ...o, children: [], cloid: '', tif: '' },
+              'open',
+            ),
+          ),
+        ),
+      )
+    } catch (e) {
+      return this.handleHyperliquidErrors(
+        this.getAllOpenOrders,
+        symbol,
+        returnOrders,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
     }
 
-    const productTypes = symbol
-      ? ([this.getProductTypeBySymbol(symbol)] as const)
-      : this.productTypes
-    const res: CommonOrder[] = []
-    for (const productType of productTypes) {
-      timeProfile =
-        (await this.checkLimits('getFuturesOpenOrders', 0, timeProfile)) ||
-        timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      try {
-        const result = await this.client.getFuturesOpenOrders({
-          productType,
-          symbol,
-        })
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          ;(data.entrustedList ?? []).map((o) =>
-            res.push(
-              this.convertFuturesOrder(o as unknown as FuturesOrderDetailV2),
-            ),
-          )
-        } else {
-          return this.handleHyperliquidErrors(
-            this.futures_getAllOpenOrders,
-            symbol,
-            returnOrders,
-            this.endProfilerTime(timeProfile, 'exchange'),
-          )(new BitgetError(result.msg, +result.code))
-        }
-      } catch (e) {
-        return this.handleHyperliquidErrors(
-          this.futures_getAllOpenOrders,
-          symbol,
-          returnOrders,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(e?.body?.msg ?? e.message, 0))
-      }
-    }
     return {
       timeProfile,
-      usage: limitHelper.getInstance().getLimits(),
+      usage: limitHelper.getUsage(),
       status: StatusEnum.ok as StatusEnum.ok,
       data: returnOrders ? res : res.length,
     }
   }
 
-  async futures_getUserFees(
-    symbol: string,
-    timeProfile = this.getEmptyTimeProfile(),
-  ) {
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    try {
-      timeProfile =
-        (await this.checkLimits('getTradeRate', 0, timeProfile)) || timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const get = await this.client.getTradeRate({
-        businessType: 'mix',
-        symbol,
-      })
-      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      if (get.code === '00000') {
-        const data = get.data as { makerFeeRate: string; takerFeeRate: string }
-        return this.returnGood<UserFee>(timeProfile)({
-          maker: +data.makerFeeRate,
-          taker: +data.takerFeeRate,
-        })
-      } else {
-        return this.handleHyperliquidErrors(
-          this.futures_getUserFees,
-          symbol,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(get.msg, 0))
-      }
-    } catch (e) {
-      return this.handleHyperliquidErrors(
-        this.futures_getUserFees,
-        symbol,
-        this.endProfilerTime(timeProfile, 'exchange'),
-      )(new BitgetError(e?.body?.msg ?? e.message, 0))
-    }
-  }
-
-  async futures_getAllUserFees(): Promise<
-    BaseReturn<(UserFee & { pair: string })[]>
-  > {
-    const res = await this.futures_getAllExchangeInfo()
+  async getUserFees(symbol: string) {
+    const res = await this.getAllUserFees()
     if (res.status === StatusEnum.notok) {
       return res
     }
-    const fees: (UserFee & { pair: string })[] = []
-    const chunks: (typeof res.data)[] = []
-    for (let i = 0; i < res.data.length; i += 8) {
-      chunks.push(res.data.slice(i, i + 8))
-    }
-    for (const ch of chunks) {
-      await Promise.all(
-        ch.map(async (p) => {
-          const f = await this.futures_getUserFees(p.pair)
-          if (f.status === StatusEnum.notok) {
-            Logger.warn(`Error getting futures fees for ${p.pair} ${f.reason}`)
-            fees.push({ pair: p.pair, maker: p.makerFee, taker: p.takerFee })
-          } else {
-            fees.push({
-              pair: p.pair,
-              maker: f.data.maker,
-              taker: f.data.taker,
-            })
-          }
-        }),
-      )
-    }
-
-    return this.returnGood<(UserFee & { pair: string })[]>(res.timeProfile)(
-      fees,
+    return this.returnGood<UserFee>(res.timeProfile)(
+      res.data.find((p) => p.pair === symbol) ?? {
+        maker: 0,
+        taker: 0,
+        pair: symbol,
+      },
     )
+  }
+
+  async getAllUserFees(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
+    const allPairs = await this.getAllExchangeInfo()
+    if (allPairs.status === StatusEnum.notok) {
+      return allPairs
+    }
+    timeProfile =
+      (await this.checkLimits('placeOrder', 1, timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client.info
+      .userFees(this.key, true)
+      .then(
+        async (
+          result: UserFees & {
+            userSpotAddRate: string
+            userSpotCrossRate: string
+          },
+        ) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
+            allPairs.data.map((p) => ({
+              pair: p.pair,
+              maker: +(this.futures
+                ? result.userAddRate
+                : result.userSpotAddRate),
+              taker: +(this.futures
+                ? result.userCrossRate
+                : result.userSpotCrossRate),
+            })),
+          )
+        },
+      )
+      .catch(
+        this.handleHyperliquidErrors(
+          this.getAllUserFees,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async futures_getPositions(
@@ -634,86 +652,34 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     if (!this.futures) {
       return this.errorFutures(timeProfile)
     }
-    const productTypes = symbol
-      ? ([this.getProductTypeBySymbol(symbol)] as const)
-      : this.productTypes
     const res: PositionInfo[] = []
-    for (const productType of productTypes) {
-      timeProfile =
-        (await this.checkLimits('getFuturesPositions', 0, timeProfile)) ||
-        timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      try {
-        const result = await this.client.getFuturesPositions({
-          productType,
-        })
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          data.map((o) => res.push(this.convertPosition(o)))
-        } else {
-          return this.handleHyperliquidErrors(
-            this.futures_getPositions,
-            symbol,
-            this.endProfilerTime(timeProfile, 'exchange'),
-          )(new BitgetError(result.msg, +result.code))
-        }
-      } catch (e) {
-        return this.handleHyperliquidErrors(
-          this.futures_getPositions,
-          symbol,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(e?.body?.msg ?? e.message, 0))
-      }
+    timeProfile =
+      (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    try {
+      const result = await this.client.info.perpetuals.getClearinghouseState(
+        this.key,
+        true,
+      )
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+      const data = result.assetPositions
+      await Promise.all(
+        data.map(async (o) => res.push(await this.convertPosition(o))),
+      )
+    } catch (e) {
+      return this.handleHyperliquidErrors(
+        this.futures_getPositions,
+        symbol,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
     }
+
     return this.returnGood<PositionInfo[]>(timeProfile)(res)
   }
 
-  private convertInterval(
-    interval: ExchangeIntervals,
-  ): FuturesKlineInterval | SpotKlineInterval {
-    return interval === ExchangeIntervals.oneW
-      ? '1Wutc'
-      : interval === ExchangeIntervals.oneD
-        ? '1Dutc'
-        : interval === ExchangeIntervals.eightH
-          ? '6Hutc'
-          : interval === ExchangeIntervals.fourH
-            ? this.futures
-              ? '4H'
-              : '4h'
-            : interval === ExchangeIntervals.twoH
-              ? this.futures
-                ? '1H'
-                : '1h'
-              : interval === ExchangeIntervals.oneH
-                ? this.futures
-                  ? '1H'
-                  : '1h'
-                : interval === ExchangeIntervals.thirtyM
-                  ? this.futures
-                    ? '30m'
-                    : '30min'
-                  : interval === ExchangeIntervals.fifteenM
-                    ? this.futures
-                      ? '15m'
-                      : '15min'
-                    : interval === ExchangeIntervals.fiveM
-                      ? this.futures
-                        ? '5m'
-                        : '5min'
-                      : interval === ExchangeIntervals.threeM
-                        ? this.futures
-                          ? '1m'
-                          : '1min'
-                        : interval === ExchangeIntervals.oneM
-                          ? this.futures
-                            ? '1m'
-                            : '1min'
-                          : interval
-  }
-
-  async futures_getCandles(
+  async getCandles(
     symbol: string,
     interval: ExchangeIntervals,
     from?: number,
@@ -721,51 +687,36 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     _countData?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ) {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
-    }
     timeProfile =
       (await this.checkLimits('getFuturesHistoricCandles', 20, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    const productType = this.getProductTypeBySymbol(symbol)
-    return this.client
-      .getFuturesHistoricCandles({
-        symbol,
-        productType,
-        startTime: `${from}`,
-        endTime: `${to}`,
-        limit: '200',
-        granularity: this.convertInterval(interval) as FuturesKlineInterval,
-      })
+    return this.client.info
+      .getCandleSnapshot(
+        await this.getCoinByPair(symbol),
+        interval,
+        from,
+        to,
+        true,
+      )
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data as string[][]
-          return this.returnGood<CandleResponse[]>(timeProfile)(
-            data.map((d) => ({
-              open: d[1],
-              high: d[2],
-              low: d[3],
-              close: d[4],
-              volume: d[6],
-              time: +d[0],
-            })),
-          )
-        }
-        return this.handleHyperliquidErrors(
-          this.futures_getCandles,
-          symbol,
-          interval,
-          from,
-          to,
-          _countData,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
+
+        const data = result
+        return this.returnGood<CandleResponse[]>(timeProfile)(
+          data.map((d) => ({
+            open: `${d.o}`,
+            high: `${d.h}`,
+            low: `${d.l}`,
+            close: `${d.c}`,
+            volume: `${d.v}`,
+            time: +d.t,
+          })),
+        )
       })
       .catch(
         this.handleHyperliquidErrors(
-          this.futures_getCandles,
+          this.getCandles,
           symbol,
           interval,
           from,
@@ -776,44 +727,33 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       )
   }
 
-  async futures_getAllPrices(
+  async getAllPrices(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
-    }
     const res: AllPricesResponse[] = []
-    for (const productType of this.productTypes) {
-      timeProfile =
-        (await this.checkLimits('getFuturesAllTickers', 20, timeProfile)) ||
-        timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      try {
-        const result = await this.client.getFuturesAllTickers({
-          productType,
-        })
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          data.map((o) =>
-            res.push({
-              pair: o.symbol,
-              price: +o.lastPr,
-            }),
-          )
-        } else {
-          return this.handleHyperliquidErrors(
-            this.futures_getAllPrices,
-            this.endProfilerTime(timeProfile, 'exchange'),
-          )(new BitgetError(result.msg, +result.code))
-        }
-      } catch (e) {
-        return this.handleHyperliquidErrors(
-          this.futures_getAllPrices,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(e?.body?.msg ?? e.message, 0))
-      }
+    timeProfile =
+      (await this.checkLimits('getAllMids', 2, timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    try {
+      const result = await this.client.info.getAllMids(true)
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+      const data = Object.entries(result)
+      await Promise.all(
+        data.map(async (o) =>
+          res.push({
+            pair: await this.getPairByCoin(o[0]),
+            price: +o[1],
+          }),
+        ),
+      )
+    } catch (e) {
+      return this.handleHyperliquidErrors(
+        this.getAllPrices,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
     }
+
     return this.returnGood<AllPricesResponse[]>(timeProfile)(res)
   }
 
@@ -823,133 +763,58 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<MarginType>> {
-    if (!this.futures) {
-      return this.errorFutures(timeProfile)
-    }
-    timeProfile =
-      (await this.checkLimits('setFuturesMarginMode', 20, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    const productType = this.getProductTypeBySymbol(symbol)
-    return this.client
-      .setFuturesMarginMode({
+    try {
+      if (!this.futures) {
+        return this.errorFutures(timeProfile)
+      }
+      timeProfile =
+        (await this.checkLimits('updateLeverage', 1, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      return await this.client.exchange
+        .updateLeverage(
+          symbol,
+          margin === MarginType.CROSSED ? 'cross' : 'isolated',
+          leverage,
+        )
+        .then((result) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (result.status === 'ok') {
+            return this.returnGood<MarginType>(timeProfile)(margin)
+          }
+          throw new HyperliquidError(result.msg, +result.code)
+        })
+    } catch (e) {
+      this.handleHyperliquidErrors(
+        this.futures_changeMarginType,
         symbol,
-        productType,
-        marginMode: margin === MarginType.ISOLATED ? 'isolated' : 'crossed',
-        marginCoin: this.getMarginCoinBySymbolAndProductType(
-          symbol,
-          productType,
-        ),
-      })
-      .then((result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          return this.returnGood<MarginType>(timeProfile)(margin)
-        }
-        return this.handleHyperliquidErrors(
-          this.futures_changeMarginType,
-          symbol,
-          margin,
-          leverage,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.futures_changeMarginType,
-          symbol,
-          margin,
-          leverage,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+        margin,
+        leverage,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
+    }
   }
 
   async futures_getHedge(
-    symbol?: string,
+    _symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
     if (!this.futures) {
       return this.errorFutures(timeProfile)
     }
-    timeProfile =
-      (await this.checkLimits('getFuturesAccountAsset', 0, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    if (!symbol) {
-      const ex = await this.futures_getAllExchangeInfo()
-      if (ex.status === StatusEnum.notok) {
-        return ex
-      }
-      symbol = ex.data[0].pair
-    }
-    const productType = this.getProductTypeBySymbol(symbol)
-    return this.client
-      .getFuturesAccountAsset({
-        symbol,
-        productType,
-        marginCoin: this.getMarginCoinBySymbolAndProductType(
-          symbol,
-          productType,
-        ),
-      })
-      .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          return this.returnGood<boolean>(timeProfile)(
-            data.posMode === 'hedge_mode',
-          )
-        }
-        return this.handleHyperliquidErrors(
-          this.futures_getHedge,
-          symbol,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.futures_getHedge,
-          symbol,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+    //Hedge is not supported on Hyperliquid yet, always false
+    return this.returnGood<boolean>(timeProfile)(false)
   }
 
   async futures_setHedge(
-    value: boolean,
+    _value: boolean,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
     if (!this.futures) {
       return this.errorFutures(timeProfile)
     }
-    for (const productType of this.productTypes) {
-      timeProfile =
-        (await this.checkLimits('setFuturesPositionMode', 20, timeProfile)) ||
-        timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      try {
-        const result = await this.client.setFuturesPositionMode({
-          productType,
-          posMode: value ? 'hedge_mode' : 'one_way_mode',
-        })
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code !== '00000') {
-          return this.handleHyperliquidErrors(
-            this.futures_setHedge,
-            value,
-            this.endProfilerTime(timeProfile, 'exchange'),
-          )(new BitgetError(result.msg, +result.code))
-        }
-      } catch (e) {
-        return this.handleHyperliquidErrors(
-          this.futures_setHedge,
-          value,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(e?.body?.msg ?? e.message, 0))
-      }
-    }
-    return this.returnGood<boolean>(timeProfile)(value)
+    //Hedge is not supported on Hyperliquid yet, always false
+    return this.returnGood<boolean>(timeProfile)(false)
   }
 
   async futures_leverageBracket(): Promise<BaseReturn<LeverageBracket[]>> {
@@ -970,31 +835,12 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   async getApiPermission(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    timeProfile =
-      (await this.checkLimits('getSpotAccount', 0, timeProfile)) || timeProfile
-    return this.client
-      .getSpotAccount()
-      .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        const data = result.data
-        return this.returnGood<boolean>(timeProfile)(
-          this.futures
-            ? data.authorities.includes('coow')
-            : data.authorities.includes('stow'),
-        )
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.getApiPermission,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+    return this.returnGood<boolean>(timeProfile)(true)
   }
 
   override returnGood<T>(
     timeProfile: TimeProfile,
-    usage = limitHelper.getInstance().getLimits(),
+    usage = limitHelper.getUsage(),
   ) {
     return (r: T) => ({
       status: StatusEnum.ok as StatusEnum.ok,
@@ -1005,10 +851,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     })
   }
 
-  override returnBad(
-    timeProfile: TimeProfile,
-    usage = limitHelper.getInstance().getLimits(),
-  ) {
+  override returnBad(timeProfile: TimeProfile, usage = limitHelper.getUsage()) {
     return (e: Error) => ({
       status: StatusEnum.notok as StatusEnum.notok,
       reason: e.message,
@@ -1018,105 +861,14 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     })
   }
 
-  async cancelOrder({
-    symbol,
-    newClientOrderId,
-  }: {
-    symbol: string
-    newClientOrderId?: string
-  }): Promise<BaseReturn<CommonOrder>> {
-    if (this.futures) {
-      return await this.futures_cancelOrder({ symbol, newClientOrderId })
-    }
-    return await this.spot_cancelOrder({ symbol, newClientOrderId })
-  }
-
-  /** Cancel order
-   * @param {object} order Order info
-   * @param count
-   * @param {string} order.symbol pair
-   * @param {string} order.newClientOrderId order id
-   * @return {Promise<BaseReturn<CommonOrder>>} Order data
-   */
-  async spot_cancelOrder(
-    order: {
-      symbol: string
-      newClientOrderId: string
-    },
-    timeProfile = this.getEmptyTimeProfile(),
-  ): Promise<BaseReturn<CommonOrder>> {
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    timeProfile =
-      (await this.checkLimits('spotCancelOrder', 0, timeProfile)) || timeProfile
-    return this.client
-      .spotCancelOrder({
-        symbol: order.symbol,
-        clientOid: order.newClientOrderId,
-      })
-      .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          return await this.spot_getOrder(order, timeProfile)
-        }
-        return this.handleHyperliquidErrors(
-          this.spot_cancelOrder,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.spot_cancelOrder,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
-  }
-
   async cancelOrderByOrderIdAndSymbol(order: {
     symbol: string
     orderId: string
   }): Promise<BaseReturn<CommonOrder>> {
-    if (this.futures) {
-      return await this.futures_cancelOrderByOrderIdAndSymbol(order)
-    }
-    return await this.spot_cancelOrderByOrderIdAndSymbol(order)
-  }
-
-  async spot_cancelOrderByOrderIdAndSymbol(
-    order: { symbol: string; orderId: string },
-    timeProfile = this.getEmptyTimeProfile(),
-  ): Promise<BaseReturn<CommonOrder>> {
-    timeProfile =
-      (await this.checkLimits('spotCancelOrder', 0, timeProfile)) || timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .spotCancelOrder({
-        symbol: order.symbol,
-        orderId: order.orderId,
-      })
-      .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          return await this.spot_getOrder(
-            { symbol: order.symbol, newClientOrderId: data.clientOid },
-            timeProfile,
-          )
-        }
-        return this.handleHyperliquidErrors(
-          this.spot_cancelOrderByOrderIdAndSymbol,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.spot_cancelOrderByOrderIdAndSymbol,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+    return await this.cancelOrder({
+      symbol: order.symbol,
+      newClientOrderId: order.orderId,
+    })
   }
 
   /** Get exchange info for all pairs
@@ -1269,121 +1021,6 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       )
   }
 
-  async getAllOpenOrders(
-    symbol?: string,
-    returnOrders?: false,
-  ): Promise<BaseReturn<number>>
-  async getAllOpenOrders(
-    symbol?: string,
-    returnOrders?: true,
-  ): Promise<BaseReturn<CommonOrder[]>>
-  async getAllOpenOrders(
-    symbol?: string,
-    returnOrders?: boolean,
-  ): Promise<BaseReturn<CommonOrder[]> | BaseReturn<number>> {
-    if (this.futures) {
-      return await this.futures_getAllOpenOrders(symbol, returnOrders)
-    }
-    return await this.spot_getAllOpenOrders(symbol, returnOrders)
-  }
-
-  /** Get all open orders for given pair
-   * @param {string} symbol symbol to look for
-   * @param {boolean} [returnOrders] return orders or orders count. Default = false
-   * @return {Promise<BaseReturn<CommonOrder[]>> | Promise<BaseReturn<number>>} Array of opened orders or orders count if returnOrders set to true
-   */
-  async spot_getAllOpenOrders(symbol?: string): Promise<BaseReturn<number>>
-  async spot_getAllOpenOrders(
-    symbol?: string,
-    returnOrders?: boolean,
-  ): Promise<BaseReturn<CommonOrder[]>>
-  async spot_getAllOpenOrders(
-    symbol?: string,
-    returnOrders = false,
-    timeProfile = this.getEmptyTimeProfile(),
-  ) {
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    timeProfile =
-      (await this.checkLimits('getSpotOpenOrders', 0, timeProfile)) ||
-      timeProfile
-    return this.client
-      .getSpotOpenOrders({ symbol })
-      .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data
-          return {
-            timeProfile,
-            usage: limitHelper.getInstance().getLimits(),
-            status: StatusEnum.ok as StatusEnum.ok,
-            data: returnOrders
-              ? data.map((d) =>
-                  this.convertSpotOrder(d as unknown as SpotOrderInfoV2),
-                )
-              : data.length,
-          }
-        }
-        return this.handleHyperliquidErrors(
-          this.spot_getAllOpenOrders,
-          symbol,
-          returnOrders,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.spot_getAllOpenOrders,
-          symbol,
-          returnOrders,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
-  }
-
-  async getAllUserFees(): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
-    if (this.futures) {
-      return await this.futures_getAllUserFees()
-    }
-    return await this.spot_getAllUserFees()
-  }
-
-  /** Get user fee for all pairs
-   * @return {Promise<BaseReturn<(UserFee & {pair: string})[]>>} maker and taker fee all pairs
-   */
-  async spot_getAllUserFees(): Promise<
-    BaseReturn<(UserFee & { pair: string })[]>
-  > {
-    const res = await this.spot_getAllExchangeInfo()
-    if (res.status === StatusEnum.notok) {
-      return res
-    }
-    const fees: (UserFee & { pair: string })[] = []
-    const chunks: (typeof res.data)[] = []
-    for (let i = 0; i < res.data.length; i += 8) {
-      chunks.push(res.data.slice(i, i + 8))
-    }
-    for (const ch of chunks) {
-      await Promise.all(
-        ch.map(async (p) => {
-          const f = await this.spot_getUserFees(p.pair)
-          if (f.status === StatusEnum.notok) {
-            Logger.warn(`Error getting spot fees for ${p.pair} ${f.reason}`)
-            fees.push({ pair: p.pair, maker: p.makerFee, taker: p.takerFee })
-          } else {
-            fees.push({
-              pair: p.pair,
-              maker: f.data.maker,
-              taker: f.data.taker,
-            })
-          }
-        }),
-      )
-    }
-    return this.returnGood<(UserFee & { pair: string })[]>(res.timeProfile)(
-      fees,
-    )
-  }
-
   async getBalance(): Promise<BaseReturn<FreeAsset>> {
     if (this.futures) {
       return await this.futures_getBalance()
@@ -1431,374 +1068,71 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.returnGood<FreeAsset>(timeProfile)(res)
   }
 
-  /** Get exchange info for given pair
-   * @param {string} symbol symbol to look for
-   * @param count
-   * @return {Promise<BaseReturn<ExchangeInfo>>} Exchange info about pair
-   */
-
-  async getExchangeInfo(symbol: string): Promise<BaseReturn<ExchangeInfo>> {
-    if (this.futures) {
-      return await this.futures_getExchangeInfo(symbol)
-    }
-    return await this.spot_getExchangeInfo(symbol)
-  }
-
-  async spot_getExchangeInfo(
-    symbol: string,
-  ): Promise<BaseReturn<ExchangeInfo>> {
-    const all = await this.getAllExchangeInfo()
-    if (all.status === StatusEnum.notok) {
-      return all
-    }
-    return this.returnGood<ExchangeInfo>(all.timeProfile)(
-      all.data.find((s) => s.pair === symbol),
-    )
-  }
-
-  async getUserFees(symbol: string): Promise<BaseReturn<UserFee>> {
-    if (this.futures) {
-      return await this.futures_getUserFees(symbol)
-    }
-    return await this.spot_getUserFees(symbol)
-  }
-  /** Get user fee for given pair
-   * @param {string} _symbol symbol to look for
-   * @return {Promise<BaseReturn<UserFee>>} maker and taker fee for given symbol
-   */
-  async spot_getUserFees(
-    symbol: string,
-    timeProfile = this.getEmptyTimeProfile(),
-  ): Promise<BaseReturn<UserFee>> {
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    try {
-      timeProfile =
-        (await this.checkLimits('getTradeRate', 0, timeProfile)) || timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const get = await this.client.getTradeRate({
-        businessType: 'spot',
-        symbol,
-      })
-      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      if (get.code === '00000') {
-        const data = get.data as { makerFeeRate: string; takerFeeRate: string }
-        return this.returnGood<UserFee>(timeProfile)({
-          maker: +data.makerFeeRate,
-          taker: +data.takerFeeRate,
-        })
-      } else {
-        return this.handleHyperliquidErrors(
-          this.spot_getUserFees,
-          symbol,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(get.msg, 0))
-      }
-    } catch (e) {
-      return this.handleHyperliquidErrors(
-        this.spot_getUserFees,
-        symbol,
-        this.endProfilerTime(timeProfile, 'exchange'),
-      )(new BitgetError(e?.body?.msg ?? e.message, 0))
-    }
-  }
-
-  async latestPrice(symbol: string): Promise<BaseReturn<number>> {
-    if (this.futures) {
-      return await this.futures_latestPrice(symbol)
-    }
-    return await this.spot_latestPrice(symbol)
-  }
-
-  /** Get the latest price for a given pair
-   * @param {string} symbol symbol to look for
-   * @param count
-   * @returns {Promise<BaseReturn<number>>} latest price
-   */
-  async spot_latestPrice(symbol: string): Promise<BaseReturn<number>> {
-    const res = await this.spot_getAllPrices()
-    if (res.status === StatusEnum.notok) {
-      return res
-    }
-    return this.returnGood<number>(res.timeProfile)(
-      res.data.find((p) => p.pair === symbol)?.price ?? 0,
-    )
-  }
-
-  async getCandles(
-    symbol: string,
-    interval: ExchangeIntervals,
-    from?: number,
-    to?: number,
-    count?: number,
-  ): Promise<BaseReturn<CandleResponse[]>> {
-    if (this.futures) {
-      return await this.futures_getCandles(symbol, interval, from, to, count)
-    }
-    return await this.spot_getCandles(symbol, interval, from, to, count)
-  }
-
-  async spot_getCandles(
-    symbol: string,
-    interval: ExchangeIntervals,
-    from?: number,
-    to?: number,
-    countData?: number,
-    timeProfile = this.getEmptyTimeProfile(),
-  ): Promise<BaseReturn<CandleResponse[]>> {
-    timeProfile =
-      (await this.checkLimits('getSpotHistoricCandles', 20, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return (
-      to
-        ? this.client.getSpotHistoricCandles({
-            symbol,
-            endTime: `${to}`,
-            limit: '200',
-            granularity: this.convertInterval(interval) as SpotKlineInterval,
-          })
-        : this.client.getSpotCandles({
-            symbol,
-            //@ts-ignore
-            startTime: from,
-            //@ts-ignore
-            endTime: to,
-            //@ts-ignore
-            limit: 200,
-            //@ts-ignore
-            granularity: this.convertInterval(interval),
-          })
-    )
-      .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.code === '00000') {
-          const data = result.data as string[][]
-          return this.returnGood<CandleResponse[]>(timeProfile)(
-            data.map((d) => ({
-              open: d[1],
-              high: d[2],
-              low: d[3],
-              close: d[4],
-              volume: d[7],
-              time: +d[0],
-            })),
-          )
-        }
-        return this.handleHyperliquidErrors(
-          this.spot_getCandles,
-          symbol,
-          interval,
-          from,
-          to,
-          countData,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleHyperliquidErrors(
-          this.spot_getCandles,
-          symbol,
-          interval,
-          from,
-          to,
-          countData,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
-  }
-
-  async getAllPrices(): Promise<BaseReturn<AllPricesResponse[]>> {
-    if (this.futures) {
-      return await this.futures_getAllPrices()
-    }
-    return await this.spot_getAllPrices()
-  }
-
   /**
-   * Get all prices
-   */
-  async spot_getAllPrices(
-    timeProfile = this.getEmptyTimeProfile(),
-  ): Promise<BaseReturn<AllPricesResponse[]>> {
-    const res: AllPricesResponse[] = []
-    timeProfile =
-      (await this.checkLimits('getSpotTicker', 20, timeProfile)) || timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    try {
-      const result = await this.client.getSpotTicker()
-      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      if (result.code === '00000') {
-        const data = result.data
-        data.map((o) =>
-          res.push({
-            pair: o.symbol,
-            price: +o.lastPr,
-          }),
-        )
-      } else {
-        return this.handleHyperliquidErrors(
-          this.spot_getAllPrices,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      }
-    } catch (e) {
-      return this.handleHyperliquidErrors(
-        this.spot_getAllPrices,
-        this.endProfilerTime(timeProfile, 'exchange'),
-      )(new BitgetError(e?.body?.msg ?? e.message, 0))
-    }
-
-    return this.returnGood<AllPricesResponse[]>(timeProfile)(res)
-  }
-
-  /**
-   * Convert Bybit order to Common order
+   * Convert Hyperliquid order to Common order
    *
    * @param {BybitOrderStatus} order to convert
    * @param {boolean} needFills is needed to query fills
    * @returns {Promise<CommonOrder>} Common order result
    */
-  private convertFuturesOrder(order?: FuturesOrderDetailV2): CommonOrder {
-    const orderStatus = (): OrderStatusType => {
-      const { state, status } = order
-      if (['live'].includes(state || status)) {
-        return 'NEW'
-      }
-      if (['partially_filled'].includes(state || status)) {
-        return 'PARTIALLY_FILLED'
-      }
-      if (['filled'].includes(state || status)) {
-        return 'FILLED'
-      }
-      return 'CANCELED'
-    }
-    const orderType = (type: string): OrderTypeT => {
-      if (type === 'limit') {
-        return 'LIMIT'
-      }
-      if (type === 'market') {
-        return 'MARKET'
-      }
-      return 'MARKET'
-    }
+  private async convertOrder(
+    order?: OrderResponseFound['order']['order'],
+    status?: OrderResponseFound['order']['status'],
+    timestamp?: number,
+  ): Promise<CommonOrder> {
+    const orderStatus: OrderStatusType =
+      status === 'open' ? 'NEW' : status === 'filled' ? 'FILLED' : 'CANCELED'
 
-    return {
-      symbol: order.symbol,
-      orderId: order.orderId,
-      clientOrderId: order.clientOid,
-      transactTime: +order.uTime,
-      updateTime: +order.cTime,
-      price:
-        order.orderType === 'market'
-          ? order.priceAvg
-            ? `${+order.priceAvg || +order.price}`
-            : order.price
-          : order.price,
-      origQty: order.size,
-      executedQty: order.baseVolume,
-      cummulativeQuoteQty: order.quoteVolume,
-      status: orderStatus(),
-      type: orderType(order.orderType),
-      side:
-        order.posSide === 'net'
-          ? order.side === 'sell'
-            ? 'SELL'
-            : 'BUY'
-          : order.tradeSide === 'open'
-            ? order.side === 'sell'
-              ? 'SELL'
-              : 'BUY'
-            : order.side === 'buy'
-              ? 'SELL'
-              : 'BUY',
-      fills: [],
-      reduceOnly: order.reduceOnly === 'yes',
-      positionSide:
-        order.posSide === 'net'
-          ? PositionSide.BOTH
-          : order.posSide === 'long'
-            ? PositionSide.LONG
-            : PositionSide.SHORT,
-    }
-  }
-
-  private convertSpotOrder(order?: SpotOrderInfoV2): CommonOrder {
-    const orderStatus = (): OrderStatusType => {
-      const { status } = order
-      if (['live'].includes(status)) {
-        return 'NEW'
-      }
-      if (['partially_filled'].includes(status)) {
-        return 'PARTIALLY_FILLED'
-      }
-      if (['filled'].includes(status)) {
-        return 'FILLED'
-      }
-      return 'CANCELED'
-    }
-    const orderType = (type: string): OrderTypeT => {
-      if (type === 'limit') {
-        return 'LIMIT'
-      }
-      if (type === 'market') {
-        return 'MARKET'
-      }
-      return 'MARKET'
+    const orderType: OrderTypeT =
+      order.orderType === 'Market' ? 'MARKET' : 'LIMIT'
+    let quote = +order.limitPx * +order.sz
+    if (isNaN(quote) || !isFinite(quote)) {
+      quote = 0
     }
     return {
-      symbol: order.symbol,
-      orderId: order.orderId,
-      clientOrderId: order.clientOid,
-      transactTime: +order.uTime,
-      updateTime: +order.cTime,
-      price:
-        order.orderType === 'market'
-          ? order.basePrice
-            ? `${+order.basePrice || +order.priceAvg}`
-            : order.priceAvg
-          : order.priceAvg,
-      origQty: order.size,
-      executedQty: order.baseVolume,
-      cummulativeQuoteQty: order.quoteVolume,
-      status: orderStatus(),
-      type: orderType(order.orderType),
-      side: order.side === 'sell' ? 'SELL' : 'BUY',
+      symbol: await this.getPairByCoin(order.coin),
+      orderId: order.oid,
+      clientOrderId: order.cloid,
+      transactTime: order.timestamp,
+      updateTime: timestamp || order.timestamp,
+      price: order.limitPx,
+      origQty: order.origSz,
+      executedQty: order.sz,
+      cummulativeQuoteQty: `${quote}`,
+      status: orderStatus,
+      type: orderType,
+      side: order.side === 'A' ? 'SELL' : 'BUY',
       fills: [],
     }
   }
 
-  private convertPosition(position: FuturesPosition): PositionInfo {
+  private async convertPosition(
+    position: ClearinghouseState['assetPositions'][0],
+  ): Promise<PositionInfo> {
     return {
-      symbol: position.symbol,
-      initialMargin: position.marginSize,
-      maintMargin: position.marginSize,
-      unrealizedProfit: position.unrealizedPL,
-      positionInitialMargin: position.marginSize,
-      openOrderInitialMargin: position.marginSize,
-      leverage: position.leverage,
-      isolated: position.marginMode === 'isolated',
-      entryPrice: position.openPriceAvg,
+      symbol: await this.getPairByCoin(position.position.coin),
+      initialMargin: position.position.marginUsed,
+      maintMargin: position.position.marginUsed,
+      unrealizedProfit: position.position.unrealizedPnl,
+      positionInitialMargin: position.position.marginUsed,
+      openOrderInitialMargin: position.position.marginUsed,
+      leverage: `${position.position.leverage.value}`,
+      isolated: position.position.leverage.type === 'isolated',
+      entryPrice: position.position.entryPx,
       maxNotional: '',
       positionSide:
-        position.posMode === 'hedge_mode'
-          ? position.holdSide === 'long'
-            ? PositionSide.LONG
-            : PositionSide.SHORT
-          : +position.total > 0
-            ? PositionSide.LONG
-            : PositionSide.SHORT,
-      positionAmt: position.total,
+        +position.position.szi > 0 ? PositionSide.LONG : PositionSide.SHORT,
+      positionAmt: `${Math.abs(+position.position.szi)}`,
       notional: '',
       isolatedWallet: '',
-      updateTime: +position.uTime,
+      updateTime: +new Date(),
       bidNotional: '',
       askNotional: '',
     }
   }
 
   /**
-   * Handle errors from Bitget API<br/>
+   * Handle errors from Hyperliquid API<br/>
    *
    * If error code is in {@link BybitExchange#retryErrors} and attempt is less than {@link BybitExchange#retry} - retry action
    */
@@ -1853,22 +1187,26 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         if (timeProfile.attempts < this.retry) {
           if (msg.indexOf(restApiNotEnabled) !== -1) {
             Logger.warn(
-              `Bitget Rest API trading is not enabled sleep 10s ${timeProfile.attempts}`,
+              `Hyperliquid Rest API trading is not enabled sleep 10s ${timeProfile.attempts}`,
             )
             await sleep(10 * 1000)
           }
           if (msg.indexOf(unknownError) !== -1) {
-            Logger.warn(`Bitget Unknown Error sleep 3s ${timeProfile.attempts}`)
+            Logger.warn(
+              `Hyperliquid Unknown Error sleep 3s ${timeProfile.attempts}`,
+            )
             await sleep(3 * 1000)
           }
           if (msg.indexOf('request timestamp expired') !== -1) {
             Logger.warn(
-              `Bitget Request timestamp sleep 5s ${timeProfile.attempts}`,
+              `Hyperliquid Request timestamp sleep 5s ${timeProfile.attempts}`,
             )
             await sleep(5 * 1000)
           }
           if (msg.indexOf('recv_window') !== -1) {
-            Logger.warn(`Bitget recv_window sleep 5s ${timeProfile.attempts}`)
+            Logger.warn(
+              `Hyperliquid recv_window sleep 5s ${timeProfile.attempts}`,
+            )
             await sleep(5 * 1000)
           }
           if (
@@ -1877,7 +1215,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           ) {
             const time = 1000
             Logger.log(
-              `Bitget Too many visits wait ${time}s ${timeProfile.attempts} ${
+              `Hyperliquid Too many visits wait ${time}s ${timeProfile.attempts} ${
                 cb.name
               } ${this.key}`,
             )
@@ -1887,7 +1225,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             const time = 1000
             if (timeProfile.attempts > 1) {
               Logger.log(
-                `Bitget too many requests wait ${time}ms ${
+                `Hyperliquid too many requests wait ${time}ms ${
                   timeProfile.attempts
                 } ${cb.name} ${this.key}`,
               )
@@ -1897,7 +1235,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           if (`${e.code}` === '403') {
             const time = 60000 + (timeProfile.attempts - 1) * 1000
             Logger.log(
-              `Bitget 403 block wait ${time}s ${timeProfile.attempts} ${
+              `Hyperliquid 403 block wait ${time}s ${timeProfile.attempts} ${
                 cb.name
               } ${this.key}`,
             )
@@ -1905,72 +1243,80 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           }
           if (msg.indexOf('Gateway Time-out'.toLowerCase()) !== -1) {
             Logger.log(
-              `Bitget Gateway Time-out wait 5s ${timeProfile.attempts}`,
+              `Hyperliquid Gateway Time-out wait 5s ${timeProfile.attempts}`,
             )
             await sleep(5000)
           }
           if (msg.indexOf(bad) !== -1) {
-            Logger.log(`Bitget Bad Request wait 0.1s ${timeProfile.attempts}`)
+            Logger.log(
+              `Hyperliquid Bad Request wait 0.1s ${timeProfile.attempts}`,
+            )
             await sleep(100)
           }
           if (msg.indexOf('socket hang up'.toLowerCase()) !== -1) {
             const time = 2000 + (timeProfile.attempts - 1) * 1000
             Logger.log(
-              `Bitget socket hang up wait ${time}s ${timeProfile.attempts}`,
+              `Hyperliquid socket hang up wait ${time}s ${timeProfile.attempts}`,
             )
             await sleep(time)
           }
           if (msg.indexOf('Internal System Error'.toLowerCase()) !== -1) {
             Logger.log(
-              `Bitget Internal System Error wait 10s ${timeProfile.attempts}`,
+              `Hyperliquid Internal System Error wait 10s ${timeProfile.attempts}`,
             )
             await sleep(10000)
           }
           if (msg.indexOf('Server Timeout'.toLowerCase()) !== -1) {
-            Logger.log(`Bitget Server Timeout wait 10s ${timeProfile.attempts}`)
+            Logger.log(
+              `Hyperliquid Server Timeout wait 10s ${timeProfile.attempts}`,
+            )
             await sleep(10000)
           }
           if (msg.indexOf('Server error'.toLowerCase()) !== -1) {
-            Logger.log(`Bitget Server error wait 10s ${timeProfile.attempts}`)
+            Logger.log(
+              `Hyperliquid Server error wait 10s ${timeProfile.attempts}`,
+            )
             await sleep(10000)
           }
           if (msg.indexOf('Server Timeout'.toLowerCase()) !== -1) {
-            Logger.log(`Bitget Forbidden wait 10s ${timeProfile.attempts}`)
+            Logger.log(`Hyperliquid Forbidden wait 10s ${timeProfile.attempts}`)
             await sleep(10000)
           }
           if (msg.indexOf('possible ip block'.toLowerCase()) !== -1) {
             Logger.log(
-              `Bitget Possible ip block wait 10s ${timeProfile.attempts}`,
+              `Hyperliquid Possible ip block wait 10s ${timeProfile.attempts}`,
             )
             await sleep(10000)
           }
           if (msg.indexOf('ETIMEDOUT'.toLowerCase()) !== -1) {
-            Logger.log(`Bitget Timeout wait 10s ${timeProfile.attempts}`)
+            Logger.log(`Hyperliquid Timeout wait 10s ${timeProfile.attempts}`)
             await sleep(10000)
           }
           if (msg.indexOf('ECONNRESET'.toLowerCase()) !== -1) {
             Logger.log(
-              `Bitget Connection reset wait 10s ${timeProfile.attempts}`,
+              `Hyperliquid Connection reset wait 10s ${timeProfile.attempts}`,
             )
             await sleep(10000)
           }
           if (msg.indexOf('EAI_AGAIN'.toLowerCase()) !== -1) {
-            Logger.log(`Bitget EAI_AGAIN wait 10s ${timeProfile.attempts}`)
+            Logger.log(`Hyperliquid EAI_AGAIN wait 10s ${timeProfile.attempts}`)
             await sleep(10000)
           }
           if (msg.indexOf('getaddrinfo'.toLowerCase()) !== -1) {
-            Logger.log(`Bitget getaddrinfo wait 2s ${timeProfile.attempts}`)
+            Logger.log(
+              `Hyperliquid getaddrinfo wait 2s ${timeProfile.attempts}`,
+            )
             await sleep(2000)
           }
           if (msg.indexOf(tls) !== -1) {
             Logger.log(
-              `Bitget Timeout wait 10s tls error ${timeProfile.attempts}`,
+              `Hyperliquid Timeout wait 10s tls error ${timeProfile.attempts}`,
             )
             await sleep(10000)
           }
           if (msg.indexOf(cannotCancel) !== -1) {
             Logger.log(
-              `Bitget Cannot cancel order wait 10s ${timeProfile.attempts}`,
+              `Hyperliquid Cannot cancel order wait 10s ${timeProfile.attempts}`,
             )
             await sleep(10000)
           }

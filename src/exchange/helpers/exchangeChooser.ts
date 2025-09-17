@@ -4,6 +4,7 @@ import BybitExchange from '../exchanges/bybit'
 import OKXExchange from '../exchanges/okx'
 import BitgetExchange from '../exchanges/bitget'
 import CoinbaseExchange from '../exchanges/coinbase'
+import HyperliquidExchange from '../exchanges/hyperliquid'
 import { ExchangeDomain, ExchangeEnum, Futures } from '../types'
 import { createExchangeFactory } from './createExchangeFactoryUtils'
 
@@ -71,6 +72,12 @@ class ExchangeChooser {
     }
     if (exchange === ExchangeEnum.coinbase) {
       return createExchangeFactory(CoinbaseExchange, ...[Futures.null])
+    }
+    if (exchange === ExchangeEnum.hyperliquid) {
+      return createExchangeFactory(HyperliquidExchange, ...[Futures.null])
+    }
+    if (exchange === ExchangeEnum.hyperliquidInverse) {
+      return createExchangeFactory(HyperliquidExchange, ...[Futures.coinm])
     }
   }
 }

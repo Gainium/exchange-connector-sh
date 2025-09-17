@@ -10,6 +10,7 @@ import Binance from '../exchanges/binance'
 import Bybit from '../exchanges/bybit'
 import OKX from '../exchanges/okx'
 import Coinbase from '../exchanges/coinbase'
+import Hyperliquid from '../exchanges/hyperliquid'
 
 export const getPrices = (exchange: ExchangeEnum) => {
   switch (exchange) {
@@ -69,6 +70,12 @@ export const getPrices = (exchange: ExchangeEnum) => {
     case ExchangeEnum.coinbase:
       const coinbase = new Coinbase(Futures.null, '', '')
       return coinbase.getAllPrices()
+    case ExchangeEnum.hyperliquid:
+      const hyperliquid = new Hyperliquid(Futures.null, '', '', '')
+      return hyperliquid.getAllPrices()
+    case ExchangeEnum.hyperliquidInverse:
+      const hyperliquidCoinm = new Hyperliquid(Futures.coinm, '', '', '')
+      return hyperliquidCoinm.getAllPrices()
     default:
       throw new Error(`getPrices is not supported for ${exchange}`)
   }

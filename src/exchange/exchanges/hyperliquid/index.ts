@@ -178,6 +178,8 @@ class HyperliquidError extends Error {
   }
 }
 
+type Market = 'spot' | 'futures'
+
 class HyperliquidAssets {
   static HyperliquidAssetsInstance: HyperliquidAssets
   static getInstance() {
@@ -187,8 +189,10 @@ class HyperliquidAssets {
     return HyperliquidAssets.HyperliquidAssetsInstance
   }
 
-  private assets: Map<string, number> = new Map()
-  private pairs: Map<number, string> = new Map()
+  private assetsSpot: Map<string, number> = new Map()
+  private pairsSpot: Map<number, string> = new Map()
+  private assetsInverse: Map<string, number> = new Map()
+  private pairsInverse: Map<number, string> = new Map()
   private lastUpdate = 0
   private updateInterval = 20 * 60000
   private client: hl.InfoClient = new hl.InfoClient({
@@ -198,44 +202,56 @@ class HyperliquidAssets {
   })
 
   @IdMute(mutex, () => 'getCoinByPair')
-  public async getCoinByPair(pair: string) {
+  public async getCoinByPair(pair: string, market: Market) {
+    const assets = market === 'spot' ? this.assetsSpot : this.assetsInverse
     if (
-      this.assets.size === 0 ||
+      assets.size === 0 ||
       this.lastUpdate + this.updateInterval < Date.now()
     ) {
-      await this.updateAssets()
+      await this.updateAssets(market)
     }
-    return `${10000 + (this.assets.get(pair) ?? 0)}` || pair.split('-')[0]
+    return `${10000 + (assets.get(pair) ?? 0)}` || pair.split('-')[0]
   }
 
   @IdMute(mutex, () => 'getCoinByPair')
-  public async getPairByCoin(coin: string) {
+  public async getPairByCoin(coin: string, market: Market) {
+    const pairs = market === 'spot' ? this.pairsSpot : this.pairsInverse
     if (
-      this.assets.size === 0 ||
+      pairs.size === 0 ||
       this.lastUpdate + this.updateInterval < Date.now()
     ) {
-      await this.updateAssets()
+      await this.updateAssets(market)
     }
-    return this.pairs.get(+coin.replace('@', '')) ?? coin
+    return pairs.get(+coin.replace('@', '')) ?? coin
   }
 
-  private async updateAssets() {
+  private async updateAssets(market: Market) {
     try {
-      await limitHelper.addWeight(20)
-      const assets = await this.client.spotMeta()
-      const { tokens, universe } = assets
-      universe.forEach((u) => {
-        const base = tokens.find((tk) => tk.index === u.tokens[0])
-        const quote = tokens.find((tk) => tk.index === u.tokens[1])
-        if (base && quote) {
-          this.assets.set(`${base.name}-${quote.name}`, u.tokens[0])
-        }
-      })
-      await limitHelper.addWeight(20)
-      const futures = await this.client.meta()
-      futures.universe.forEach((u, i) => {
-        this.assets.set(`${u.name}-USD`, i)
-      })
+      if (market === 'spot') {
+        await limitHelper.addWeight(20)
+        const assets = await this.client.spotMeta()
+        const { tokens, universe } = assets
+        universe.forEach((u) => {
+          const base = tokens.find((tk) => tk.index === u.tokens[0])
+          const quote = tokens.find((tk) => tk.index === u.tokens[1])
+          if (base && quote) {
+            base.name = base.name === 'UBTC' ? 'BTC' : base.name
+            const pair = `${base.name}-${quote.name}`
+            this.assetsSpot.set(pair, u.index)
+            this.pairsSpot.set(u.index, pair)
+          }
+        })
+      }
+      if (market === 'futures') {
+        await limitHelper.addWeight(20)
+        const futures = await this.client.meta()
+        futures.universe.forEach((u, i) => {
+          const pair = `${u.name}-USD`
+          this.assetsInverse.set(pair, i)
+          this.pairsInverse.set(i, pair)
+        })
+      }
+      this.lastUpdate = Date.now()
     } catch (e) {
       Logger.error(`Error updating Hyperliquid assets: ${e.message}`)
       return
@@ -392,13 +408,19 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   private async getCoinByPair(pair: string, force = false) {
     return this.futures && !force
       ? pair.split('-')[0]
-      : await HyperliquidAssets.getInstance().getCoinByPair(pair)
+      : await HyperliquidAssets.getInstance().getCoinByPair(
+          pair,
+          this.futures ? 'futures' : 'spot',
+        )
   }
 
   private async getPairByCoin(coin: string) {
     return this.futures
-      ? coin
-      : await HyperliquidAssets.getInstance().getPairByCoin(coin)
+      ? `${coin}-USD`
+      : await HyperliquidAssets.getInstance().getPairByCoin(
+          coin,
+          this.futures ? 'futures' : 'spot',
+        )
   }
 
   async openOrder(
@@ -730,8 +752,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           })),
         )
       })
-      .catch(
-        this.handleHyperliquidErrors(
+      .catch((e) => {
+        console.log(e)
+        return this.handleHyperliquidErrors(
           this.getCandles,
           symbol,
           interval,
@@ -739,8 +762,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           to,
           _countData,
           this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+        )(e)
+      })
   }
 
   async getAllPrices(
@@ -754,7 +777,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       const result = await this.infoClient.allMids()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
-      const data = Object.entries(result)
+      const data = Object.entries(result).filter(([n]) =>
+        this.futures ? !n.includes('/') : n.startsWith('@'),
+      )
       await Promise.all(
         data.map(async (o) =>
           res.push({
@@ -770,7 +795,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
     }
 
-    return this.returnGood<AllPricesResponse[]>(timeProfile)(res)
+    return this.returnGood<AllPricesResponse[]>(timeProfile)(
+      res.filter((p) => !p.pair.startsWith('@')),
+    )
   }
 
   async futures_changeMarginType(
@@ -995,6 +1022,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             if (!base || !quote) {
               return null
             }
+            base.name = base.name === 'UBTC' ? 'BTC' : base.name
             const minAmountBase =
               base.szDecimals === 0
                 ? 1
@@ -1005,7 +1033,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
                 : +`0.${'0'.repeat(quote.szDecimals - 1)}1`
             const pricePrecision = Math.min(5, 8 - base.szDecimals)
             const res = {
-              code: d.name,
+              code: `${d.index}`,
               pair: `${base.name}-${quote.name}`,
               baseAsset: {
                 minAmount: minAmountBase,

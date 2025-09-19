@@ -1,6 +1,7 @@
 import { TimeInForce_LT } from 'binance-api-node'
 
 export type ExchangeInfo = {
+  code?: string
   baseAsset: {
     minAmount: number
     maxAmount: number

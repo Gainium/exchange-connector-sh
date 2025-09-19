@@ -422,7 +422,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       .order({
         orders: [
           {
-            a: +(await this.getCoinByPair(order.symbol)),
+            //@ts-expect-error can be string or undefined
+            a: await this.getCoinByPair(order.symbol),
             b: order.side === 'BUY',
             s: `${order.quantity}`,
             p: `${order.price}`,
@@ -935,6 +936,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           const minAmount =
             d.szDecimals === 0 ? 1 : +`0.${'0'.repeat(d.szDecimals - 1)}1`
           const r: (typeof res)[0] = {
+            code: d.name,
             pair: `${d.name}-USD`,
             baseAsset: {
               minAmount,
@@ -1003,6 +1005,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
                 : +`0.${'0'.repeat(quote.szDecimals - 1)}1`
             const pricePrecision = Math.min(5, 8 - base.szDecimals)
             const res = {
+              code: d.name,
               pair: `${base.name}-${quote.name}`,
               baseAsset: {
                 minAmount: minAmountBase,

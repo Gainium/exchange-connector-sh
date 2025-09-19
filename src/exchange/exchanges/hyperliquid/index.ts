@@ -26,7 +26,7 @@ import * as hl from '@nktkas/hyperliquid'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
-import { IdMute, IdMutex } from 'src/utils/mutex'
+import { IdMute, IdMutex } from '../../../utils/mutex'
 
 type OrderResponseMissing = {
   status: 'unknownOid'

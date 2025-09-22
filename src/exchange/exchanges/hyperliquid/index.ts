@@ -210,7 +210,26 @@ class HyperliquidAssets {
     ) {
       await this.updateAssets(market)
     }
-    return `${10000 + (assets.get(pair) ?? 0)}` || pair.split('-')[0]
+    return `${10000 + (assets.get(pair) ?? 0)}`
+  }
+
+  @IdMute(mutex, () => 'getCoinNameByPair')
+  public async getCoinNameByPair(pair: string, market: Market) {
+    if (market === 'futures') {
+      return pair.split('-')[0]
+    }
+    const assets = this.assetsSpot
+    if (
+      assets.size === 0 ||
+      this.lastUpdate + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets(market)
+    }
+    const code = assets.get(pair)
+    if (typeof code === 'undefined') {
+      return pair
+    }
+    return `${code === 0 ? 'PURR/USDC' : `@${code}`}`
   }
 
   @IdMute(mutex, () => 'getCoinByPair')
@@ -221,6 +240,9 @@ class HyperliquidAssets {
       this.lastUpdate + this.updateInterval < Date.now()
     ) {
       await this.updateAssets(market)
+    }
+    if (coin === 'PURR/USDC') {
+      return 'PURR-USDC'
     }
     return pairs.get(+coin.replace('@', '')) ?? coin
   }
@@ -409,6 +431,15 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.futures && !force
       ? pair.split('-')[0]
       : await HyperliquidAssets.getInstance().getCoinByPair(
+          pair,
+          this.futures ? 'futures' : 'spot',
+        )
+  }
+
+  private async getCoinNameByPair(pair: string, force = false) {
+    return this.futures && !force
+      ? pair.split('-')[0]
+      : await HyperliquidAssets.getInstance().getCoinNameByPair(
           pair,
           this.futures ? 'futures' : 'spot',
         )
@@ -727,15 +758,14 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile = this.getEmptyTimeProfile(),
   ) {
     timeProfile =
-      (await this.checkLimits('getFuturesHistoricCandles', 20, timeProfile)) ||
-      timeProfile
+      (await this.checkLimits('candleSnapshot', 20, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.infoClient
       .candleSnapshot({
-        coin: await this.getCoinByPair(symbol),
+        coin: await this.getCoinNameByPair(symbol),
         interval,
-        startTime: from,
-        endTime: to,
+        startTime: +from,
+        endTime: +to,
       })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -752,9 +782,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           })),
         )
       })
-      .catch((e) => {
-        console.log(e)
-        return this.handleHyperliquidErrors(
+      .catch(
+        this.handleHyperliquidErrors(
           this.getCandles,
           symbol,
           interval,
@@ -762,8 +791,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           to,
           _countData,
           this.endProfilerTime(timeProfile, 'exchange'),
-        )(e)
-      })
+        ),
+      )
   }
 
   async getAllPrices(
@@ -776,9 +805,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     try {
       const result = await this.infoClient.allMids()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
       const data = Object.entries(result).filter(([n]) =>
-        this.futures ? !n.includes('/') : n.startsWith('@'),
+        this.futures
+          ? !n.includes('/') && !n.startsWith('@')
+          : n.startsWith('@') || n.includes('/'),
       )
       await Promise.all(
         data.map(async (o) =>
@@ -1033,7 +1063,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
                 : +`0.${'0'.repeat(quote.szDecimals - 1)}1`
             const pricePrecision = Math.min(5, 8 - base.szDecimals)
             const res = {
-              code: `${d.index}`,
+              code: d.name,
               pair: `${base.name}-${quote.name}`,
               baseAsset: {
                 minAmount: minAmountBase,

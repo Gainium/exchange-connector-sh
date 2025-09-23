@@ -210,7 +210,7 @@ class HyperliquidAssets {
     ) {
       await this.updateAssets(market)
     }
-    return `${10000 + (assets.get(pair) ?? 0)}`
+    return `${(market === 'futures' ? 0 : 10000) + (assets.get(pair) ?? 0)}`
   }
 
   @IdMute(mutex, () => 'getCoinNameByPair')
@@ -309,6 +309,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     this.exchangeClient = new hl.ExchangeClient({
       transport: new hl.HttpTransport({ isTestnet: this.demo }),
       wallet: this.secret as `0x${string}`,
+      isTestnet: this.demo,
     })
     this.retry = 10
     this.retryErrors = ['429']
@@ -384,7 +385,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           return this.returnGood<number>(timeProfile)(leverage)
         })
     } catch (e) {
-      this.handleHyperliquidErrors(
+      return this.handleHyperliquidErrors(
         this.futures_changeLeverage,
         symbol,
         leverage,
@@ -475,13 +476,12 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       .order({
         orders: [
           {
-            //@ts-expect-error can be string or undefined
-            a: await this.getCoinByPair(order.symbol),
+            a: +(await this.getCoinByPair(order.symbol, true)),
             b: order.side === 'BUY',
             s: `${order.quantity}`,
             p: `${order.price}`,
             t: {
-              limit: order.type === 'LIMIT' ? { tif: 'Gtc' } : undefined,
+              limit: { tif: 'Gtc' },
             },
             r: order.reduceOnly,
             c: order.newClientOrderId as `0x${string}`,
@@ -499,17 +499,19 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             this.endProfilerTime(timeProfile, 'exchange'),
           )(new HyperliquidError(result.response.data.statuses[0].error, 0))
         }
-        return await this.getOrder(
-          {
-            symbol: order.symbol,
-            newClientOrderId: `${
-              'filled' in result.response.data.statuses[0]
-                ? result.response.data.statuses[0].filled.oid
-                : result.response.data.statuses[0].resting.oid
-            }`,
-          },
-          timeProfile,
-        )
+        const getOrderPayload = {
+          symbol: order.symbol,
+          newClientOrderId: order.newClientOrderId,
+        }
+        try {
+          return await this.getOrder(getOrderPayload, timeProfile)
+        } catch (e) {
+          return this.handleHyperliquidErrors(
+            this.getOrder,
+            getOrderPayload,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          )(e)
+        }
       })
       .catch(
         this.handleHyperliquidErrors(
@@ -573,7 +575,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       .cancelByCloid({
         cancels: [
           {
-            asset: +(await this.getCoinByPair(order.symbol)),
+            asset: +(await this.getCoinByPair(order.symbol, true)),
             cloid: order.newClientOrderId as `0x${string}`,
           },
         ],
@@ -643,12 +645,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       const data = result
       await Promise.all(
         (data ?? []).map(async (o) =>
-          res.push(
-            await this.convertOrder(
-              { ...o, children: [], cloid: '', tif: '' },
-              'open',
-            ),
-          ),
+          res.push(await this.convertOrder(o, 'open')),
         ),
       )
     } catch (e) {
@@ -1003,7 +1000,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               maxMarketAmount: 0,
             },
             quoteAsset: {
-              minAmount: 0,
+              minAmount: 10,
               name: 'USD',
             },
             maxOrders: 200,
@@ -1057,10 +1054,6 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               base.szDecimals === 0
                 ? 1
                 : +`0.${'0'.repeat(base.szDecimals - 1)}1`
-            const minAmountQuote =
-              quote.szDecimals === 0
-                ? 1
-                : +`0.${'0'.repeat(quote.szDecimals - 1)}1`
             const pricePrecision = Math.min(5, 8 - base.szDecimals)
             const res = {
               code: d.name,
@@ -1073,7 +1066,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
                 maxMarketAmount: 0,
               },
               quoteAsset: {
-                minAmount: minAmountQuote,
+                minAmount: 10,
                 name: quote.name,
                 precision: quote.szDecimals,
               },

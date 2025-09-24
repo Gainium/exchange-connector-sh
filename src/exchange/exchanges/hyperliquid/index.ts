@@ -268,7 +268,7 @@ class HyperliquidAssets {
         await limitHelper.addWeight(20)
         const futures = await this.client.meta()
         futures.universe.forEach((u, i) => {
-          const pair = `${u.name}-USD`
+          const pair = `${u.name}-USDC`
           this.assetsInverse.set(pair, i)
           this.pairsInverse.set(i, pair)
         })
@@ -337,11 +337,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   }
 
   get usdm() {
-    return false
+    return this.futures === Futures.usdm
   }
 
   get coinm() {
-    return this.futures === Futures.coinm
+    return false
   }
 
   get _key() {
@@ -448,7 +448,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
 
   private async getPairByCoin(coin: string) {
     return this.futures
-      ? `${coin}-USD`
+      ? `${coin}-USDC`
       : await HyperliquidAssets.getInstance().getPairByCoin(
           coin,
           this.futures ? 'futures' : 'spot',
@@ -472,23 +472,28 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('placeOrder', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const pricePrecision = `${order.price}`.includes('.')
+      ? `${order.price}`.split('.')[1].length
+      : 0
+    const orders: hl.OrderParams = {
+      a: +(await this.getCoinByPair(order.symbol, true)),
+      b: order.side === 'BUY',
+      s: `${order.quantity}`,
+      p: `${order.type === 'MARKET' ? (order.side === 'BUY' ? (order.price * 2).toFixed(pricePrecision) : (order.price * 0.5).toFixed(pricePrecision)) : order.price}`,
+      t: {
+        limit: { tif: 'Gtc' },
+      },
+      r: !!order.reduceOnly,
+      c: order.newClientOrderId as `0x${string}`,
+    }
     return this.exchangeClient
-      .order({
-        orders: [
-          {
-            a: +(await this.getCoinByPair(order.symbol, true)),
-            b: order.side === 'BUY',
-            s: `${order.quantity}`,
-            p: `${order.price}`,
-            t: {
-              limit: { tif: 'Gtc' },
-            },
-            r: order.reduceOnly,
-            c: order.newClientOrderId as `0x${string}`,
-          },
-        ],
-        grouping: 'na',
-      })
+      .order(
+        {
+          orders: [orders],
+          grouping: 'na',
+        },
+        { vaultAddress: null },
+      )
       .then(async (r: any) => {
         const result: PlaceOrderResponse = r
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -503,13 +508,21 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           symbol: order.symbol,
           newClientOrderId: order.newClientOrderId,
         }
+        if (order.type === 'MARKET') {
+          await sleep(500)
+        }
+        const price =
+          'filled' in result.response.data.statuses[0]
+            ? result.response.data.statuses[0].filled.avgPx
+            : `${order.price}`
         try {
-          return await this.getOrder(getOrderPayload, timeProfile)
+          return await this.getOrder(getOrderPayload, timeProfile, price)
         } catch (e) {
           return this.handleHyperliquidErrors(
             this.getOrder,
             getOrderPayload,
             this.endProfilerTime(timeProfile, 'exchange'),
+            price,
           )(e)
         }
       })
@@ -525,6 +538,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   async getOrder(
     data: { symbol: string; newClientOrderId: string },
     timeProfile = this.getEmptyTimeProfile(),
+    price = '',
   ) {
     timeProfile =
       (await this.checkLimits('getOrderStatus', 1, timeProfile)) || timeProfile
@@ -548,6 +562,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             result.order.order,
             result.order.status,
             result.order.statusTimestamp,
+            price,
           ),
         )
       })
@@ -571,14 +586,13 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('futuresCancelOrder', 1, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const cancel = {
+      asset: +(await this.getCoinByPair(order.symbol, true)),
+      cloid: order.newClientOrderId as `0x${string}`,
+    }
     return this.exchangeClient
       .cancelByCloid({
-        cancels: [
-          {
-            asset: +(await this.getCoinByPair(order.symbol, true)),
-            cloid: order.newClientOrderId as `0x${string}`,
-          },
-        ],
+        cancels: [cancel],
       })
       .then(async (r: any) => {
         const result: CancelOrderResponse = r
@@ -980,6 +994,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     try {
       timeProfile =
         (await this.checkLimits('getMeta', 20, timeProfile)) || timeProfile
+      const allPrices = await this.getAllPrices(timeProfile)
+      if (allPrices.status === StatusEnum.notok) {
+        return allPrices
+      }
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       const get = await this.infoClient.meta()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -989,9 +1007,18 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         .map((d) => {
           const minAmount =
             d.szDecimals === 0 ? 1 : +`0.${'0'.repeat(d.szDecimals - 1)}1`
+          let priceAssetPrecision = Math.min(5, Math.max(0, 6 - d.szDecimals))
+          const find = allPrices.data.find((p) => p.pair === `${d.name}-USDC`)
+          if (find && find.price > 0) {
+            const crop = `${find.price}`.slice(0, 6)
+            priceAssetPrecision = Math.min(
+              5,
+              crop.includes('.') ? crop.split('.')[1].length : 0,
+            )
+          }
           const r: (typeof res)[0] = {
             code: d.name,
-            pair: `${d.name}-USD`,
+            pair: `${d.name}-USDC`,
             baseAsset: {
               minAmount,
               maxAmount: 0,
@@ -1001,10 +1028,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             },
             quoteAsset: {
               minAmount: 10,
-              name: 'USD',
+              name: 'USDC',
             },
             maxOrders: 200,
-            priceAssetPrecision: Math.min(5, 6 - d.szDecimals),
+            priceAssetPrecision,
             minLeverage: '1',
             maxLeverage: `${d.maxLeverage}`,
           }
@@ -1029,6 +1056,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     >
   > {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const allPrices = await this.getAllPrices(timeProfile)
+    if (allPrices.status === StatusEnum.notok) {
+      return allPrices
+    }
     timeProfile =
       (await this.checkLimits('getSpotMeta', 20, timeProfile)) || timeProfile
     return this.infoClient
@@ -1038,6 +1069,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
 
         const pairs = result.universe
         const tokens = result.tokens
+
         return this.returnGood<
           (ExchangeInfo & {
             pair: string
@@ -1049,12 +1081,27 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             if (!base || !quote) {
               return null
             }
+
             base.name = base.name === 'UBTC' ? 'BTC' : base.name
             const minAmountBase =
               base.szDecimals === 0
                 ? 1
                 : +`0.${'0'.repeat(base.szDecimals - 1)}1`
-            const pricePrecision = Math.min(5, 8 - base.szDecimals)
+            let pricePrecision = Math.min(
+              5,
+              Math.max(0, 8 - base.szDecimals - 1),
+            )
+            const find = allPrices.data.find(
+              (p) => p.pair === `${base.name}-${quote.name}`,
+            )
+            if (find && find.price > 0) {
+              const crop = `${find.price}`.slice(0, 6)
+              pricePrecision = Math.min(
+                5,
+                crop.includes('.') ? crop.split('.')[1].length : 0,
+              )
+            }
+
             const res = {
               code: d.name,
               pair: `${base.name}-${quote.name}`,
@@ -1142,6 +1189,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     order?: OrderResponseFound['order']['order'],
     status?: OrderResponseFound['order']['status'],
     timestamp?: number,
+    filledPrice?: string,
   ): Promise<CommonOrder> {
     const orderStatus: OrderStatusType =
       status === 'open' ? 'NEW' : status === 'filled' ? 'FILLED' : 'CANCELED'
@@ -1152,21 +1200,22 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     if (isNaN(quote) || !isFinite(quote)) {
       quote = 0
     }
-    return {
+    const response: CommonOrder = {
       symbol: await this.getPairByCoin(order.coin),
       orderId: order.oid,
       clientOrderId: order.cloid,
       transactTime: order.timestamp,
       updateTime: timestamp || order.timestamp,
-      price: order.limitPx,
+      price: filledPrice || order.limitPx,
       origQty: order.origSz,
-      executedQty: order.sz,
+      executedQty: `${+order.origSz - +order.sz}`,
       cummulativeQuoteQty: `${quote}`,
       status: orderStatus,
       type: orderType,
       side: order.side === 'A' ? 'SELL' : 'BUY',
       fills: [],
     }
+    return response
   }
 
   private async convertPosition(
@@ -1222,7 +1271,6 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       }`.toLowerCase()
       if (
         this.retryErrors.includes(`${e.code}`) ||
-        e.response ||
         msg.indexOf('request timestamp expired') !== -1 ||
         msg.indexOf('Internal System Error'.toLowerCase()) !== -1 ||
         msg.indexOf('Forbidden') !== -1 ||

@@ -76,8 +76,8 @@ class ExchangeChooser {
     if (exchange === ExchangeEnum.hyperliquid) {
       return createExchangeFactory(HyperliquidExchange, ...[Futures.null])
     }
-    if (exchange === ExchangeEnum.hyperliquidInverse) {
-      return createExchangeFactory(HyperliquidExchange, ...[Futures.coinm])
+    if (exchange === ExchangeEnum.hyperliquidLinear) {
+      return createExchangeFactory(HyperliquidExchange, ...[Futures.usdm])
     }
   }
 }

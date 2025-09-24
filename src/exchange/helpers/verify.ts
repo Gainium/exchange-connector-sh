@@ -201,11 +201,7 @@ const verifyHyperliquid = async (
   secret: string,
 ): Promise<VerifyResponse> => {
   const client = new Hyperliquid(
-    tradeType === TradeTypeEnum.spot
-      ? Futures.null
-      : tradeType === TradeTypeEnum.futures
-        ? Futures.usdm
-        : Futures.coinm,
+    tradeType === TradeTypeEnum.spot ? Futures.null : Futures.usdm,
     key,
     secret,
   )
@@ -302,7 +298,7 @@ const verifyExchange = async (
     return verifyCoinbase(TradeTypeEnum.spot, key, secret, keysType)
   }
   if (
-    [ExchangeEnum.hyperliquid, ExchangeEnum.hyperliquidInverse].includes(
+    [ExchangeEnum.hyperliquid, ExchangeEnum.hyperliquidLinear].includes(
       provider,
     )
   ) {

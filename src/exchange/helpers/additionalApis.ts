@@ -73,9 +73,9 @@ export const getPrices = (exchange: ExchangeEnum) => {
     case ExchangeEnum.hyperliquid:
       const hyperliquid = new Hyperliquid(Futures.null, '', '', '')
       return hyperliquid.getAllPrices()
-    case ExchangeEnum.hyperliquidInverse:
-      const hyperliquidCoinm = new Hyperliquid(Futures.coinm, '', '', '')
-      return hyperliquidCoinm.getAllPrices()
+    case ExchangeEnum.hyperliquidLinear:
+      const hyperliquidUsdm = new Hyperliquid(Futures.usdm, '', '', '')
+      return hyperliquidUsdm.getAllPrices()
     default:
       throw new Error(`getPrices is not supported for ${exchange}`)
   }
@@ -238,6 +238,22 @@ export const getCandles = (
     case ExchangeEnum.kucoinInverse:
       const kucoinInverse = new Kucoin(Futures.coinm, '', '', '')
       return kucoinInverse.getCandles(
+        params.symbol,
+        params.type as ExchangeIntervals,
+        params.startAt,
+        params.endAt,
+      )
+    case ExchangeEnum.hyperliquid:
+      const hyperliquid = new Hyperliquid(Futures.null, '', '', '')
+      return kucoin.getCandles(
+        params.symbol,
+        params.type as ExchangeIntervals,
+        params.startAt,
+        params.endAt,
+      )
+    case ExchangeEnum.hyperliquidLinear:
+      const hyperliquidUsdm = new Hyperliquid(Futures.usdm, '', '', '')
+      return hyperliquidUsdm.getCandles(
         params.symbol,
         params.type as ExchangeIntervals,
         params.startAt,

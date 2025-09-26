@@ -479,12 +479,15 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       a: +(await this.getCoinByPair(order.symbol, true)),
       b: order.side === 'BUY',
       s: `${order.quantity}`,
-      p: `${order.type === 'MARKET' ? (order.side === 'BUY' ? (order.price * 2).toFixed(pricePrecision) : (order.price * 0.5).toFixed(pricePrecision)) : order.price}`,
+      p: `${order.type === 'MARKET' ? (order.side === 'BUY' ? (order.price * 1.1).toFixed(pricePrecision) : (order.price * 0.9).toFixed(pricePrecision)) : order.price}`,
       t: {
         limit: { tif: 'Gtc' },
       },
       r: !!order.reduceOnly,
       c: order.newClientOrderId as `0x${string}`,
+    }
+    if (!this.futures) {
+      delete orders.r
     }
     return this.exchangeClient
       .order(
@@ -516,7 +519,12 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             ? result.response.data.statuses[0].filled.avgPx
             : `${order.price}`
         try {
-          return await this.getOrder(getOrderPayload, timeProfile, price)
+          return await this.getOrder(
+            getOrderPayload,
+            timeProfile,
+            price,
+            order.type === 'MARKET',
+          )
         } catch (e) {
           return this.handleHyperliquidErrors(
             this.getOrder,
@@ -539,6 +547,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     data: { symbol: string; newClientOrderId: string },
     timeProfile = this.getEmptyTimeProfile(),
     price = '',
+    useRetry = false,
+    retryCount = 0,
   ) {
     timeProfile =
       (await this.checkLimits('getOrderStatus', 1, timeProfile)) || timeProfile
@@ -553,6 +563,19 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (result.status === 'unknownOid') {
+          if (useRetry && retryCount < 2) {
+            await sleep(500)
+            Logger.warn(
+              `Retrying getOrder for ${data.symbol} with OID ${data.newClientOrderId}, attempt ${retryCount + 1}`,
+            )
+            return this.getOrder(
+              data,
+              timeProfile,
+              price,
+              useRetry,
+              retryCount + 1,
+            )
+          }
           return this.returnBad(timeProfile)(
             new HyperliquidError(result.status, 0),
           )

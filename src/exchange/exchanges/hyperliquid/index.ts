@@ -668,7 +668,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     returnOrders = false,
     timeProfile = this.getEmptyTimeProfile(),
   ) {
-    const res: CommonOrder[] = []
+    let res: CommonOrder[] = []
     timeProfile =
       (await this.checkLimits('getFuturesOpenOrders', 0, timeProfile)) ||
       timeProfile
@@ -679,7 +679,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       })
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
-      const data = result
+      const data = result.filter((r) =>
+        this.futures
+          ? !r.coin.includes('/') && !r.coin.startsWith('@')
+          : r.coin.startsWith('@') || r.coin.includes('/'),
+      )
       await Promise.all(
         (data ?? []).map(async (o) =>
           res.push(await this.convertOrder(o, 'open')),
@@ -693,6 +697,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         this.endProfilerTime(timeProfile, 'exchange'),
       )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
     }
+
+    res = res.filter((s) => (symbol ? s.symbol === symbol : true))
 
     return {
       timeProfile,

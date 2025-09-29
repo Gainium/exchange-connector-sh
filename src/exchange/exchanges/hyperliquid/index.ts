@@ -261,7 +261,10 @@ class HyperliquidAssets {
 
   @IdMute(mutex, () => 'updateAssets')
   private async updateAssets(market: Market) {
-    if (this.lastUpdate + this.updateInterval > Date.now()) {
+    if (
+      this.lastUpdate + this.updateInterval > Date.now() &&
+      (market === 'spot' ? this.pairsSpot.size > 0 : this.pairsInverse.size > 0)
+    ) {
       return
     }
     try {

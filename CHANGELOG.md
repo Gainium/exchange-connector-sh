@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] – 2025-09-29
+
+### Changed
+- Updated hyperliquid asset helper logic
+
 ## [1.1.2] – 2025-09-26
 
 ### Fixed

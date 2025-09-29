@@ -247,10 +247,26 @@ class HyperliquidAssets {
     return pairs.get(+coin.replace('@', '')) ?? coin
   }
 
+  protected async checkLimits(request: string, count?: number): Promise<void> {
+    const limit = await limitHelper.addWeight(count)
+    if (limit > 0) {
+      Logger.warn(
+        `Hyperliquid Assets request must sleep for ${limit / 1000}s. Method: ${request}`,
+      )
+      await sleep(limit)
+      await this.checkLimits(request, count)
+    }
+    return
+  }
+
+  @IdMute(mutex, () => 'updateAssets')
   private async updateAssets(market: Market) {
+    if (this.lastUpdate + this.updateInterval > Date.now()) {
+      return
+    }
     try {
       if (market === 'spot') {
-        await limitHelper.addWeight(20)
+        await this.checkLimits('spotMeta', 20)
         const assets = await this.client.spotMeta()
         const { tokens, universe } = assets
         universe.forEach((u) => {
@@ -265,7 +281,7 @@ class HyperliquidAssets {
         })
       }
       if (market === 'futures') {
-        await limitHelper.addWeight(20)
+        await this.checkLimits('meta', 20)
         const futures = await this.client.meta()
         futures.universe.forEach((u, i) => {
           const pair = `${u.name}-USDC`

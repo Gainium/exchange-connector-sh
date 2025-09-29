@@ -4,6 +4,7 @@ import Bitget from '../exchanges/bitget'
 import Bybit from '../exchanges/bybit'
 import OKX from '../exchanges/okx'
 import Coinbase from '../exchanges/coinbase'
+import Hyperliquid from '../exchanges/hyperliquid'
 import {
   BybitHost,
   CoinbaseKeysType,
@@ -194,6 +195,25 @@ const verifyCoinbase = async (
     .catch((e) => ({ status: false, reason: `Coinbase catch ${e}` }))
 }
 
+const verifyHyperliquid = async (
+  tradeType: TradeTypeEnum,
+  key: string,
+  secret: string,
+): Promise<VerifyResponse> => {
+  const client = new Hyperliquid(
+    tradeType === TradeTypeEnum.spot ? Futures.null : Futures.usdm,
+    key,
+    secret,
+  )
+  return await client
+    .getBalance()
+    .then((res) => ({
+      status: res.status === StatusEnum.ok && !!res.data,
+      reason: res.status === StatusEnum.ok ? '' : JSON.stringify(res),
+    }))
+    .catch((e) => ({ status: false, reason: `Hyperliquid catch ${e}` }))
+}
+
 const verifyPaper = async (
   key: string,
   secret: string,
@@ -276,6 +296,13 @@ const verifyExchange = async (
   }
   if (provider === ExchangeEnum.coinbase) {
     return verifyCoinbase(TradeTypeEnum.spot, key, secret, keysType)
+  }
+  if (
+    [ExchangeEnum.hyperliquid, ExchangeEnum.hyperliquidLinear].includes(
+      provider,
+    )
+  ) {
+    return verifyHyperliquid(tradeType, key, secret)
   }
   return { status: false, reason: 'Exchange not supported' }
 }

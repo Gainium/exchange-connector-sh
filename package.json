@@ -1,6 +1,6 @@
 {
   "name": "exchange-connector",
-  "version": "1.0.13",
+  "version": "1.1.2",
   "description": "",
   "author": "",
   "private": true,
@@ -18,6 +18,7 @@
     "kucoin:test": "ts-node -r dotenv/config --files --project tsconfig.json ./src/exchange/exchanges/kucoin/test.ts",
     "okx:test": "ts-node -r dotenv/config --files --project tsconfig.json ./src/exchange/exchanges/okx/test.ts",
     "coinbase:test": "ts-node -r dotenv/config --files --project tsconfig.json ./src/exchange/exchanges/coinbase/test.ts",
+    "hyperliquid:test": "ts-node -r dotenv/config --files --project tsconfig.json ./src/exchange/exchanges/hyperliquid/test.ts",
     "push": "git push origin main",
     "pull": "git pull origin main",
     "fullInit": "export GAINIUM_KUCOIN=@gainium/kucoin-api && (npm uninstall $GAINIUM_KUCOIN || true) && npm cache clean --force && npm install $GAINIUM_KUCOIN@git+https://github.com/Gainium/kucoin-api.git && unset GAINIUM_KUCOIN",
@@ -28,6 +29,7 @@
     "@nestjs/common": "^11.1.5",
     "@nestjs/core": "^11.1.5",
     "@nestjs/platform-express": "^11.1.5",
+    "@nktkas/hyperliquid": "^0.24.3",
     "axios": "^1.11.0",
     "binance-api-node": "^0.12.9",
     "bitget-api": "^2.3.6",

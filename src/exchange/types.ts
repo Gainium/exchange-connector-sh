@@ -1,6 +1,7 @@
 import { TimeInForce_LT } from 'binance-api-node'
 
 export type ExchangeInfo = {
+  code?: string
   baseAsset: {
     minAmount: number
     maxAmount: number
@@ -118,6 +119,8 @@ export enum ExchangeEnum {
   bitget = 'bitget',
   bitgetUsdm = 'bitgetUsdm',
   bitgetCoinm = 'bitgetCoinm',
+  hyperliquid = 'hyperliquid',
+  hyperliquidLinear = 'hyperliquidLinear',
 }
 
 export enum ExchangeDomain {

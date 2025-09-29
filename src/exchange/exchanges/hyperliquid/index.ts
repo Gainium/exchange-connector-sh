@@ -506,7 +506,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       c: order.newClientOrderId as `0x${string}`,
     }
     if (!this.futures) {
-      delete orders.r
+      orders.r = false
     }
     return this.exchangeClient
       .order(

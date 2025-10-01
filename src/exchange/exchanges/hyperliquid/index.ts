@@ -538,18 +538,14 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             ? result.response.data.statuses[0].filled.avgPx
             : `${order.price}`
         try {
-          return await this.getOrder(
-            getOrderPayload,
-            timeProfile,
-            price,
-            order.type === 'MARKET',
-          )
+          return await this.getOrder(getOrderPayload, timeProfile, price, true)
         } catch (e) {
           return this.handleHyperliquidErrors(
             this.getOrder,
             getOrderPayload,
             this.endProfilerTime(timeProfile, 'exchange'),
             price,
+            true,
           )(e)
         }
       })
@@ -640,7 +636,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         const result: CancelOrderResponse = r
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.response.data.statuses[0] === 'success') {
-          return await this.getOrder(order, timeProfile)
+          return await this.getOrder(order, timeProfile, '', true)
         }
         return this.handleHyperliquidErrors(
           this.cancelOrder,

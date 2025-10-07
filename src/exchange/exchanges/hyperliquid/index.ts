@@ -1016,6 +1016,54 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.spot_getAllExchangeInfo()
   }
 
+  private calculatePricePrecision(
+    market: Market,
+    sizeDecimals: number,
+    baseName: string,
+    quoteName: string,
+    allPrices: AllPricesResponse[],
+  ) {
+    const MAX_DECIMALS = market === 'futures' ? 6 : 8
+    const MAX_FIGURES = 5
+    const maxDecimals = Math.max(0, MAX_DECIMALS - sizeDecimals)
+    let pricePrecision = maxDecimals
+    const find = allPrices.find((p) => p.pair === `${baseName}-${quoteName}`)
+    if (find && find.price > 0) {
+      const price = find.price.toFixed(12)
+      let sliceIndex = price.length
+      let figuresCount = 0
+      let decimals = -1
+      let shouldCountFigures = false
+      for (let i = 0; i < price.length; i++) {
+        if (decimals > maxDecimals || figuresCount >= MAX_FIGURES) {
+          break
+        }
+        const hasDot = decimals >= 0
+        if (hasDot) {
+          decimals++
+        }
+        if (
+          price[i] !== '0' ||
+          (hasDot && shouldCountFigures) ||
+          figuresCount > 0
+        ) {
+          if (price[i] === '.') {
+            decimals = 0
+            continue
+          }
+          shouldCountFigures = true
+          figuresCount++
+          sliceIndex = i + 1
+        }
+      }
+      const splitPrice = price.slice(0, sliceIndex).split('.')
+      const lastFigureIndex = splitPrice[1] ? splitPrice[1].length : 0
+      pricePrecision = Math.min(lastFigureIndex, maxDecimals)
+    }
+
+    return pricePrecision
+  }
+
   async futures_getAllExchangeInfo(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<
@@ -1051,15 +1099,13 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         .map((d) => {
           const minAmount =
             d.szDecimals === 0 ? 1 : +`0.${'0'.repeat(d.szDecimals - 1)}1`
-          let priceAssetPrecision = Math.min(5, Math.max(0, 6 - d.szDecimals))
-          const find = allPrices.data.find((p) => p.pair === `${d.name}-USDC`)
-          if (find && find.price > 0) {
-            const crop = `${find.price}`.slice(0, 6)
-            priceAssetPrecision = Math.min(
-              5,
-              crop.includes('.') ? crop.split('.')[1].length : 0,
-            )
-          }
+          const priceAssetPrecision = this.calculatePricePrecision(
+            'futures',
+            d.szDecimals,
+            d.name,
+            'USDC',
+            allPrices.data,
+          )
           const r: (typeof res)[0] = {
             code: d.name,
             pair: `${d.name}-USDC`,
@@ -1131,20 +1177,14 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               base.szDecimals === 0
                 ? 1
                 : +`0.${'0'.repeat(base.szDecimals - 1)}1`
-            let pricePrecision = Math.min(
-              5,
-              Math.max(0, 8 - base.szDecimals - 1),
+
+            const pricePrecision = this.calculatePricePrecision(
+              'spot',
+              base.szDecimals,
+              base.name,
+              quote.name,
+              allPrices.data,
             )
-            const find = allPrices.data.find(
-              (p) => p.pair === `${base.name}-${quote.name}`,
-            )
-            if (find && find.price > 0) {
-              const crop = `${find.price}`.slice(0, 6)
-              pricePrecision = Math.min(
-                5,
-                crop.includes('.') ? crop.split('.')[1].length : 0,
-              )
-            }
 
             const res = {
               code: d.name,

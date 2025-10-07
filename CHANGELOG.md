@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.5] – 2025-10-07
+
+### Changed
+- Hyperliquid price precision logic
+
 ## [1.1.4] – 2025-10-01
 
 ### Fixed

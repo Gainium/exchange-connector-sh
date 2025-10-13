@@ -24,16 +24,24 @@ class BitgetLimits {
 
   private multiplier = 1.2
 
+  private counter = 1
+
   @IdMute(mutex, () => 'bitget')
   public async addLimit(data?: { name: string; count: number }) {
     const time = +new Date()
     if (time - this.requests.time > 60 * 1000) {
       this.requests.time = time - (time % this.requestsTimeFrame)
       this.requests.count = 1
+      this.counter = 0
     } else {
       this.requests.count++
       if (this.requests.count * this.multiplier > this.requestLimit) {
-        return this.requestsTimeFrame - (time % this.requestsTimeFrame)
+        const wait =
+          this.requestsTimeFrame -
+          (time % this.requestsTimeFrame) +
+          this.counter
+        this.counter++
+        return wait
       }
     }
     if (data) {
@@ -47,6 +55,7 @@ class BitgetLimits {
         limit.count += 1
         this.limitsMap.set(data.name, limit)
         if (limit.count * this.multiplier > data.count) {
+          this.requests.count--
           return Math.max(0, limit.time + this.limitsTimeFrame - time)
         }
         return 0

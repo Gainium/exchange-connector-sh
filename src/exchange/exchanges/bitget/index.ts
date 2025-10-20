@@ -215,7 +215,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       : productType === 'USDC-FUTURES' || productType === 'SUSDC-FUTURES'
         ? this.demo
           ? 'SUSDC'
-          : 'USDT'
+          : 'USDC'
         : this.demo
           ? 'SBTC'
           : this.demo

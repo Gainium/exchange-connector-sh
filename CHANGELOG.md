@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.7] – 2025-10-20
+
+### Changed
+- Coinbase retry count
+
 ## [1.1.6] – 2025-10-13
 
 ### Changed

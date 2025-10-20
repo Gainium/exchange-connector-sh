@@ -1014,11 +1014,23 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
         this.retryErrors.includes(`${code}`) ||
         reasons.some((r) => isError(message, r))
       ) {
+        const retrunBad = () =>
+          this.returnBad(timeProfile)(
+            new Error(
+              `${isError(message, unauthorized) ? '' : this.exchangeProblems}${
+                isError(message, html) ? 'Firewall error' : message
+              }`,
+            ),
+          )
         if (timeProfile.attempts < this.retry) {
           if (isError(message, internalTimeout)) {
-            const time = 10000 + (timeProfile.attempts - 1) * 1000
-            Logger.log(`Coinbase internal timeout ${timeProfile.attempts}`)
-            await sleep(time)
+            if (timeProfile.attempts < 2) {
+              const time = 10000 + (timeProfile.attempts - 1) * 1000
+              Logger.log(`Coinbase internal timeout ${timeProfile.attempts}`)
+              await sleep(time)
+            } else {
+              return retrunBad()
+            }
           }
           if (isError(message, tooManyVisits)) {
             const time = 10000 + (timeProfile.attempts - 1) * 1000
@@ -1160,13 +1172,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
           const newResult = await cb.bind(this)(...args)
           return newResult as T
         } else {
-          return this.returnBad(timeProfile)(
-            new Error(
-              `${isError(message, unauthorized) ? '' : this.exchangeProblems}${
-                isError(message, html) ? 'Firewall error' : message
-              }`,
-            ),
-          )
+          return retrunBad()
         }
       } else {
         return this.returnBad(timeProfile)(new Error(message))

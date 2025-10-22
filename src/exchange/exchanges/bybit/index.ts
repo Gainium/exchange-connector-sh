@@ -993,7 +993,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
                       minAmount: !inverse
                         ? 0
                         : //@ts-ignore
-                          +`${d.lotSizeFilter.minNotionalValue || 1}`,
+                          1 /* +`${d.lotSizeFilter.minNotionalValue || 1}` */,
                     },
                     priceAssetPrecision: this.getPricePrecision(
                       d.priceFilter.tickSize,

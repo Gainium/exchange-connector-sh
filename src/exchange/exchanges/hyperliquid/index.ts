@@ -430,12 +430,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       })
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
-      const data = get.marginSummary
-
       res.push({
         asset: 'USDC',
-        free: +data.totalRawUsd - +data.totalMarginUsed,
-        locked: +data.totalMarginUsed,
+        free: +get.withdrawable,
+        locked: +get.marginSummary.accountValue - +get.withdrawable,
       })
     } catch (e) {
       return this.handleHyperliquidErrors(

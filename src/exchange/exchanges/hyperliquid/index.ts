@@ -577,7 +577,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
 
         if (result.status === 'unknownOid') {
           if (useRetry && retryCount < 2) {
-            await sleep(500)
+            await sleep(retryCount === 1 ? 3000 : 500)
             Logger.warn(
               `Retrying getOrder for ${data.symbol} with OID ${data.newClientOrderId}, attempt ${retryCount + 1}`,
             )

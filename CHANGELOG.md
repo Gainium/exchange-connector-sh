@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.11] – 2025-10-29
+
+### Changed
+- Hyperliquid retry get order amount
+
 ## [1.1.10] – 2025-10-27
 
 ### Fixed

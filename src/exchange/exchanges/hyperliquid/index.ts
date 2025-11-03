@@ -301,6 +301,9 @@ class HyperliquidAssets {
 }
 
 class HyperliquidExchange extends AbstractExchange implements Exchange {
+  static MAX_DECIMALS_FUTURES = 6
+  static MAX_DECIMALS_SPOT = 8
+  static MAX_FIGURES = 5
   /** Hyperliquid info client */
   protected infoClient: hl.InfoClient
   /** Hyperliquid exchange client */
@@ -496,7 +499,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       a: +(await this.getCoinByPair(order.symbol, true)),
       b: order.side === 'BUY',
       s: `${order.quantity}`,
-      p: `${order.type === 'MARKET' ? (order.side === 'BUY' ? (order.price * 1.1).toFixed(pricePrecision) : (order.price * 0.9).toFixed(pricePrecision)) : order.price}`,
+      p: this.updateMaxFiguresInPrice(
+        `${order.type === 'MARKET' ? (order.side === 'BUY' ? (order.price * 1.1).toFixed(pricePrecision) : (order.price * 0.9).toFixed(pricePrecision)) : order.price}`,
+        order.newClientOrderId,
+        order.symbol,
+      ),
       t: {
         limit: { tif: 'Gtc' },
       },
@@ -1014,6 +1021,44 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.spot_getAllExchangeInfo()
   }
 
+  private updateMaxFiguresInPrice(
+    p: number | string,
+    orderId: string,
+    symbol: string,
+  ): string {
+    if (
+      !`${p}`.includes('.') ||
+      `${p}`.length - 1 <= HyperliquidExchange.MAX_FIGURES
+    ) {
+      return `${p}`
+    }
+    const price = (+`${p}`).toFixed(12)
+    let updatedPrice = ''
+    let figuresCount = 0
+    for (let i = 0; i < price.length; i++) {
+      if (figuresCount >= HyperliquidExchange.MAX_FIGURES) {
+        break
+      }
+      updatedPrice = `${updatedPrice}${price[i]}`
+      if (price[i] !== '0' || figuresCount > 0) {
+        if (price[i] === '.') {
+          continue
+        }
+        figuresCount++
+      }
+    }
+    const pricePrecision = `${updatedPrice}`.includes('.')
+      ? `${updatedPrice}`.split('.')[1].length
+      : 0
+    const result = (+updatedPrice).toFixed(pricePrecision)
+    if (result !== `${p}`) {
+      Logger.warn(
+        `Price ${p} updated to ${result} to match max figures limit. Order ID: ${orderId}, Symbol: ${symbol}`,
+      )
+    }
+    return result
+  }
+
   private calculatePricePrecision(
     market: Market,
     sizeDecimals: number,
@@ -1021,8 +1066,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     quoteName: string,
     allPrices: AllPricesResponse[],
   ) {
-    const MAX_DECIMALS = market === 'futures' ? 6 : 8
-    const MAX_FIGURES = 5
+    const MAX_DECIMALS =
+      market === 'futures'
+        ? HyperliquidExchange.MAX_DECIMALS_FUTURES
+        : HyperliquidExchange.MAX_DECIMALS_SPOT
     const maxDecimals = Math.max(0, MAX_DECIMALS - sizeDecimals)
     let pricePrecision = maxDecimals
     const find = allPrices.find((p) => p.pair === `${baseName}-${quoteName}`)
@@ -1033,7 +1080,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       let decimals = -1
       let shouldCountFigures = false
       for (let i = 0; i < price.length; i++) {
-        if (decimals > maxDecimals || figuresCount >= MAX_FIGURES) {
+        if (
+          decimals > maxDecimals ||
+          figuresCount >= HyperliquidExchange.MAX_FIGURES
+        ) {
           break
         }
         const hasDot = decimals >= 0

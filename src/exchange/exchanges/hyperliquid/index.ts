@@ -136,7 +136,7 @@ type PlaceOrderResponseFilled = {
   }
 }
 
-type PlaceOrderResponse =
+export type PlaceOrderResponse =
   | PlaceOrderResponseScheduled
   | PalceOrderResponseError
   | PlaceOrderResponseFilled
@@ -169,7 +169,7 @@ type CancelOrderResponse = CancelOrderResponseSuccess | CancelOrderResponseError
 
 const mutex = new IdMutex()
 
-class HyperliquidError extends Error {
+export class HyperliquidError extends Error {
   code: number
 
   constructor(message: string, code: number) {
@@ -378,7 +378,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.methodNotSupported()
   }
 
-  async getAffiliate(_uid: string | number) {
+  async getAffiliate(_uid: string | number): Promise<BaseReturn<boolean>> {
     return this.methodNotSupported()
   }
 
@@ -448,7 +448,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.returnGood<FreeAsset>(timeProfile)(res)
   }
 
-  private async getCoinByPair(pair: string, force = false) {
+  protected async getCoinByPair(pair: string, force = false) {
     return this.futures && !force
       ? pair.split('-')[0]
       : await HyperliquidAssets.getInstance().getCoinByPair(
@@ -1021,7 +1021,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.spot_getAllExchangeInfo()
   }
 
-  private updateMaxFiguresInPrice(
+  protected updateMaxFiguresInPrice(
     p: number | string,
     orderId: string,
     symbol: string,

@@ -395,6 +395,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('updateLeverage', 1, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+        const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+        if (diff >= this.timeout) {
+          Logger.error(
+            `Hyperliquid Queue time is too long ${diff / 1000} futures_changeLeverage ${
+              this.usdm ? 'usdm' : 'coinm'
+            }`,
+          )
+          return this.returnBad(timeProfile)(new Error('Response timeout'))
+        }
+      }
       return await this.exchangeClient
         .updateLeverage({
           asset: +(await this.getCoinByPair(symbol, true)),
@@ -428,6 +439,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+        const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+        if (diff >= this.timeout) {
+          Logger.error(
+            `Hyperliquid Queue time is too long ${diff / 1000} futures_getBalance ${
+              this.usdm ? 'usdm' : 'coinm'
+            }`,
+          )
+          return this.returnBad(timeProfile)(new Error('Response timeout'))
+        }
+      }
       const get = await this.infoClient.clearinghouseState({
         user: this._key,
       })
@@ -489,9 +511,44 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
+    if (order.newClientOrderId) {
+      const getOrder = await this.getOrder(
+        { symbol: order.symbol, newClientOrderId: order.newClientOrderId },
+        timeProfile,
+      )
+      Logger.debug(
+        `Checking existing order with ClientOrderId ${order.newClientOrderId} on Hyperliquid`,
+        getOrder,
+      )
+      if (
+        getOrder.status === StatusEnum.notok &&
+        getOrder.reason !== 'unknownOid'
+      ) {
+        return getOrder
+      }
+      if (getOrder.data?.clientOrderId) {
+        Logger.warn(
+          `Order with ClientOrderId ${order.newClientOrderId} already exists on Hyperliquid`,
+        )
+        return this.returnBad(timeProfile)(
+          new Error(`Client order ID already exists`),
+        )
+      }
+    }
     timeProfile =
       (await this.checkLimits('placeOrder', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} openOrder ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     const pricePrecision = `${order.price}`.includes('.')
       ? `${order.price}`.split('.')[1].length
       : 0
@@ -569,10 +626,21 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     price = '',
     useRetry = false,
     retryCount = 0,
-  ) {
+  ): Promise<BaseReturn<CommonOrder>> {
     timeProfile =
       (await this.checkLimits('getOrderStatus', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} getOrder ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return this.infoClient
       .orderStatus({
         user: this._key,
@@ -614,6 +682,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           this.getOrder,
           data,
           this.endProfilerTime(timeProfile, 'exchange'),
+          price,
+          useRetry,
+          retryCount + 1,
         ),
       )
   }
@@ -629,6 +700,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('futuresCancelOrder', 1, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} cancelOrder ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     const cancel = {
       asset: +(await this.getCoinByPair(order.symbol, true)),
       cloid: order.newClientOrderId as `0x${string}`,
@@ -693,6 +775,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getFuturesOpenOrders', 0, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} getAllOpenOrders ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     try {
       const result = await this.infoClient.frontendOpenOrders({
         user: this._key,
@@ -752,6 +845,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('placeOrder', 1, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} getAllUserFees ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return this.infoClient
       .userFees({ user: this._key })
       .then(async (result) => {
@@ -788,6 +892,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} futures_getPositions ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     try {
       const result = await this.infoClient.clearinghouseState({
         user: this._key,
@@ -820,6 +935,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('candleSnapshot', 20, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} getCandles ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return this.infoClient
       .candleSnapshot({
         coin: await this.getCoinNameByPair(symbol),
@@ -862,6 +988,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('getAllMids', 2, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} getAllPrices ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     try {
       const result = await this.infoClient.allMids()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -904,6 +1041,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('updateLeverage', 1, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+        const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+        if (diff >= this.timeout) {
+          Logger.error(
+            `Hyperliquid Queue time is too long ${diff / 1000} futures_changeMarginType ${
+              this.usdm ? 'usdm' : 'coinm'
+            }`,
+          )
+          return this.returnBad(timeProfile)(new Error('Response timeout'))
+        }
+      }
       return await this.exchangeClient
         .updateLeverage({
           asset: +(await this.getCoinByPair(symbol, true)),
@@ -1138,6 +1286,18 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       if (allPrices.status === StatusEnum.notok) {
         return allPrices
       }
+
+      if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+        const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+        if (diff >= this.timeout) {
+          Logger.error(
+            `Hyperliquid Queue time is too long ${diff / 1000} futures_getAllExchangeInfo ${
+              this.usdm ? 'usdm' : 'coinm'
+            }`,
+          )
+          return this.returnBad(timeProfile)(new Error('Response timeout'))
+        }
+      }
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       const get = await this.infoClient.meta()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -1193,13 +1353,24 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       })[]
     >
   > {
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     const allPrices = await this.getAllPrices(timeProfile)
     if (allPrices.status === StatusEnum.notok) {
       return allPrices
     }
     timeProfile =
       (await this.checkLimits('getSpotMeta', 20, timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} spot_getAllExchangeInfo ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
     return this.infoClient
       .spotMeta()
       .then(async (result) => {
@@ -1287,6 +1458,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('getSpotClearinghouseState', 2, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+        const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+        if (diff >= this.timeout) {
+          Logger.error(
+            `Hyperliquid Queue time is too long ${diff / 1000} spot_getBalance ${
+              this.usdm ? 'usdm' : 'coinm'
+            }`,
+          )
+          return this.returnBad(timeProfile)(new Error('Response timeout'))
+        }
+      }
       const get = await this.infoClient.spotClearinghouseState({
         user: this._key,
       })

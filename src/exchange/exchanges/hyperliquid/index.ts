@@ -516,10 +516,6 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         { symbol: order.symbol, newClientOrderId: order.newClientOrderId },
         timeProfile,
       )
-      Logger.debug(
-        `Checking existing order with ClientOrderId ${order.newClientOrderId} on Hyperliquid`,
-        getOrder,
-      )
       if (
         getOrder.status === StatusEnum.notok &&
         getOrder.reason !== 'unknownOid'

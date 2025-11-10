@@ -87,6 +87,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     _keysType?: string,
     protected okxSource?: OKXSource,
     private code?: string,
+    _subaccount?: boolean,
   ) {
     super({
       key,

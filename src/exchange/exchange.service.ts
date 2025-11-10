@@ -110,6 +110,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).cancelOrder(body)
   }
 
@@ -126,6 +127,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getOrder({ symbol: data.symbol, newClientOrderId: data.newClientOrderId })
   }
 
@@ -142,6 +144,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getAllOpenOrders(data.symbol, data.returnOrders)
   }
 
@@ -158,6 +161,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).openOrder(body)
   }
 
@@ -173,6 +177,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getAllUserFees()
   }
 
@@ -186,6 +191,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getUserFees(symbol)
   }
 
@@ -199,6 +205,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getBalance()
   }
 
@@ -215,6 +222,7 @@ export class ExchangeService {
       auth.keystype,
       auth.okxsource,
       auth.bybithost,
+      auth.subaccount,
     )
   }
 
@@ -234,6 +242,7 @@ export class ExchangeService {
     okxSource?: OKXSource,
     code?: string,
     bybitHost?: BybitHost,
+    subaccount?: boolean,
   ): AbstractExchange {
     const factory = ExchangeChooser.chooseExchangeFactory(exchange)
     if (!factory) {
@@ -248,6 +257,7 @@ export class ExchangeService {
       okxSource,
       code,
       bybitHost,
+      subaccount,
     )
   }
 

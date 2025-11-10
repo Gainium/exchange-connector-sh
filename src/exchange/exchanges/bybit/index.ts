@@ -82,6 +82,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
     _okxSource?: string,
     code?: string,
     bybitHost?: BybitHost,
+    _subaccount?: boolean,
   ) {
     super({ key, secret })
     const options = {

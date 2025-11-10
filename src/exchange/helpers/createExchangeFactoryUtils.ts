@@ -19,6 +19,7 @@ export type ExchangeArgs = [
   OKXSource | undefined,
   string | undefined,
   BybitHost | undefined,
+  boolean | undefined,
 ]
 
 export type ExchangeType<
@@ -35,6 +36,7 @@ export type ExchangeFactory<T extends AbsctractExchange> = (
   okxSource?: unknown,
   code?: unknown,
   bybitHost?: BybitHost,
+  subaccount?: boolean,
 ) => T
 
 export function createExchangeFactory<

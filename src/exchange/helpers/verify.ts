@@ -199,11 +199,18 @@ const verifyHyperliquid = async (
   tradeType: TradeTypeEnum,
   key: string,
   secret: string,
+  subaccount?: boolean,
 ): Promise<VerifyResponse> => {
   const client = new Hyperliquid(
     tradeType === TradeTypeEnum.spot ? Futures.null : Futures.usdm,
     key,
     secret,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    subaccount,
   )
   return await client
     .getBalance()
@@ -245,6 +252,7 @@ const verifyExchange = async (
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
   bybitHost?: BybitHost,
+  subaccount?: boolean,
 ): Promise<VerifyResponse> => {
   if (
     [
@@ -302,7 +310,7 @@ const verifyExchange = async (
       provider,
     )
   ) {
-    return verifyHyperliquid(tradeType, key, secret)
+    return verifyHyperliquid(tradeType, key, secret, subaccount)
   }
   return { status: false, reason: 'Exchange not supported' }
 }

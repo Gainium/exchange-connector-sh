@@ -79,6 +79,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     _keysType?: string,
     _okxSource?: string,
     code?: string,
+    _subaccount?: boolean,
   ) {
     super({ key, secret, passphrase })
     const options: RestClientOptions = {

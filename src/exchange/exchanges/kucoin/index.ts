@@ -94,6 +94,7 @@ class KucoinExchange extends AbstractExchange implements Exchange {
     _keysType?: unknown,
     _okxSource?: string,
     code?: string,
+    _subaccount?: boolean,
   ) {
     super({ key, secret, passphrase })
     this.client = new Kucoin(

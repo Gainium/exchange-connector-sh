@@ -323,8 +323,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     _keysType?: string,
     _okxSource?: string,
     _code?: string,
+    _subaccount?: boolean,
   ) {
-    super({ key, secret, passphrase })
+    super({ key, secret, passphrase, subaccount: `${_subaccount}` === 'true' })
     this.infoClient = new hl.InfoClient({
       transport: new hl.HttpTransport({ isTestnet: this.demo }),
     })
@@ -572,7 +573,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           orders: [orders],
           grouping: 'na',
         },
-        { vaultAddress: null },
+        {
+          vaultAddress: this.subaccount ? (this.key as `0x${string}`) : null,
+        },
       )
       .then(async (r: any) => {
         const result: PlaceOrderResponse = r

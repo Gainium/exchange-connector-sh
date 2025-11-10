@@ -144,6 +144,7 @@ abstract class AbsctractExchange implements Exchange {
   public key?: string
   public secret?: string
   public passphrase?: string
+  public subaccount?: boolean
   public environment?: string
   public exchangeProblems = 'Exchange connector | '
   /** Constructor method
@@ -157,11 +158,13 @@ abstract class AbsctractExchange implements Exchange {
     secret?: string
     passphrase?: string
     environment?: 'live' | 'sandbox'
+    subaccount?: boolean
   }) {
     this.key = input?.key
     this.secret = input?.secret
     this.passphrase = input?.passphrase
     this.environment = input?.environment
+    this.subaccount = input?.subaccount
   }
 
   /** Convert number to string for qty and price */

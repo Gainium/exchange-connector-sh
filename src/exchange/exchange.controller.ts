@@ -30,6 +30,7 @@ export type AuthData = {
   okxsource?: OKXSource
   code?: string
   bybithost?: BybitHost
+  subaccount?: boolean
 }
 
 export type CreateOrderDto = {

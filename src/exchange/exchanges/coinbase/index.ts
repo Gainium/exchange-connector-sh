@@ -89,6 +89,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
     _okxSource?: string,
     _code?: string,
     _bybitHost?: string,
+    _subaccount?: boolean,
   ) {
     super({ key, secret })
     const options =

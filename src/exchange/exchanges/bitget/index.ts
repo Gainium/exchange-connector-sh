@@ -1871,7 +1871,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return (
-      to
+      to && !from
         ? this.client.getSpotHistoricCandles({
             symbol,
             endTime: `${to}`,

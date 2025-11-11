@@ -408,11 +408,16 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         }
       }
       return await this.exchangeClient
-        .updateLeverage({
-          asset: +(await this.getCoinByPair(symbol, true)),
-          isCross: false,
-          leverage,
-        })
+        .updateLeverage(
+          {
+            asset: +(await this.getCoinByPair(symbol, true)),
+            isCross: false,
+            leverage,
+          },
+          {
+            vaultAddress: this.subaccount ? (this.key as `0x${string}`) : null,
+          },
+        )
         .then(() => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -715,9 +720,12 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       cloid: order.newClientOrderId as `0x${string}`,
     }
     return this.exchangeClient
-      .cancelByCloid({
-        cancels: [cancel],
-      })
+      .cancelByCloid(
+        {
+          cancels: [cancel],
+        },
+        { vaultAddress: this.subaccount ? (this.key as `0x${string}`) : null },
+      )
       .then(async (r: any) => {
         const result: CancelOrderResponse = r
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -1052,11 +1060,16 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         }
       }
       return await this.exchangeClient
-        .updateLeverage({
-          asset: +(await this.getCoinByPair(symbol, true)),
-          isCross: margin === MarginType.CROSSED,
-          leverage,
-        })
+        .updateLeverage(
+          {
+            asset: +(await this.getCoinByPair(symbol, true)),
+            isCross: margin === MarginType.CROSSED,
+            leverage,
+          },
+          {
+            vaultAddress: this.subaccount ? (this.key as `0x${string}`) : null,
+          },
+        )
         .then(() => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
           return this.returnGood<MarginType>(timeProfile)(margin)

@@ -302,6 +302,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).futures_changeLeverage(data.symbol, data.leverage)
   }
 
@@ -318,6 +319,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).futures_setHedge(data.value)
   }
 
@@ -334,6 +336,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).futures_getHedge(data.symbol)
   }
 
@@ -350,6 +353,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).futures_changeMarginType(data.symbol, data.margin, data.leverage)
   }
 
@@ -365,6 +369,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).futures_leverageBracket()
   }
 
@@ -381,6 +386,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).futures_getPositions(body.symbol)
   }
 
@@ -394,6 +400,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getUid()
   }
 
@@ -410,6 +417,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getAffiliate(uid)
   }
 
@@ -428,6 +436,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getRebateRecords(timestamp, startTime, endTime)
   }
 
@@ -444,6 +453,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).getRebateOverview(timestamp)
   }
 
@@ -460,6 +470,7 @@ export class ExchangeService {
       auth.okxsource,
       auth.code,
       auth.bybithost,
+      auth.subaccount,
     ).cancelOrderByOrderIdAndSymbol(body)
   }
 }

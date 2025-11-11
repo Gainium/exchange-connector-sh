@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.15] - 2025-11-11
+
+### Fixed
+- Hyperliquid sub-account requests without vault address. 
+
 ## [1.1.14] - 2025-11-10
 
 ### Added

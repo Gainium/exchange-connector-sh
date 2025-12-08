@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.17] - 2025-12-08
+
+### Changed
+- Hyperliquid retry count. 
+
 ## [1.1.16] - 2025-11-11
 
 ### Fixed

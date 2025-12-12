@@ -50,7 +50,7 @@ class OKXError extends Error {
 
 type PositionMode = 'long_short_mode' | 'net_mode'
 
-const timeIntervalMap = {
+export const timeIntervalMap = {
   [ExchangeIntervals.oneM]: 60 * 1000,
   [ExchangeIntervals.threeM]: 3 * 60 * 1000,
   [ExchangeIntervals.fiveM]: 5 * 60 * 1000,

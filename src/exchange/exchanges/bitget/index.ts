@@ -41,6 +41,7 @@ import {
   FuturesPosition,
   FuturesSingleAccount,
 } from './types'
+import { timeIntervalMap } from '../okx'
 
 type SpotOrderInfoV2 = _SpotOrderInfoV2 & {
   basePrice?: string
@@ -846,26 +847,48 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     if (!this.futures) {
       return this.errorFutures(timeProfile)
     }
-    timeProfile =
-      (await this.checkLimits('getFuturesHistoricCandles', 20, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
     const productType = this.getProductTypeBySymbol(symbol)
-    return this.client
-      .getFuturesHistoricCandles({
-        symbol,
-        productType,
-        startTime: `${from}`,
-        endTime: `${to}`,
-        limit: '200',
-        granularity: this.convertInterval(interval) as FuturesKlineInterval,
-      })
-      .then(async (result) => {
+    const maxSize = 200
+    const oldestDate = new Date(
+      +new Date() - 89 * 24 * 60 * 60 * 1000,
+    ).setHours(0, 0, 0, 0)
+    if (from && from < oldestDate) {
+      from = oldestDate
+      if (to && to < from) {
+        return this.returnGood<CandleResponse[]>(timeProfile)([])
+      }
+    }
+    const candlesSize =
+      to && from ? (+to - +from) / timeIntervalMap[interval] : maxSize
+    if (candlesSize > maxSize && from && to) {
+      to = +from + maxSize * timeIntervalMap[interval]
+    }
+    const i = Math.ceil(candlesSize / maxSize)
+    const allCandles: CandleResponse[] = []
+    for (let attempt = 1; attempt <= i; attempt++) {
+      try {
+        timeProfile =
+          (await this.checkLimits(
+            'getFuturesHistoricCandles',
+            20,
+            timeProfile,
+          )) || timeProfile
+        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+        const result = await this.client.getFuturesHistoricCandles({
+          symbol,
+          productType,
+          startTime: `${from}`,
+          endTime: `${to}`,
+          limit: `${maxSize}`,
+          granularity: this.convertInterval(interval) as FuturesKlineInterval,
+        })
+
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
           const data = result.data as string[][]
-          return this.returnGood<CandleResponse[]>(timeProfile)(
-            data.map((d) => ({
+          allCandles.push(
+            ...data.map((d) => ({
               open: d[1],
               high: d[2],
               low: d[3],
@@ -874,7 +897,28 @@ class BitgetExchange extends AbstractExchange implements Exchange {
               time: +d[0],
             })),
           )
+        } else {
+          return this.handleBitgetErrors(
+            this.futures_getCandles,
+            symbol,
+            interval,
+            from,
+            to,
+            _countData,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          )(new BitgetError(result.msg, +result.code))
         }
+        if (from && to) {
+          from = +to + timeIntervalMap[interval]
+          if (from < oldestDate) {
+            from = oldestDate
+            if (+to < +from) {
+              break
+            }
+          }
+          to = +from + maxSize * timeIntervalMap[interval]
+        }
+      } catch (e) {
         return this.handleBitgetErrors(
           this.futures_getCandles,
           symbol,
@@ -883,19 +927,10 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           to,
           _countData,
           this.endProfilerTime(timeProfile, 'exchange'),
-        )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleBitgetErrors(
-          this.futures_getCandles,
-          symbol,
-          interval,
-          from,
-          to,
-          _countData,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+        )(e)
+      }
+    }
+    return this.returnGood<CandleResponse[]>(timeProfile)(allCandles)
   }
 
   async futures_getAllPrices(

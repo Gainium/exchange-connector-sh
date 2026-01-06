@@ -353,7 +353,7 @@ export enum BybitHost {
 export const bybitHostMap: Record<BybitHost, string> = {
   [BybitHost.eu]: 'https://api.bybit.eu',
   [BybitHost.com]: 'https://api.bybit.com',
-  [BybitHost.nl]: 'https://api.bybit.nl',
+  [BybitHost.nl]: 'https://api.bybit.eu',
   [BybitHost.tr]: 'https://api.bybit-tr.com',
   [BybitHost.kz]: 'https://api.bybit.kz',
   [BybitHost.ge]: 'https://api.bybitgeorgia.ge',

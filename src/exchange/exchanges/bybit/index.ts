@@ -912,6 +912,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
   async getAllExchangeInfo(
     timeProfile = this.getEmptyTimeProfile(),
     cursor?: string,
+    bybitHost?: BybitHost,
   ): Promise<
     BaseReturn<
       (ExchangeInfo & {
@@ -922,6 +923,14 @@ class BybitExchange extends AbstractExchange implements Exchange {
       })[]
     >
   > {
+    const opt = {
+      key: this.key ?? '',
+      secret: this.secret ?? '',
+      testnet: process.env.ENV === 'sandbox',
+      recv_window: 30000,
+      baseUrl: bybitHostMap[bybitHost ?? BybitHost.com] || bybitHostMap.com,
+    }
+    const cl = new BybitClient(opt)
     timeProfile =
       (await this.checkLimits('getAllExchangeInfo', 'get', timeProfile)) ||
       timeProfile
@@ -931,7 +940,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
     for (const status of (this.futures
       ? ['Trading', 'PreLaunch']
       : ['Trading']) as InstrumentStatusV5[]) {
-      await this.client
+      await cl
         .getInstrumentsInfo({ category, cursor, status })
         .then(async (res) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -943,6 +952,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
                   await this.getAllExchangeInfo(
                     timeProfile,
                     res.result.nextPageCursor,
+                    bybitHost,
                   )
                 )?.data ?? []
             }
@@ -1013,6 +1023,8 @@ class BybitExchange extends AbstractExchange implements Exchange {
             return this.handleBybitErrors(
               this.getAllExchangeInfo,
               this.endProfilerTime(timeProfile, 'exchange'),
+              cursor,
+              bybitHost,
             )(new BybitError(res.retMsg, res.retCode))
           }
         })
@@ -1020,8 +1032,35 @@ class BybitExchange extends AbstractExchange implements Exchange {
           this.handleBybitErrors(
             this.getAllExchangeInfo,
             this.endProfilerTime(timeProfile, 'exchange'),
+            cursor,
+            bybitHost,
           ),
         )
+    }
+    if (!bybitHost && !this.futures) {
+      const euPairs = await this.getAllExchangeInfo(
+        timeProfile,
+        undefined,
+        BybitHost.eu,
+      )
+      if (euPairs.status === StatusEnum.ok) {
+        euPairs.data.forEach((p) => {
+          const get = result.get(p.pair)
+          if (get) {
+            if (p.baseAsset.minAmount > get.baseAsset.minAmount) {
+              get.baseAsset.minAmount = p.baseAsset.minAmount
+              get.baseAsset.step = p.baseAsset.step
+            }
+            if (p.quoteAsset.minAmount > get.quoteAsset.minAmount) {
+              get.quoteAsset.minAmount = p.quoteAsset.minAmount
+            }
+            if (p.priceAssetPrecision < get.priceAssetPrecision) {
+              get.priceAssetPrecision = p.priceAssetPrecision
+            }
+            result.set(p.pair, get)
+          }
+        })
+      }
     }
     return this.returnGood<(ExchangeInfo & { pair: string })[]>(timeProfile)([
       ...result.values(),

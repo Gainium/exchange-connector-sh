@@ -126,6 +126,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       ErrorCodes.TOO_MANY_ORDERS,
       -1099,
       502,
+      -1008,
     ]
     this.futures = futures === Futures.null ? this.futures : futures
   }
@@ -2641,6 +2642,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       const overloaded =
         'Server is currently overloaded with other requests. Please try again in a few minutes'.toLowerCase()
       const restApiNotEnabled = 'Rest API trading is not enabled'.toLowerCase()
+      const throttled =
+        'Request throttled by system-level protection'.toLowerCase()
       const timeProfile: TimeProfile = args[args.length - 1]
       if (
         this.retryErrors.includes(e.code || 0) ||
@@ -2657,7 +2660,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
             'Unknown error, please check your request or try again later'.toLowerCase(),
           ) !== -1 ||
         e.message.toLowerCase().indexOf(tls) !== -1 ||
-        e.message.toLowerCase().indexOf(restApiNotEnabled) !== -1
+        e.message.toLowerCase().indexOf(restApiNotEnabled) !== -1 ||
+        e.message.toLowerCase().indexOf(throttled) !== -1
       ) {
         if (timeProfile.attempts < this.retry) {
           if (
@@ -2668,6 +2672,15 @@ class BinanceExchange extends AbstractExchange implements Exchange {
               ) !== -1
           ) {
             Logger.warn(`${args}`)
+          }
+          if (
+            e.message.toLowerCase().indexOf(throttled) !== -1 ||
+            e.code === -1008
+          ) {
+            Logger.warn(
+              `Request throttled by system-level protection sleep 10s`,
+            )
+            await sleep(10 * 1000)
           }
           if (e.message.toLowerCase().indexOf('fetch failed') !== -1) {
             Logger.warn(`fetch failed sleep 5s`)

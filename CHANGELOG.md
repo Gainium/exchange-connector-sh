@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.20] - 2026-01-08
+
+### Changed
+- Handle Binance Request throttled by system-level protection error. 
+
 ## [1.1.19] - 2026-01-06
 
 ### Changed

@@ -1,5 +1,3 @@
-import { TimeInForce_LT } from 'binance-api-node'
-
 export type ExchangeInfo = {
   code?: string
   baseAsset: {
@@ -230,7 +228,7 @@ export type CommonOrder = {
   positionSide?: PositionSide_LT
   reduceOnly?: boolean
   closePosition?: boolean
-  timeInForce?: TimeInForce_LT
+  timeInForce?: string
   cumQuote?: string
   cumBase?: string
   cumQty?: string
@@ -289,7 +287,7 @@ export type FuturesCommonOrder = {
   positionSide: PositionSide_LT
   reduceOnly: boolean
   closePosition: boolean
-  timeInForce: TimeInForce_LT
+  timeInForce: string
   priceRate: string
   stopPrice: string
   workingType: WorkingType_LT

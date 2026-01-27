@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import Binance from 'binance-api-node'
+import { MainClient } from 'binance'
 import { getBinanceBase } from '../../helpers/exchaneUtils'
 import { ExchangeDomain } from '../../types'
 import { Logger } from '@nestjs/common'
@@ -433,10 +433,19 @@ const setLimitsUS = (data: {
 const getLimitsFromBinance = async () => {
   binanceRequest = true
   try {
-    const binance = Binance({ httpBase: getBinanceBase(ExchangeDomain.com) })
-    await binance.time()
+    const binance = new MainClient({
+      baseUrl: getBinanceBase(ExchangeDomain.com),
+    })
+    await binance.getServerTime()
     binanceRequest = false
-    setLimits(binance.getInfo().spot)
+    setLimits({
+      orderCount10s: binance
+        .getRateLimitStates()
+        ['x-mbx-order-count-10s'].toString(),
+      usedWeight1m: binance
+        .getRateLimitStates()
+        ['x-mbx-used-weight-1m'].toString(),
+    })
   } catch {
     Logger.warn('Error connecting Binance')
   }
@@ -445,10 +454,17 @@ const getLimitsFromBinance = async () => {
 const getUsdmLimitsFromBinance = async () => {
   usdmBinanceRequest = true
   try {
-    const binance = Binance()
-    await binance.futuresTime()
+    const binance = new MainClient()
+    await binance.getServerTime()
     usdmBinanceRequest = false
-    setLimitsUsdm(binance.getInfo().futures)
+    setLimitsUsdm({
+      orderCount10s: binance
+        .getRateLimitStates()
+        ['x-mbx-order-count-10s'].toString(),
+      usedWeight1m: binance
+        .getRateLimitStates()
+        ['x-mbx-used-weight-1m'].toString(),
+    })
   } catch {
     Logger.warn('Error connecting Binance USDM')
   }
@@ -457,10 +473,17 @@ const getUsdmLimitsFromBinance = async () => {
 const getCoinmLimitsFromBinance = async () => {
   coinmBinanceRequest = true
   try {
-    const binance = Binance()
-    await binance.deliveryTime()
+    const binance = new MainClient()
+    await binance.getServerTime()
     coinmBinanceRequest = false
-    setLimitsCoinm(binance.getInfo().futures)
+    setLimitsCoinm({
+      orderCount10s: binance
+        .getRateLimitStates()
+        ['x-mbx-order-count-10s'].toString(),
+      usedWeight1m: binance
+        .getRateLimitStates()
+        ['x-mbx-used-weight-1m'].toString(),
+    })
   } catch {
     Logger.warn('Error connecting Binance COINM')
   }
@@ -469,10 +492,19 @@ const getCoinmLimitsFromBinance = async () => {
 const getLimitsFromBinanceUS = async () => {
   binanceRequestUS = true
   try {
-    const binance = Binance({ httpBase: getBinanceBase(ExchangeDomain.us) })
-    await binance.time()
+    const binance = new MainClient({
+      baseUrl: getBinanceBase(ExchangeDomain.us),
+    })
+    await binance.getServerTime()
     binanceRequestUS = false
-    setLimitsUS(binance.getInfo().spot)
+    setLimitsUS({
+      orderCount10s: binance
+        .getRateLimitStates()
+        ['x-mbx-order-count-10s'].toString(),
+      usedWeight1m: binance
+        .getRateLimitStates()
+        ['x-mbx-used-weight-1m'].toString(),
+    })
   } catch {
     Logger.warn('Error connecting Binance US')
   }

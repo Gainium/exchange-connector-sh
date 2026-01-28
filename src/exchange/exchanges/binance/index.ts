@@ -1,27 +1,25 @@
 import AbstractExchange, { Exchange } from '../../abstractExchange'
-import type {
-  Binance as BinanceType,
-  CandlesOptions,
-  NewOrderSpot,
-  NewFuturesOrder,
-  Order,
-  OrderStatus_LT,
+import {
+  AccountInformation,
+  FuturesAccountInformation,
+  FuturesCoinMAccountInformation,
+  FuturesAccountAsset,
+  OrderResponseResult,
+  NewSpotOrderParams,
+  NewFuturesOrderParams,
+  NewOrderResult,
+  SpotOrder,
+  OrderResult,
+  SymbolTradeFee,
+  KlinesParams,
+  SymbolFromPaginatedRequestFromId,
+  FuturesAccountPosition,
+  FuturesCoinMAccountPosition,
+  OrderStatus,
   OrderType,
-  OrderType_LT,
-  SymbolLotSizeFilter,
-  SymbolMaxNumOrdersFilter,
-  SymbolMinNotionalFilter,
-  SymbolPriceFilter,
-  FuturesOrder,
-  FuturesOrderType_LT,
-  SymbolPercentPriceFilter,
-  TradeFee,
-  QueryOrderResult,
-  LeverageBracketResult,
-  TradesOptions,
-  SymbolMarketLotSizeFilter,
-} from 'binance-api-node'
-import Binance, { ErrorCodes } from 'binance-api-node'
+  FuturesOrderType,
+} from 'binance'
+import { USDMClient, CoinMClient, MainClient } from '../../../binance-custom'
 import limitHelper from './limit'
 import {
   BaseReturn,
@@ -67,7 +65,10 @@ export enum HttpMethod {
 
 class BinanceExchange extends AbstractExchange implements Exchange {
   /** Binance client */
-  protected client?: BinanceType
+  //protected client?: BinanceType
+  protected client?: MainClient
+  protected usdmClient?: USDMClient
+  protected coinmClient?: CoinMClient
   /** recvWindow binance parameter. Default 30000 */
   protected recvWindow: number
   /** Retry count. Default 10 */
@@ -99,12 +100,45 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     _subaccount?: boolean,
   ) {
     super({ key, secret })
+    this.secret = (this.secret ?? '')
+      .replace(/-----BEGIN PRIVATE KEY----- /g, '-----BEGIN PRIVATE KEY-----\n')
+      .replace(/ -----END PRIVATE KEY-----/g, '\n-----END PRIVATE KEY-----')
+    this.recvWindow = 30000
+    this.futures = futures === Futures.null ? this.futures : futures
     try {
-      this.client = Binance({
-        apiKey: this.key ?? '',
-        apiSecret: this.secret ?? '',
-        httpBase: getBinanceBase(domain),
+      /* this.client =
+        binanceKeys === BinanceKeys.hmac
+          ? Binance({
+              apiKey: this.key ?? '',
+              apiSecret: this.secret ?? '',
+              httpBase: getBinanceBase(domain),
+            })
+          : undefined */
+
+      this.client = new MainClient({
+        api_key: this.key ?? '',
+        api_secret: this.secret ?? '',
+        baseUrl: getBinanceBase(domain),
+        recvWindow: this.recvWindow,
+        beautifyResponses: false,
       })
+
+      if (this.usdm) {
+        this.usdmClient = new USDMClient({
+          api_key: this.key ?? '',
+          api_secret: this.secret ?? '',
+          recvWindow: this.recvWindow,
+          beautifyResponses: false,
+        })
+      }
+      if (this.coinm) {
+        this.coinmClient = new CoinMClient({
+          api_key: this.key ?? '',
+          api_secret: this.secret ?? '',
+          recvWindow: this.recvWindow,
+          beautifyResponses: false,
+        })
+      }
     } catch (e) {
       Logger.warn(
         `Error connectinng Binance (${getBinanceBase(domain)}), message: ${
@@ -113,22 +147,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       )
     }
     this.domain = domain
-    this.recvWindow = 30000
+
     this.retry = 10
     this.retryErrors = [
-      ErrorCodes.INVALID_TIMESTAMP,
-      ErrorCodes.UNKNOWN,
-      ErrorCodes.DISCONNECTED,
-      ErrorCodes.TOO_MANY_REQUESTS,
-      -1004,
-      ErrorCodes.UNEXPECTED_RESP,
-      ErrorCodes.TIMEOUT,
-      ErrorCodes.TOO_MANY_ORDERS,
-      -1099,
-      502,
-      -1008,
+      -1021, -1000, -1001, -1003, -1004, -1006, -1007, -1015, -1099, 502, -1008,
     ]
-    this.futures = futures === Futures.null ? this.futures : futures
   }
 
   get isNewLimit() {
@@ -162,24 +185,18 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getUid', 'request', 20, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return (
-      this.client
-        //@ts-ignore
-        .accountInfo({ recvWindow: this.recvWindow })
-        .then((accountInfo) => {
-          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-          return this.returnGood<number>(timeProfile)(
-            //@ts-ignore
-            accountInfo?.uid ?? -1,
-          )
-        })
-        .catch(
-          this.handleBinanceErrors(
-            this.getUid,
-            this.endProfilerTime(timeProfile, 'exchange'),
-          ),
-        )
-    )
+    return this.client
+      .getAccountInformation()
+      .then((accountInfo: AccountInformation) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<number>(timeProfile)(accountInfo?.uid ?? -1)
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.getUid,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
   async getRebateRecords(
     timestamp: number,
@@ -188,6 +205,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<RebateRecord[]>> {
     if (!this.client) {
+      return this.errorClient(timeProfile)
+    }
+    if (!(this.client instanceof MainClient)) {
       return this.errorClient(timeProfile)
     }
     timeProfile =
@@ -212,15 +232,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       delete params.endTime
     }
     return this.client
-      .privateRequest(
-        HttpMethod.GET,
-        '/sapi/v1/apiReferral/rebate/recentRecord',
-        params,
-      )
+      .getBrokerSpotCommissionRebate(params)
       .then((data) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<RebateRecord[]>(timeProfile)(
-          data as RebateRecord[],
+          data as unknown as RebateRecord[],
         )
       })
       .catch(
@@ -264,9 +280,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     if (!params.endTime) {
       delete params.endTime
     }
-    return this.client
-      .privateRequest(HttpMethod.GET, '/fapi/v1/apiReferral/rebateVol', params)
-      .then((data) => {
+    return this.usdmClient
+      .getPrivate('/fapi/v1/apiReferral/rebateVol', params)
+      .then((data: RebateOverview) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<RebateOverview>(timeProfile)(
           data as RebateOverview,
@@ -286,13 +302,26 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     return this.returnGood<boolean>(this.getEmptyTimeProfile())(false)
   }
   override returnBad(timeProfile: TimeProfile, usage = limitHelper.getUsage()) {
-    return (e: Error) => ({
-      status: StatusEnum.notok as StatusEnum.notok,
-      reason: e.message,
-      data: null,
-      usage,
-      timeProfile: { ...timeProfile, outcomingTime: +new Date() },
-    })
+    return (e: Error) => {
+      let msg = ''
+      try {
+        msg =
+          'message' in e && e.message
+            ? `${e.message}`
+            : 'body' in e && e.body
+              ? `${e.body}`
+              : `${e}`
+      } catch {
+        msg = `${e}`
+      }
+      return {
+        status: StatusEnum.notok as StatusEnum.notok,
+        reason: msg,
+        data: null,
+        usage,
+        timeProfile: { ...timeProfile, outcomingTime: +new Date() },
+      }
+    }
   }
 
   /** Binance get balance
@@ -321,34 +350,32 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return (
-      this.client
-        //@ts-ignore
-        .accountInfo({ recvWindow: this.recvWindow })
-        .then((accountInfo) => {
-          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-          const { balances } = accountInfo
-          return this.returnGood<FreeAsset>(timeProfile)(
-            balances.map((balance) => ({
-              asset: balance.asset,
-              free: parseFloat(balance.free),
-              locked: parseFloat(balance.locked),
-            })),
-          )
-        })
-        .catch(
-          this.handleBinanceErrors(
-            this.spot_getBalance,
-            this.endProfilerTime(timeProfile, 'exchange'),
-          ),
+    return this.client
+      .getAccountInformation()
+      .then((accountInfo) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const { balances } = accountInfo
+        return this.returnGood<FreeAsset>(timeProfile)(
+          balances.map((balance) => ({
+            asset: balance.asset,
+            free: parseFloat(`${balance.free}`),
+            locked: parseFloat(`${balance.locked}`),
+          })),
         )
-    )
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.spot_getBalance,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async futures_getBalance(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FreeAsset>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -369,25 +396,28 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresAccountInfo({ recvWindow: this.recvWindow })
-        : this.client.deliveryAccountInfo({ recvWindow: this.recvWindow })
-    )
-      .then((accountInfo) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        return this.returnGood<FreeAsset>(timeProfile)(
-          accountInfo.assets.map((balance) => ({
-            asset: balance.asset,
-            free: parseFloat(balance.maxWithdrawAmount),
-            locked:
-              parseFloat(balance.walletBalance) > 0
-                ? parseFloat(balance.walletBalance) -
-                  parseFloat(balance.maxWithdrawAmount)
-                : 0,
-          })),
-        )
-      })
+    return client
+      .getAccountInformation()
+      .then(
+        (
+          accountInfo:
+            | FuturesAccountInformation
+            | FuturesCoinMAccountInformation,
+        ) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          return this.returnGood<FreeAsset>(timeProfile)(
+            accountInfo.assets.map((balance: FuturesAccountAsset) => ({
+              asset: balance.asset,
+              free: parseFloat(`${balance.maxWithdrawAmount}`),
+              locked:
+                parseFloat(`${balance.walletBalance}`) > 0
+                  ? parseFloat(`${balance.walletBalance}`) -
+                    parseFloat(`${balance.maxWithdrawAmount}`)
+                  : 0,
+            })),
+          )
+        },
+      )
       .catch(
         this.handleBinanceErrors(
           this.futures_getBalance,
@@ -441,28 +471,34 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('openOrder', 'order', 1, timeProfile)) ||
       timeProfile
     const { symbol, side, quantity, price, newClientOrderId, type } = order
-    let orderData: NewOrderSpot = {
-      symbol,
-      side,
-      quantity: `${quantity}`,
-      price: this.convertNumberToString(price),
-      type: 'LIMIT' as OrderType.LIMIT,
-      newClientOrderId,
-      recvWindow: this.recvWindow,
+    let orderData:
+      | NewSpotOrderParams<'LIMIT', 'RESULT'>
+      | NewSpotOrderParams<'MARKET', 'RESULT'>
+    {
+      orderData = {
+        symbol,
+        side,
+        quantity,
+        //@ts-ignore
+        price: this.convertNumberToString(price),
+        type: 'LIMIT',
+        newClientOrderId,
+        recvWindow: this.recvWindow,
+        timeInForce: 'GTC',
+      }
     }
     if (type && type === 'MARKET') {
       orderData = {
         symbol,
         side,
-        quantity: `${quantity}`,
-        type: 'MARKET' as OrderType.MARKET,
+        quantity,
+        type: 'MARKET',
         newClientOrderId,
-        recvWindow: this.recvWindow,
       }
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .order({ ...orderData, newOrderRespType: 'RESULT' })
+      .submitNewOrder({ ...orderData, newOrderRespType: 'RESULT' })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.convertOrder(res)
@@ -490,7 +526,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -521,24 +558,23 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       positionSide,
       reduceOnly,
     } = order
-    let orderData: NewFuturesOrder = {
+    let orderData: NewFuturesOrderParams<number> = {
       symbol,
       side,
-      quantity: `${quantity}`,
+      quantity,
+      //@ts-ignore
       price: this.convertNumberToString(price),
-      type: 'LIMIT' as OrderType.LIMIT,
+      type: 'LIMIT',
       newClientOrderId,
-      recvWindow: this.recvWindow,
       timeInForce: 'GTC',
     }
     if (type && type === 'MARKET') {
       orderData = {
         symbol,
         side,
-        quantity: `${quantity}`,
-        type: 'MARKET' as OrderType.MARKET,
+        quantity,
+        type: 'MARKET',
         newClientOrderId,
-        recvWindow: this.recvWindow,
       }
     }
     if (
@@ -550,14 +586,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     if (typeof positionSide !== 'undefined') {
       orderData.positionSide = positionSide
     }
-    return (
-      this.usdm
-        ? this.client.futuresOrder({ ...orderData, newOrderRespType: 'RESULT' })
-        : this.client.deliveryOrder({
-            ...orderData,
-            newOrderRespType: 'RESULT',
-          })
-    )
+    return client
+      .submitNewOrder({ ...orderData, newOrderRespType: 'RESULT' })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.futures_convertOrder(res)
@@ -615,8 +645,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       .getOrder({
         symbol,
         origClientOrderId: newClientOrderId,
-        //@ts-ignore
-        recvWindow: this.recvWindow,
       })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -639,7 +667,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -666,11 +695,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       origClientOrderId: newClientOrderId,
       recvWindow: this.recvWindow,
     }
-    return (
-      this.usdm
-        ? this.client.futuresGetOrder(input)
-        : this.client.deliveryGetOrder(input)
-    )
+    return client
+      .getOrder(input)
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.futures_convertOrder(res)
@@ -712,12 +738,14 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )) || timeProfile
     return this.client
-      .prices({
+      .getSymbolPriceTicker({
         symbol,
       })
       .then((price) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        return this.returnGood<number>(timeProfile)(parseFloat(price[symbol]))
+        return this.returnGood<number>(timeProfile)(
+          parseFloat(`${[price].flat()[0]?.price ?? '0'}`),
+        )
       })
       .catch(
         this.handleBinanceErrors(
@@ -732,7 +760,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -757,14 +786,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresMarkPrice()
-        : this.client.deliveryMarkPrice()
-    )
+    return client
+      .getMarkPrice()
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        const find = res.find((r) => r.symbol === symbol)
+        const find = [res].flat().find((r) => r.symbol === symbol)
         if (find) {
           return this.returnGood<number>(timeProfile)(+find.markPrice)
         }
@@ -822,8 +848,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       .cancelOrder({
         symbol,
         origClientOrderId: newClientOrderId,
-        //@ts-ignore
-        recvWindow: this.recvWindow,
       })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -834,6 +858,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           updateTime: -1,
           status: 'CANCELED',
           timeInForce: 'GTC',
+          stopPrice: '',
+          icebergQty: '',
+          origQuoteOrderQty: '',
         })
       })
       .then(this.returnGood(timeProfile))
@@ -877,8 +904,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       .cancelOrder({
         symbol,
         orderId: +orderId,
-        //@ts-ignore
-        recvWindow: this.recvWindow,
       })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -889,6 +914,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           updateTime: -1,
           status: 'CANCELED',
           timeInForce: 'GTC',
+          stopPrice: '',
+          icebergQty: '',
+          origQuoteOrderQty: '',
         })
       })
       .then(this.returnGood(timeProfile))
@@ -905,7 +933,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     order: { symbol: string; orderId: string },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -932,14 +961,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresCancelOrder(input)
-        : this.client.deliveryCancelOrder(input)
-    )
+    return client
+      .cancelOrder(input)
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        return this.futures_convertOrder(res)
+        return this.futures_convertOrder({ ...res, avgPrice: '' })
       })
       .then(this.returnGood(timeProfile))
       .catch(
@@ -958,7 +984,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -985,14 +1012,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresCancelOrder(input)
-        : this.client.deliveryCancelOrder(input)
-    )
+    return client
+      .cancelOrder(input)
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        return this.futures_convertOrder(res)
+        return this.futures_convertOrder({ ...res, avgPrice: '' })
       })
       .then(this.returnGood(timeProfile))
       .catch(
@@ -1023,9 +1047,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     const { symbol } = data
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .cancelOpenOrders({
-        symbol, //@ts-ignore
-        recvWindow: this.recvWindow,
+      .cancelAllSymbolOrders({
+        symbol,
       })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -1037,6 +1060,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
             updateTime: -1,
             status: 'CANCELED',
             timeInForce: 'GTC',
+            stopPrice: '',
+            icebergQty: '',
+            origQuoteOrderQty: '',
           }),
         )
       })
@@ -1048,25 +1074,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
-  }
-
-  /** Websocket stream
-   * @param {string} channel channel to subscribe
-   * @return {function} function to subscribe
-   */
-
-  wsStream(channel: string) {
-    if (!this.client) {
-      return this.errorClient(this.getEmptyTimeProfile())
-    }
-    switch (channel) {
-      case 'user': {
-        return this.client.ws.user
-      }
-      default: {
-        return
-      }
-    }
   }
 
   /** Get exchange info for given pair
@@ -1097,7 +1104,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .exchangeInfo()
+      .getExchangeInfo()
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         const find = res.symbols.find(
@@ -1105,34 +1112,33 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         )
         const baseAssetLot = find?.filters.find(
           (filt) => filt.filterType === 'LOT_SIZE',
-        ) as SymbolLotSizeFilter | undefined
+        )
         const quoteAssetFilter = find?.filters.find(
           (filt) =>
-            //@ts-ignore
             filt.filterType === 'NOTIONAL' ||
+            //@ts-ignore
             filt.filterType === 'MIN_NOTIONAL',
         )
         const orderFilter = find?.filters.find(
           (filt) => filt.filterType === 'MAX_NUM_ORDERS',
-        ) as SymbolMaxNumOrdersFilter | undefined
+        )
         const priceFilter = find?.filters.find(
           (filt) => filt.filterType === 'PRICE_FILTER',
-        ) as SymbolPriceFilter | undefined
+        )
         const marketFilter = find?.filters.find(
           (filt) => filt.filterType === 'MARKET_LOT_SIZE',
-        ) as SymbolMarketLotSizeFilter | undefined
+        )
         const baseAsset = {
-          minAmount: parseFloat(baseAssetLot.minQty),
-          step: parseFloat(baseAssetLot.stepSize),
-          maxAmount: parseFloat(baseAssetLot.maxQty),
+          minAmount: parseFloat(`${baseAssetLot.minQty}`),
+          step: parseFloat(`${baseAssetLot.stepSize}`),
+          maxAmount: parseFloat(`${baseAssetLot.maxQty}`),
           name: find?.baseAsset || '',
           maxMarketAmount: parseFloat(
-            marketFilter?.maxQty || baseAssetLot?.stepSize || '0',
+            `${marketFilter?.maxQty || baseAssetLot?.stepSize || '0'}`,
           ),
         }
         const quoteAsset = {
-          //@ts-ignore
-          minAmount: parseFloat(quoteAssetFilter.minNotional),
+          minAmount: parseFloat(`${quoteAssetFilter.minNotional}`),
           name: find?.quoteAsset || '',
         }
         const maxOrders = orderFilter.maxNumOrders
@@ -1158,6 +1164,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<ExchangeInfo>> {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
     if (!this.client) {
       return this.errorClient(timeProfile)
     }
@@ -1179,11 +1186,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresExchangeInfo()
-        : this.client.deliveryExchangeInfo()
-    )
+    return client
+      .getExchangeInfo()
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         const find = res.symbols.find(
@@ -1191,46 +1195,49 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         )
         const baseAssetLot = find?.filters.find(
           (filt) => filt.filterType === 'LOT_SIZE',
-        ) as SymbolLotSizeFilter | undefined
+        )
         const quoteAssetFilter = find?.filters.find(
           (filt) =>
             //@ts-ignore
             filt.filterType === 'NOTIONAL' ||
             filt.filterType === 'MIN_NOTIONAL',
-        ) as SymbolMinNotionalFilter | undefined
+        )
         const orderFilter = find?.filters.find(
           (filt) => filt.filterType === 'MAX_NUM_ORDERS',
-        ) as SymbolMaxNumOrdersFilter | undefined
+        )
         const priceFilter = find?.filters.find(
           (filt) => filt.filterType === 'PRICE_FILTER',
-        ) as SymbolPriceFilter | undefined
+        )
         const multiplierFilter = find?.filters.find(
           (filt) => filt.filterType === 'PERCENT_PRICE',
-        ) as SymbolPercentPriceFilter | undefined
+        )
         const marketFilter = find?.filters.find(
           (filt) => filt.filterType === 'MARKET_LOT_SIZE',
-        ) as SymbolMarketLotSizeFilter | undefined
+        )
         const baseAsset = {
-          minAmount: this.usdm ? parseFloat(baseAssetLot.minQty) : 0,
+          minAmount: this.usdm ? parseFloat(`${baseAssetLot.minQty}`) : 0,
           step: this.usdm
-            ? parseFloat(baseAssetLot.stepSize)
-            : Number(`1e-${+(find.equalQtyPrecision ?? '1')}`),
-          maxAmount: parseFloat(baseAssetLot.maxQty),
+            ? parseFloat(`${baseAssetLot.stepSize}`)
+            : //@ts-ignore
+              Number(`1e-${+(find.equalQtyPrecision ?? '1')}`),
+          maxAmount: parseFloat(`${baseAssetLot.maxQty}`),
           name: find?.baseAsset || '',
           maxMarketAmount: parseFloat(
-            marketFilter?.maxQty || baseAssetLot?.stepSize || '0',
+            `${marketFilter?.maxQty || baseAssetLot?.stepSize || '0'}`,
           ),
         }
         const quoteAsset = {
           minAmount: this.usdm
             ? parseFloat(
                 quoteAssetFilter?.notional ??
+                  //@ts-ignore
                   quoteAssetFilter?.minNotional ??
                   '0',
               )
             : +(find.contractSize ?? '1'),
           name: find?.quoteAsset || '',
         }
+        //@ts-ignore
         const maxOrders = orderFilter.limit ?? orderFilter.maxNumOrders
         return this.returnGood<ExchangeInfo>(timeProfile)({
           quoteAsset,
@@ -1241,8 +1248,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           ),
           priceMultiplier: multiplierFilter
             ? {
-                up: parseFloat(multiplierFilter.multiplierUp || '2'),
-                down: parseFloat(multiplierFilter.multiplierDown || '0'),
+                up: parseFloat(`${multiplierFilter.multiplierUp || '2'}`),
+                down: parseFloat(`${multiplierFilter.multiplierDown || '0'}`),
                 decimals: parseFloat(
                   `${multiplierFilter.multiplierDecimal || 8}`,
                 ),
@@ -1286,7 +1293,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .exchangeInfo()
+      .getExchangeInfo()
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<(ExchangeInfo & { pair: string })[]>(
@@ -1299,35 +1306,38 @@ class BinanceExchange extends AbstractExchange implements Exchange {
             .map((pair) => {
               const baseAssetLot = pair.filters.find(
                 (filt) => filt.filterType === 'LOT_SIZE',
-              ) as SymbolLotSizeFilter | undefined
+              )
               const quoteAssetFilter = pair.filters.find(
                 (filt) =>
                   //@ts-ignore
                   filt.filterType === 'NOTIONAL' ||
+                  //@ts-ignore
                   filt.filterType === 'MIN_NOTIONAL',
-              ) as SymbolMinNotionalFilter | undefined
+              )
               const orderFilter = pair.filters.find(
                 (filt) => filt.filterType === 'MAX_NUM_ORDERS',
-              ) as SymbolMaxNumOrdersFilter | undefined
+              )
               const priceFilter = pair.filters.find(
                 (filt) => filt.filterType === 'PRICE_FILTER',
-              ) as SymbolPriceFilter | undefined
+              )
               const marketFilter = pair.filters.find(
                 (filt) => filt.filterType === 'MARKET_LOT_SIZE',
-              ) as SymbolMarketLotSizeFilter | undefined
+              )
               const baseAsset = {
-                minAmount: parseFloat(baseAssetLot?.minQty || '0'),
+                minAmount: parseFloat(`${baseAssetLot?.minQty || '0'}`),
 
-                step: parseFloat(baseAssetLot?.stepSize || '0'),
+                step: parseFloat(`${baseAssetLot?.stepSize || '0'}`),
 
-                maxAmount: parseFloat(baseAssetLot?.maxQty || '0'),
+                maxAmount: parseFloat(`${baseAssetLot?.maxQty || '0'}`),
                 name: pair.baseAsset,
                 maxMarketAmount: parseFloat(
-                  marketFilter?.maxQty || baseAssetLot?.stepSize || '0',
+                  `${marketFilter?.maxQty || baseAssetLot?.stepSize || '0'}`,
                 ),
               }
               const quoteAsset = {
-                minAmount: parseFloat(quoteAssetFilter?.minNotional || '0'),
+                minAmount: parseFloat(
+                  `${quoteAssetFilter?.minNotional || '0'}`,
+                ),
                 name: pair.quoteAsset,
               }
               const maxOrders = orderFilter?.maxNumOrders || 200
@@ -1354,7 +1364,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
   async futures_getAllExchangeInfo(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<(ExchangeInfo & { pair: string })[]>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -1379,11 +1390,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresExchangeInfo()
-        : this.client.deliveryExchangeInfo()
-    )
+    return client
+      .getExchangeInfo()
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<(ExchangeInfo & { pair: string })[]>(
@@ -1392,49 +1400,52 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           res.symbols
             .filter(
               (pair) =>
+                //@ts-ignore
                 pair.contractStatus === 'TRADING' || pair.status === 'TRADING',
             )
             .map((pair) => {
               const baseAssetLot = pair.filters.find(
                 (filt) => filt.filterType === 'LOT_SIZE',
-              ) as SymbolLotSizeFilter | undefined
+              )
               const quoteAssetFilter = pair.filters.find(
                 (filt) =>
                   //@ts-ignore
                   filt.filterType === 'NOTIONAL' ||
                   filt.filterType === 'MIN_NOTIONAL',
-              ) as SymbolMinNotionalFilter | undefined
+              )
               const orderFilter = pair.filters.find(
                 (filt) => filt.filterType === 'MAX_NUM_ORDERS',
-              ) as SymbolMaxNumOrdersFilter | undefined
+              )
               const priceFilter = pair.filters.find(
                 (filt) => filt.filterType === 'PRICE_FILTER',
-              ) as SymbolPriceFilter | undefined
+              )
               const multiplierFilter = pair.filters.find(
                 (filt) => filt.filterType === 'PERCENT_PRICE',
-              ) as SymbolPercentPriceFilter | undefined
+              )
               const marketFilter = pair.filters.find(
                 (filt) => filt.filterType === 'MARKET_LOT_SIZE',
-              ) as SymbolMarketLotSizeFilter | undefined
+              )
               const baseAsset = {
                 minAmount: this.usdm
-                  ? parseFloat(baseAssetLot?.minQty || '0')
+                  ? parseFloat(`${baseAssetLot?.minQty || '0'}`)
                   : 0,
 
                 step: this.usdm
-                  ? parseFloat(baseAssetLot?.stepSize || '0')
-                  : Number(`1e-${+(pair.equalQtyPrecision ?? '1')}`),
+                  ? parseFloat(`${baseAssetLot?.stepSize || '0'}`)
+                  : //@ts-ignore
+                    Number(`1e-${+(pair.equalQtyPrecision ?? '1')}`),
 
-                maxAmount: parseFloat(baseAssetLot?.maxQty || '0'),
+                maxAmount: parseFloat(`${baseAssetLot?.maxQty || '0'}`),
                 name: pair.baseAsset,
                 maxMarketAmount: parseFloat(
-                  marketFilter?.maxQty || baseAssetLot?.stepSize || '0',
+                  `${marketFilter?.maxQty || baseAssetLot?.stepSize || '0'}`,
                 ),
               }
               const quoteAsset = {
                 minAmount: this.usdm
                   ? parseFloat(
                       quoteAssetFilter?.notional ??
+                        //@ts-ignore
                         quoteAssetFilter?.minNotional ??
                         '0',
                     )
@@ -1442,6 +1453,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
                 name: pair.quoteAsset,
               }
               const maxOrders =
+                //@ts-ignore
                 orderFilter?.limit ?? orderFilter?.maxNumOrders ?? 0
               return {
                 pair: pair.symbol,
@@ -1453,8 +1465,10 @@ class BinanceExchange extends AbstractExchange implements Exchange {
                 ),
                 priceMultiplier: multiplierFilter
                   ? {
-                      up: parseFloat(multiplierFilter.multiplierUp || '2'),
-                      down: parseFloat(multiplierFilter.multiplierDown || '0'),
+                      up: parseFloat(`${multiplierFilter.multiplierUp || '2'}`),
+                      down: parseFloat(
+                        `${multiplierFilter.multiplierDown || '0'}`,
+                      ),
                       decimals: parseFloat(
                         `${multiplierFilter.multiplierDecimal || 8}`,
                       ),
@@ -1524,14 +1538,10 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return (
       this.domain === ExchangeDomain.us
-        ? this.client.privateRequest(
-            HttpMethod.GET,
-            '/api/v3/openOrders',
-            input,
-          )
-        : this.client.openOrders(input)
+        ? this.client.getPrivate('/api/v3/openOrders', input)
+        : this.client.getOpenOrders(input)
     )
-      .then((orders: QueryOrderResult[]) => {
+      .then((orders: SpotOrder[]) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return {
           timeProfile,
@@ -1570,7 +1580,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     returnOrders = false,
     timeProfile = this.getEmptyTimeProfile(),
   ) {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -1602,11 +1613,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresAllOrders(input)
-        : this.client.deliveryAllOrders(input)
-    )
+    return client
+      .getAllOpenOrders(input)
       .then((orders) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return {
@@ -1661,16 +1669,10 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return (
       this.domain === ExchangeDomain.us
-        ? this.client.privateRequest(
-            HttpMethod.GET,
-            '/sapi/v1/asset/query/trading-fee',
-            { symbol },
-          )
-        : this.client
-            //@ts-ignore
-            .tradeFee({ recvWindow: this.recvWindow })
+        ? this.client.getPrivate('/sapi/v1/asset/query/trading-fee', { symbol })
+        : this.client.getTradeFee()
     )
-      .then((fees: TradeFee[]) => {
+      .then((fees: SymbolTradeFee[]) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         let find = false
         let maker = 0
@@ -1705,7 +1707,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<{ maker: number; taker: number }>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -1726,25 +1729,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.privateRequest(
-            'GET' as HttpMethod.GET,
-            '/fapi/v1/commissionRate',
-            {
-              symbol,
-              recvWindow: this.recvWindow,
-            },
-          )
-        : this.client.privateRequest(
-            'GET' as HttpMethod.GET,
-            '/dapi/v1/commissionRate',
-            {
-              symbol,
-              recvWindow: this.recvWindow,
-            },
-          )
-    )
+    return client
+      .getAccountCommissionRate({ symbol })
       .then(
         (fee?: {
           symbol: string
@@ -1796,16 +1782,10 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return (
       this.domain === ExchangeDomain.us
-        ? this.client.privateRequest(
-            HttpMethod.GET,
-            '/sapi/v1/asset/query/trading-fee',
-            {},
-          )
-        : this.client
-            //@ts-ignore
-            .tradeFee({ recvWindow: this.recvWindow })
+        ? this.client.getPrivate('/sapi/v1/asset/query/trading-fee', {})
+        : this.client.getTradeFee()
     )
-      .then((fees: TradeFee[]) => {
+      .then((fees: SymbolTradeFee[]) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
           fees.map((fee) => ({
@@ -1826,7 +1806,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
   async futures_getAllUserFees(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -1889,7 +1870,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         this.isNewLimit ? 2 : 1,
         timeProfile,
       )) || timeProfile
-    const options: CandlesOptions = {
+    const options: KlinesParams = {
       symbol,
       interval,
     }
@@ -1906,17 +1887,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .candles(options)
+      .getKlines(options)
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<CandleResponse[]>(timeProfile)(
           res.map((k) => ({
-            open: k.open,
-            close: k.close,
-            high: k.high,
-            low: k.low,
-            time: k.openTime,
-            volume: k.volume,
+            open: `${k[1]}`,
+            close: `${k[4]}`,
+            high: `${k[2]}`,
+            low: `${k[3]}`,
+            time: k[0],
+            volume: `${k[5]}`,
           })),
         )
       })
@@ -1941,11 +1922,12 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     countData?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
 
-    const options: CandlesOptions = {
+    const options: KlinesParams = {
       symbol,
       interval,
     }
@@ -2007,7 +1989,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
             }
           }
           await this.client
-            .deliveryCandles({
+            .getKlines({
               ...options,
               startTime: start,
               endTime: end,
@@ -2016,12 +1998,12 @@ class BinanceExchange extends AbstractExchange implements Exchange {
               timeProfile = this.endProfilerTime(timeProfile, 'exchange')
               candles.push(
                 ...res.map((k) => ({
-                  open: k.open,
-                  close: k.close,
-                  high: k.high,
-                  low: k.low,
-                  time: k.openTime,
-                  volume: k.volume,
+                  open: `${k[1]}`,
+                  close: `${k[4]}`,
+                  high: `${k[2]}`,
+                  low: `${k[3]}`,
+                  time: k[0],
+                  volume: `${k[5]}`,
                 })),
               )
             })
@@ -2062,21 +2044,18 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresCandles(options)
-        : this.client.deliveryCandles(options)
-    )
+    return client
+      .getKlines(options)
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<CandleResponse[]>(timeProfile)(
           res.map((k) => ({
-            open: k.open,
-            close: k.close,
-            high: k.high,
-            low: k.low,
-            time: k.openTime,
-            volume: k.volume,
+            open: `${k[1]}`,
+            close: `${k[4]}`,
+            high: `${k[2]}`,
+            low: `${k[3]}`,
+            time: k[0],
+            volume: `${k[5]}`,
           })),
         )
       })
@@ -2122,12 +2101,12 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         this.isNewLimit ? 2 : 1,
         timeProfile,
       )) || timeProfile
-    const options: TradesOptions = {
+    const options: SymbolFromPaginatedRequestFromId = {
       symbol,
       limit: 1000,
     }
     if (fromId) {
-      options.fromId = `${fromId}`
+      options.fromId = fromId
     }
     if (startTime) {
       options.startTime = startTime
@@ -2137,18 +2116,18 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .aggTrades(options)
+      .getAggregateTrades(options)
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<TradeResponse[]>(timeProfile)(
           res.map((k) => ({
-            aggId: `${k.aggId}`,
-            symbol: k.symbol,
-            price: k.price,
-            quantity: k.quantity,
-            firstId: k.firstId,
-            lastId: k.lastId,
-            timestamp: k.timestamp,
+            aggId: `${k.a}`,
+            symbol,
+            price: `${k.p}`,
+            quantity: `${k.q}`,
+            firstId: k.f,
+            lastId: k.l,
+            timestamp: k.T,
           })),
         )
       })
@@ -2171,18 +2150,19 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     endTime?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<TradeResponse[]>> {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
     if (!this.client) {
       return this.errorClient(timeProfile)
     }
     timeProfile =
       (await this.checkLimits('getTrades', 'request', 20, timeProfile)) ||
       timeProfile
-    const options: TradesOptions = {
+    const options: SymbolFromPaginatedRequestFromId = {
       symbol,
       limit: 1000,
     }
     if (fromId) {
-      options.fromId = `${fromId}`
+      options.fromId = fromId
     }
     if (startTime) {
       options.startTime = startTime
@@ -2202,22 +2182,19 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresAggTrades(options)
-        : this.client.deliveryAggTrades(options)
-    )
+    return client
+      .getAggregateTrades(options)
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<TradeResponse[]>(timeProfile)(
           res.map((k) => ({
-            aggId: `${k.aggId}`,
-            symbol: k.symbol,
-            price: k.price,
-            quantity: k.quantity,
-            firstId: k.firstId,
-            lastId: k.lastId,
-            timestamp: k.timestamp,
+            aggId: `${k.a}`,
+            symbol,
+            price: `${k.p}`,
+            quantity: `${k.q}`,
+            firstId: k.f,
+            lastId: k.l,
+            timestamp: k.T,
           })),
         )
       })
@@ -2257,13 +2234,13 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .prices()
+      .getSymbolPriceTicker()
       .then((prices) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<AllPricesResponse[]>(timeProfile)(
-          Object.keys(prices).map((p) => ({
-            pair: p,
-            price: parseFloat(prices[p]),
+          [prices].flat().map((p) => ({
+            pair: p.symbol,
+            price: parseFloat(`${p.price}`),
           })),
         )
       })
@@ -2278,7 +2255,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
   async futures_getAllPrices(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -2303,15 +2281,12 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresMarkPrice()
-        : this.client.deliveryMarkPrice()
-    )
+    return client
+      .getMarkPrice()
       .then((prices) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<AllPricesResponse[]>(timeProfile)(
-          prices.map((p) => ({ pair: p.symbol, price: +p.markPrice })),
+          [prices].flat().map((p) => ({ pair: p.symbol, price: +p.markPrice })),
         )
       })
       .catch(
@@ -2327,7 +2302,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -2353,11 +2329,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresLeverage(input)
-        : this.client.deliveryLeverage(input)
-    )
+    return client
+      .setLeverage(input)
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<number>(timeProfile)(result.leverage)
@@ -2376,7 +2349,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     _symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -2389,7 +2363,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         30,
         timeProfile,
       )) || timeProfile
-    const input = { recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
       const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
@@ -2402,11 +2375,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresPositionMode(input)
-        : this.client.deliveryPositionMode(input)
-    )
+    return client
+      .getCurrentPositionMode()
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<boolean>(timeProfile)(result.dualSidePosition)
@@ -2424,7 +2394,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     value: boolean,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -2433,7 +2404,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('futures_setHedge', 'request', 1, timeProfile)) ||
       timeProfile
-    const input = { dualSidePosition: `${value}`, recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
       const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
@@ -2446,11 +2416,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresPositionModeChange(input)
-        : this.client.deliveryPositionModeChange(input)
-    )
+    return client
+      .setPositionMode({ dualSidePosition: value ? 'true' : 'false' })
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<boolean>(timeProfile)(result.code === 200)
@@ -2470,7 +2437,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     _leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<MarginType>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -2492,11 +2460,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresMarginType(input)
-        : this.client.deliveryMarginType(input)
-    )
+    return client
+      .setMarginType(input)
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return result.code === 200
@@ -2518,7 +2483,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     _symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<PositionInfo[]>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -2531,7 +2497,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         5,
         timeProfile,
       )) || timeProfile
-    const input = { recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
       const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
@@ -2544,15 +2509,39 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresAccountInfo(input)
-        : this.client.deliveryAccountInfo(input)
-    )
-      .then((result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        return this.returnGood<PositionInfo[]>(timeProfile)(result.positions)
-      })
+    return client
+      .getAccountInformation()
+      .then(
+        (
+          result: FuturesAccountInformation | FuturesCoinMAccountInformation,
+        ) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          return this.returnGood<PositionInfo[]>(timeProfile)(
+            result.positions.map(
+              (p: FuturesAccountPosition | FuturesCoinMAccountPosition) => ({
+                ...p,
+                maxNotional:
+                  'maxNotional' in p ? `${p.maxNotional}` : undefined,
+                notional: 'notional' in p ? `${p.notional}` : undefined,
+                isolatedWallet:
+                  'isolatedWallet' in p ? `${p.isolatedWallet}` : '',
+                bidNotional:
+                  'bidNotional' in p ? `${p.bidNotional}` : undefined,
+                askNotional:
+                  'askNotional' in p ? `${p.askNotional}` : undefined,
+                initialMargin: `${p.initialMargin}`,
+                maintMargin: `${p.maintMargin}`,
+                unrealizedProfit: `${p.unrealizedProfit}`,
+                positionInitialMargin: `${p.positionInitialMargin}`,
+                openOrderInitialMargin: `${p.openOrderInitialMargin}`,
+                leverage: `${p.leverage}`,
+                entryPrice: `${p.entryPrice}`,
+                positionAmt: `${p.positionAmt}`,
+              }),
+            ),
+          )
+        },
+      )
       .catch(
         this.handleBinanceErrors(
           this.futures_getPositions,
@@ -2645,27 +2634,37 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       const throttled =
         'Request throttled by system-level protection'.toLowerCase()
       const timeProfile: TimeProfile = args[args.length - 1]
+      let msg = ''
+      try {
+        msg =
+          'message' in e && e.message
+            ? `${e.message}`
+            : 'body' in e && e.body
+              ? `${e.body}`
+              : `${e}`
+      } catch {
+        msg = `${e}`
+      }
       if (
         this.retryErrors.includes(e.code || 0) ||
         e.response ||
-        e.message.toLowerCase().indexOf('fetch failed'.toLowerCase()) !== -1 ||
-        e.message.toLowerCase().indexOf(overloaded) !== -1 ||
-        e.message
-          .toLowerCase()
-          .indexOf('outside of the recvWindow'.toLowerCase()) !== -1 ||
-        e.message.toLowerCase().indexOf('Not Found'.toLowerCase()) !== -1 ||
-        e.message
+        msg.toLowerCase().indexOf('fetch failed'.toLowerCase()) !== -1 ||
+        msg.toLowerCase().indexOf(overloaded) !== -1 ||
+        msg.toLowerCase().indexOf('outside of the recvWindow'.toLowerCase()) !==
+          -1 ||
+        msg.toLowerCase().indexOf('Not Found'.toLowerCase()) !== -1 ||
+        msg
           .toLowerCase()
           .indexOf(
             'Unknown error, please check your request or try again later'.toLowerCase(),
           ) !== -1 ||
-        e.message.toLowerCase().indexOf(tls) !== -1 ||
-        e.message.toLowerCase().indexOf(restApiNotEnabled) !== -1 ||
-        e.message.toLowerCase().indexOf(throttled) !== -1
+        msg.toLowerCase().indexOf(tls) !== -1 ||
+        msg.toLowerCase().indexOf(restApiNotEnabled) !== -1 ||
+        msg.toLowerCase().indexOf(throttled) !== -1
       ) {
         if (timeProfile.attempts < this.retry) {
           if (
-            e.message
+            msg
               .toLowerCase()
               .indexOf(
                 'Unknown error, please check your request or try again later'.toLowerCase(),
@@ -2673,37 +2672,34 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           ) {
             Logger.warn(`${args}`)
           }
-          if (
-            e.message.toLowerCase().indexOf(throttled) !== -1 ||
-            e.code === -1008
-          ) {
+          if (msg.toLowerCase().indexOf(throttled) !== -1 || e.code === -1008) {
             Logger.warn(
               `Request throttled by system-level protection sleep 10s`,
             )
             await sleep(10 * 1000)
           }
-          if (e.message.toLowerCase().indexOf('fetch failed') !== -1) {
+          if (msg.toLowerCase().indexOf('fetch failed') !== -1) {
             Logger.warn(`fetch failed sleep 5s`)
             await sleep(5 * 1000)
           }
-          if (e.message.toLowerCase().indexOf(overloaded) !== -1) {
+          if (msg.toLowerCase().indexOf(overloaded) !== -1) {
             Logger.warn(`Binance overloaded ${overloaded}. Wait 10s`)
             await sleep(10 * 1000)
           }
-          if (e.message.toLowerCase().indexOf(tls) !== -1) {
+          if (msg.toLowerCase().indexOf(tls) !== -1) {
             Logger.warn(`Tls sleep 10s`)
             await sleep(10 * 1000)
           }
-          if (e.message.toLowerCase().indexOf(restApiNotEnabled) !== -1) {
+          if (msg.toLowerCase().indexOf(restApiNotEnabled) !== -1) {
             Logger.warn(`Rest API trading is not enabled sleep 10s`)
             await sleep(10 * 1000)
           }
-          if (e.code === ErrorCodes.TOO_MANY_ORDERS) {
+          if (e.code === -1015) {
             const time = this.coinm ? 61000 : 11000
             Logger.warn(`Too many new order ${this.key}, sleep ${time / 1000}s`)
             await sleep(time)
           }
-          if (e.code === ErrorCodes.TOO_MANY_REQUESTS) {
+          if (e.code === -1008) {
             if (!this.isUs) {
               limitHelper.setLimits({
                 orderCount10s: '100000',
@@ -2724,7 +2720,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
               })
             }
 
-            const bannedTime = e.message.toLowerCase().match(/\d{13,13}/)?.[0]
+            const bannedTime = msg.toLowerCase().match(/\d{13,13}/)?.[0]
             if (
               bannedTime &&
               !isNaN(+bannedTime) &&
@@ -2744,14 +2740,14 @@ class BinanceExchange extends AbstractExchange implements Exchange {
                 }
               }
               Logger.warn(
-                `Get ${e.message}, bannedTime: ${bannedTime}, ${
+                `Get ${msg}, bannedTime: ${bannedTime}, ${
                   !this.futures ? 'spot' : this.coinm ? 'coinm' : 'futures'
                 }`,
               )
               await sleep(+bannedTime + 1 - +new Date())
             } else {
               Logger.warn(
-                `Get ${e.message}, sleep 30s, ${
+                `Get ${msg}, sleep 30s, ${
                   !this.futures ? 'spot' : this.coinm ? 'coinm' : 'futures'
                 }`,
               )
@@ -2789,7 +2785,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           return newResult as T
         } else {
           return this.returnBad(timeProfile)(
-            new Error(`${this.exchangeProblems}${e.message}`),
+            new Error(`${this.exchangeProblems}${msg}`),
           )
         }
       } else {
@@ -2804,8 +2800,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
    * @param {Order} order to convert
    * @returns {CommonOrder} Common order result
    */
-  private convertOrder(order: Order): CommonOrder {
-    const orderStatus = (status: OrderStatus_LT): OrderStatusType => {
+  private convertOrder(order: SpotOrder | OrderResponseResult): CommonOrder {
+    const orderStatus = (status: OrderStatus): OrderStatusType => {
       if (
         status === 'FILLED' ||
         status === 'CANCELED' ||
@@ -2816,7 +2812,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       }
       return 'CANCELED'
     }
-    const orderType = (type: OrderType_LT): OrderTypeT => {
+    const orderType = (type: OrderType): OrderTypeT => {
       if (type === 'LIMIT' || type === 'MARKET') {
         return type
       }
@@ -2826,35 +2822,29 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       symbol: order.symbol,
       orderId: `${order.orderId}`,
       clientOrderId: order.clientOrderId,
-      transactTime: order.transactTime || order.time || -1,
-      updateTime: order.updateTime,
-      price: order.price,
-      origQty: order.origQty,
-      executedQty: order.executedQty,
-      cummulativeQuoteQty: order.cummulativeQuoteQty,
+      transactTime:
+        ('transactTime' in order ? order.transactTime : 0) ||
+        ('time' in order ? order.time : 0) ||
+        -1,
+      updateTime:
+        ('updateTime' in order ? order.updateTime : 0) ||
+        ('time' in order ? order.time : 0) ||
+        -1,
+      price: `${order.price}`,
+      origQty: `${order.origQty}`,
+      executedQty: `${order.executedQty}`,
+      cummulativeQuoteQty: `${order.cummulativeQuoteQty}`,
       status: orderStatus(order.status),
       type: orderType(order.type),
       side: order.side,
-      fills:
-        order.fills?.map((f) => ({
-          price: f.price,
-          qty: f.qty,
-          commission: f.commission,
-          commissionAsset: f.commissionAsset,
-          tradeId: `${f.tradeId}`,
-        })) || [],
+      fills: [],
     }
   }
 
   private futures_convertOrder(
-    order: Omit<FuturesOrder, 'orderId' | 'cumQty' | 'activatePrice'> & {
-      orderId: string | number
-      cumBase?: string
-      cumQuote?: string
-      cumQty?: string
-    },
+    order: NewOrderResult | OrderResult,
   ): CommonOrder {
-    const orderStatus = (status: OrderStatus_LT): OrderStatusType => {
+    const orderStatus = (status: OrderStatus): OrderStatusType => {
       if (
         status === 'FILLED' ||
         status === 'CANCELED' ||
@@ -2865,7 +2855,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       }
       return 'CANCELED'
     }
-    const orderType = (type: FuturesOrderType_LT): OrderTypeT => {
+    const orderType = (type: FuturesOrderType): OrderTypeT => {
       if (type === 'LIMIT' || type === 'MARKET') {
         return type
       }
@@ -2875,26 +2865,30 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       positionSide: order.positionSide,
       reduceOnly: order.reduceOnly,
       closePosition: order.closePosition,
-      timeInForce: order.timeInForce,
-      cumQuote: order.cumQuote,
-      cumBase: order.cumBase,
-      cumQty: order.cumQty,
-      avgPrice: order.avgPrice,
+      timeInForce:
+        order.timeInForce === 'GTX' || order.timeInForce === 'GTD'
+          ? 'GTC'
+          : order.timeInForce,
+      cumQuote: `${order.cumQuote}`,
+      cumBase: 'cumBase' in order ? `${order.cumBase}` : '',
+      cumQty: 'cumQuote' in order ? `${order.cumQuote}` : '',
+      avgPrice: `${order.avgPrice}`,
       symbol: order.symbol,
       orderId: order.orderId.toString(),
       clientOrderId: order.clientOrderId,
       updateTime: order.updateTime,
       status: orderStatus(order.status),
       type: orderType(order.type),
-      price:
+      price: `${
         order.avgPrice &&
         +order.avgPrice &&
         !isNaN(+order.avgPrice) &&
         isFinite(+order.avgPrice)
           ? order.avgPrice
-          : order.price,
-      origQty: order.origQty,
-      executedQty: order.executedQty,
+          : order.price
+      }`,
+      origQty: `${order.origQty}`,
+      executedQty: `${order.executedQty}`,
       side: order.side,
     }
   }
@@ -2914,7 +2908,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
   async futures_leverageBracket(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<LeverageBracket[]>> {
-    if (!this.client) {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
       return this.errorClient(timeProfile)
     }
     if (!this.futures) {
@@ -2923,7 +2918,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('leverageBracket', 'request', 1, timeProfile)) ||
       timeProfile
-    const input = { recvWindow: this.recvWindow }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
       const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
@@ -2936,18 +2930,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
-    return (
-      this.usdm
-        ? this.client.futuresLeverageBracket(input)
-        : this.client.privateRequest(
-            HttpMethod.GET,
-            '/dapi/v2/leverageBracket',
-            input,
-          )
-    )
-      .then((result: LeverageBracketResult[]) => {
+    return client
+      .getNotionalAndLeverageBrackets()
+      .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        const data = result.map((r) => ({
+        const data = [result].flat().map((r) => ({
           symbol: r.symbol,
           leverage: r.brackets[0].initialLeverage,
           step: 1,

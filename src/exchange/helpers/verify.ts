@@ -1,4 +1,4 @@
-import Binance from 'binance-api-node'
+import { MainClient } from 'binance'
 import Kucoin from '../exchanges/kucoin'
 import Bitget from '../exchanges/bitget'
 import Bybit from '../exchanges/bybit'
@@ -26,19 +26,22 @@ const verifyBinance = async (
   domain: ExchangeDomain = ExchangeDomain.com,
 ): Promise<VerifyResponse> => {
   try {
-    const client = Binance({
-      apiKey,
-      apiSecret,
-      httpBase: getBinanceBase(domain),
+    const prepared = apiSecret
+      .replace(/-----BEGIN PRIVATE KEY----- /g, '-----BEGIN PRIVATE KEY-----\n')
+      .replace(/ -----END PRIVATE KEY-----/g, '\n-----END PRIVATE KEY-----')
+    const client = new MainClient({
+      api_key: apiKey,
+      api_secret: prepared,
+      baseUrl: getBinanceBase(domain),
     })
     if (domain === ExchangeDomain.us) {
       return client
-        .accountInfo()
+        .getAccountInfo()
         .then(() => ({ status: true, reason: '' }))
         .catch((e) => ({ status: false, reason: `Binance us catch ${e}` }))
     } else {
       return client
-        .apiPermission()
+        .getApiKeyPermissions()
         .then((res) => {
           return {
             status:

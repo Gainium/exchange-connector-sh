@@ -1,8 +1,5 @@
 import AbstractExchange, { Exchange } from '../../abstractExchange'
 import {
-  MainClient,
-  USDMClient,
-  CoinMClient,
   AccountInformation,
   FuturesAccountInformation,
   FuturesCoinMAccountInformation,
@@ -22,6 +19,7 @@ import {
   OrderType,
   FuturesOrderType,
 } from 'binance'
+import { USDMClient, CoinMClient, MainClient } from '../../../binance-custom'
 import limitHelper from './limit'
 import {
   BaseReturn,
@@ -116,30 +114,30 @@ class BinanceExchange extends AbstractExchange implements Exchange {
               httpBase: getBinanceBase(domain),
             })
           : undefined */
-      if (!this.futures) {
-        this.client = new MainClient({
+
+      this.client = new MainClient({
+        api_key: this.key ?? '',
+        api_secret: this.secret ?? '',
+        baseUrl: getBinanceBase(domain),
+        recvWindow: this.recvWindow,
+        beautifyResponses: false,
+      })
+
+      if (this.usdm) {
+        this.usdmClient = new USDMClient({
           api_key: this.key ?? '',
           api_secret: this.secret ?? '',
-          baseUrl: getBinanceBase(domain),
           recvWindow: this.recvWindow,
           beautifyResponses: false,
         })
-      } else {
-        if (this.usdm) {
-          this.usdmClient = new USDMClient({
-            api_key: this.key ?? '',
-            api_secret: this.secret ?? '',
-            recvWindow: this.recvWindow,
-            beautifyResponses: false,
-          })
-        } else {
-          this.coinmClient = new CoinMClient({
-            api_key: this.key ?? '',
-            api_secret: this.secret ?? '',
-            recvWindow: this.recvWindow,
-            beautifyResponses: false,
-          })
-        }
+      }
+      if (this.coinm) {
+        this.coinmClient = new CoinMClient({
+          api_key: this.key ?? '',
+          api_secret: this.secret ?? '',
+          recvWindow: this.recvWindow,
+          beautifyResponses: false,
+        })
       }
     } catch (e) {
       Logger.warn(
@@ -308,10 +306,10 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       let msg = ''
       try {
         msg =
-          'body' in e && e.body
-            ? `${e.body}`
-            : 'message' in e && e.message
-              ? `${e.message}`
+          'message' in e && e.message
+            ? `${e.message}`
+            : 'body' in e && e.body
+              ? `${e.body}`
               : `${e}`
       } catch {
         msg = `${e}`
@@ -486,6 +484,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         type: 'LIMIT',
         newClientOrderId,
         recvWindow: this.recvWindow,
+        timeInForce: 'GTC',
       }
     }
     if (type && type === 'MARKET') {
@@ -744,7 +743,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       })
       .then((price) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        return this.returnGood<number>(timeProfile)(parseFloat(price[symbol]))
+        return this.returnGood<number>(timeProfile)(
+          parseFloat(`${[price].flat()[0]?.price ?? '0'}`),
+        )
       })
       .catch(
         this.handleBinanceErrors(
@@ -2636,10 +2637,10 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       let msg = ''
       try {
         msg =
-          'body' in e && e.body
-            ? `${e.body}`
-            : 'message' in e && e.message
-              ? `${e.message}`
+          'message' in e && e.message
+            ? `${e.message}`
+            : 'body' in e && e.body
+              ? `${e.body}`
               : `${e}`
       } catch {
         msg = `${e}`

@@ -104,6 +104,9 @@ class OKXExchange extends AbstractExchange implements Exchange {
     if (this.okxSource === OKXSource.my) {
       restOptions.baseUrl = 'https://eea.okx.com'
     }
+    if (this.okxSource === OKXSource.app) {
+      restOptions.baseUrl = 'https://us.okx.com'
+    }
     this.client = new OKXRestClient(
       this.key ? options : undefined,
       process.env.OKXENV === 'sandbox' ? 'demo' : 'prod',
@@ -189,7 +192,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     uid: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
-    if (this.okxSource === OKXSource.my) {
+    if (this.okxSource === OKXSource.my || this.okxSource === OKXSource.app) {
       return this.returnGood<boolean>(timeProfile)(false)
     }
     timeProfile =

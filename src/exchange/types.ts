@@ -139,6 +139,7 @@ export enum CoinbaseKeysType {
 
 export enum OKXSource {
   my = 'my',
+  app = 'app',
   com = 'com',
 }
 

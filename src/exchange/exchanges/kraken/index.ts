@@ -220,7 +220,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   /**
    * Check rate limits before making API call
    */
-  private async checkLimits(
+  protected async checkLimits(
     method: string,
     symbol?: string,
     timeProfile?: TimeProfile,

@@ -11,6 +11,7 @@ import Bybit from '../exchanges/bybit'
 import OKX from '../exchanges/okx'
 import Coinbase from '../exchanges/coinbase'
 import Hyperliquid from '../exchanges/hyperliquid'
+import Kraken from '../exchanges/kraken'
 
 export const getPrices = (exchange: ExchangeEnum) => {
   switch (exchange) {
@@ -76,6 +77,12 @@ export const getPrices = (exchange: ExchangeEnum) => {
     case ExchangeEnum.hyperliquidLinear:
       const hyperliquidUsdm = new Hyperliquid(Futures.usdm, '', '', '')
       return hyperliquidUsdm.getAllPrices()
+    case ExchangeEnum.kraken:
+      const kraken = new Kraken(Futures.null, '', '')
+      return kraken.getAllPrices()
+    case ExchangeEnum.krakenUsdm:
+      const krakenUsdm = new Kraken(Futures.usdm, '', '')
+      return krakenUsdm.getAllPrices()
     default:
       throw new Error(`getPrices is not supported for ${exchange}`)
   }
@@ -254,6 +261,22 @@ export const getCandles = (
     case ExchangeEnum.hyperliquidLinear:
       const hyperliquidUsdm = new Hyperliquid(Futures.usdm, '', '', '')
       return hyperliquidUsdm.getCandles(
+        params.symbol,
+        params.type as ExchangeIntervals,
+        params.startAt,
+        params.endAt,
+      )
+    case ExchangeEnum.kraken:
+      const kraken = new Kraken(Futures.null, '', '')
+      return kraken.getCandles(
+        params.symbol,
+        params.type as ExchangeIntervals,
+        params.startAt,
+        params.endAt,
+      )
+    case ExchangeEnum.krakenUsdm:
+      const krakenUsdm = new Kraken(Futures.usdm, '', '')
+      return krakenUsdm.getCandles(
         params.symbol,
         params.type as ExchangeIntervals,
         params.startAt,

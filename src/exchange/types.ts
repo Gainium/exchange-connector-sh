@@ -119,6 +119,8 @@ export enum ExchangeEnum {
   bitgetCoinm = 'bitgetCoinm',
   hyperliquid = 'hyperliquid',
   hyperliquidLinear = 'hyperliquidLinear',
+  kraken = 'kraken',
+  krakenUsdm = 'krakenUsdm',
 }
 
 export enum ExchangeDomain {

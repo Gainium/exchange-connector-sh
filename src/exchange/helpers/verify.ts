@@ -5,6 +5,7 @@ import Bybit from '../exchanges/bybit'
 import OKX from '../exchanges/okx'
 import Coinbase from '../exchanges/coinbase'
 import Hyperliquid from '../exchanges/hyperliquid'
+import Kraken from '../exchanges/kraken'
 import {
   BybitHost,
   CoinbaseKeysType,
@@ -224,6 +225,25 @@ const verifyHyperliquid = async (
     .catch((e) => ({ status: false, reason: `Hyperliquid catch ${e}` }))
 }
 
+const verifyKraken = async (
+  tradeType: TradeTypeEnum,
+  key: string,
+  secret: string,
+): Promise<VerifyResponse> => {
+  const client = new Kraken(
+    tradeType === TradeTypeEnum.spot ? Futures.null : Futures.usdm,
+    key,
+    secret,
+  )
+  return await client
+    .getBalance()
+    .then((res) => ({
+      status: res.status === StatusEnum.ok,
+      reason: JSON.stringify(res),
+    }))
+    .catch((e) => ({ status: false, reason: `Kraken catch ${e}` }))
+}
+
 const verifyPaper = async (
   key: string,
   secret: string,
@@ -315,6 +335,9 @@ const verifyExchange = async (
   ) {
     return verifyHyperliquid(tradeType, key, secret, subaccount)
   }
+  if ([ExchangeEnum.kraken, ExchangeEnum.krakenUsdm].includes(provider)) {
+    return verifyKraken(tradeType, key, secret)
+  }
   return { status: false, reason: 'Exchange not supported' }
 }
 
@@ -322,6 +345,7 @@ const verifiers = {
   binance: verifyBinance,
   kucoin: verifyKucoin,
   bybit: verifyBybit,
+  kraken: verifyKraken,
   verifyExchange,
   verifyPaper,
   verifyCoinbase,

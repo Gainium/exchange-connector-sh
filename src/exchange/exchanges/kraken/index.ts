@@ -22,7 +22,7 @@ import {
   RebateOverview,
   RebateRecord,
 } from '../../types'
-import { SpotClient, DerivativesClient } from '@siebly/kraken-api'
+import { SpotClient, DerivativesClient } from '../../../kraken-custom'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
@@ -186,7 +186,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       // Log comprehensive error information including request details
       Logger.error(
         `[${httpStatus || 'NO_STATUS'}] Kraken API error: ${actualError}`,
-        `Details: ${JSON.stringify(errorDetails, null, 2)}`,
+        `Details: ${JSON.stringify(errorDetails)}, ${cb.name} called with params: ${JSON.stringify(requestParams)}`,
       )
 
       // Check if error is retryable

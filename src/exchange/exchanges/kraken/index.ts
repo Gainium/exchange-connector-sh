@@ -1356,16 +1356,16 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           const infos: (ExchangeInfo & { pair: string })[] = result.instruments
             .filter((i) => i.tradeable)
             .map((instrument) => ({
-              pair: instrument.symbol || '',
+              pair: `${instrument.base}-${instrument.quote}`,
               baseAsset: {
-                name: instrument.underlying || '',
+                name: instrument.base || '',
                 minAmount: 0.001,
                 maxAmount: instrument.maxPositionSize || 999999999,
                 step: instrument.tickSize || 0.01,
                 maxMarketAmount: instrument.maxPositionSize || 999999999,
               },
               quoteAsset: {
-                name: 'USD',
+                name: instrument.quote,
                 minAmount: 0,
               },
               maxOrders: 200,

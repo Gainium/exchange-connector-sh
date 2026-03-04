@@ -26,6 +26,7 @@ import { SpotClient, DerivativesClient } from '../../../kraken-custom'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
+import { FuturesGetCandlesParams } from '@siebly/kraken-api'
 
 class KrakenError extends Error {
   code: string
@@ -51,6 +52,152 @@ const intervalMap: { [x in ExchangeIntervals]: number } = {
   '1w': 10080,
 }
 
+/**
+ * Singleton class to manage Kraken symbol mappings
+ * Maps between our symbol format (BTC-USDT) and Kraken's format (XXBTZUSD)
+ */
+class KrakenSymbolMapper {
+  private static spotInstance: KrakenSymbolMapper
+  private static usdmInstance: KrakenSymbolMapper
+  private static coinmInstance: KrakenSymbolMapper
+
+  static getSpotInstance() {
+    if (!KrakenSymbolMapper.spotInstance) {
+      KrakenSymbolMapper.spotInstance = new KrakenSymbolMapper('spot')
+    }
+    return KrakenSymbolMapper.spotInstance
+  }
+
+  static getUsdmInstance() {
+    if (!KrakenSymbolMapper.usdmInstance) {
+      KrakenSymbolMapper.usdmInstance = new KrakenSymbolMapper('usdm')
+    }
+    return KrakenSymbolMapper.usdmInstance
+  }
+
+  static getCoinmInstance() {
+    if (!KrakenSymbolMapper.coinmInstance) {
+      KrakenSymbolMapper.coinmInstance = new KrakenSymbolMapper('coinm')
+    }
+    return KrakenSymbolMapper.coinmInstance
+  }
+
+  private ourSymbolToKraken: Map<string, string> = new Map()
+  private krakenToOurSymbol: Map<string, string> = new Map()
+  private krakenAssetToActual: Map<string, string> = new Map() // For spot: XXBT -> XBT, ZUSD -> USD
+  private isInitialized = false
+  private marketType: 'spot' | 'usdm' | 'coinm'
+
+  private constructor(marketType: 'spot' | 'usdm' | 'coinm') {
+    this.marketType = marketType
+  }
+
+  /**
+   * Update asset name mappings (spot only)
+   * @param assets Record of Kraken asset name to asset info
+   */
+  updateAssets(assets: Record<string, { altname: string }>) {
+    this.krakenAssetToActual.clear()
+
+    for (const [krakenName, info] of Object.entries(assets)) {
+      if (info.altname) {
+        if (krakenName === 'XXBT' && info.altname === 'XBT') {
+          this.krakenAssetToActual.set(krakenName, 'BTC') // Special case for Bitcoin
+        } else if (info.altname === 'XDG') {
+          this.krakenAssetToActual.set(krakenName, 'DOGE') // Special case for Dogecoin
+        } else {
+          this.krakenAssetToActual.set(krakenName, info.altname)
+        }
+      }
+    }
+  }
+
+  /**
+   * Convert Kraken asset name to actual name
+   * @param krakenAsset Kraken asset name (e.g., "XXBT", "ZUSD")
+   * @returns Actual asset name (e.g., "XBT", "USD")
+   */
+  getActualAssetName(krakenAsset: string): string {
+    const actualName = this.krakenAssetToActual.get(krakenAsset)
+    if (actualName) {
+      return actualName
+    }
+
+    // Fallback to basic conversion if not in map
+    Logger.warn(
+      `Kraken ${this.marketType}: Asset ${krakenAsset} not found in map, using fallback`,
+    )
+    return krakenAsset
+  }
+
+  /**
+   * Update symbol maps from exchange info
+   * @param infos Array of exchange info with pair (our format) and code (Kraken format)
+   */
+  updateMaps(infos: Array<{ pair: string; code: string }>) {
+    this.ourSymbolToKraken.clear()
+    this.krakenToOurSymbol.clear()
+
+    for (const info of infos) {
+      if (info.pair && info.code) {
+        this.ourSymbolToKraken.set(info.pair, info.code)
+        this.krakenToOurSymbol.set(info.code, info.pair)
+      }
+    }
+
+    this.isInitialized = true
+  }
+
+  /**
+   * Convert our symbol format to Kraken's format
+   * @param ourSymbol Symbol in our format (e.g., "BTC-USDT")
+   * @returns Symbol in Kraken format (e.g., "XXBTZUSD")
+   */
+  async toKrakenSymbol(ourSymbol: string): Promise<string> {
+    if (!this.isInitialized) {
+      return await new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(this.toKrakenSymbol(ourSymbol))
+        }, 500)
+      })
+    }
+    const krakenSymbol = this.ourSymbolToKraken.get(ourSymbol)
+    if (krakenSymbol) {
+      return krakenSymbol
+    }
+
+    return ourSymbol.replace('-', '').replace('BTC', 'XXBT')
+  }
+
+  /**
+   * Convert Kraken's symbol format to our format
+   * @param krakenSymbol Symbol in Kraken format (e.g., "XXBTZUSD")
+   * @returns Symbol in our format (e.g., "BTC-USDT")
+   */
+  async toOurSymbol(krakenSymbol: string): Promise<string> {
+    if (!this.isInitialized) {
+      return await new Promise((resolve) => {
+        setTimeout(() => {
+          resolve(this.toOurSymbol(krakenSymbol))
+        }, 500)
+      })
+    }
+    const ourSymbol = this.krakenToOurSymbol.get(krakenSymbol)
+    if (ourSymbol) {
+      return ourSymbol
+    }
+    if (krakenSymbol === 'XBT:USD') {
+      return 'BTC-USD'
+    }
+
+    return krakenSymbol.replace(/^Z+/, '').replace('XXBT', 'BTC')
+  }
+
+  getIsInitialized(): boolean {
+    return this.isInitialized
+  }
+}
+
 class KrakenExchange extends AbstractExchange implements Exchange {
   /** Kraken Spot client */
   protected spotClient?: SpotClient
@@ -61,6 +208,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   /** Array of error codes, after which retry attempt is executed */
   private retryErrors: string[]
   protected futures?: Futures
+  /** Symbol mapper for converting between our format and Kraken's format */
+  private symbolMapper: KrakenSymbolMapper
 
   constructor(
     futures: Futures,
@@ -94,8 +243,13 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     // Initialize appropriate client based on futures type
     if (this.usdm) {
       this.derivativesClient = new DerivativesClient(derivativesOptions)
+      this.symbolMapper = KrakenSymbolMapper.getUsdmInstance()
+    } else if (this.coinm) {
+      this.derivativesClient = new DerivativesClient(derivativesOptions)
+      this.symbolMapper = KrakenSymbolMapper.getCoinmInstance()
     } else {
       this.spotClient = new SpotClient(spotOptions)
+      this.symbolMapper = KrakenSymbolMapper.getSpotInstance()
     }
 
     this.retry = 10
@@ -113,6 +267,25 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       '521',
       '522',
     ]
+
+    // Initialize symbol maps in background
+    this.initializeSymbolMaps()
+  }
+
+  /**
+   * Initialize symbol maps by fetching exchange info
+   * This runs in the background and doesn't block construction
+   */
+  private async initializeSymbolMaps() {
+    if (!this.symbolMapper.getIsInitialized()) {
+      try {
+        await this.getAllExchangeInfo()
+      } catch (error) {
+        Logger.warn(
+          `Failed to initialize Kraken symbol maps: ${error.message}. Maps will be populated on first getAllExchangeInfo call.`,
+        )
+      }
+    }
   }
 
   get usdm() {
@@ -300,8 +473,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       expired: 'CANCELED',
       filled: 'FILLED',
       'partially filled': 'PARTIALLY_FILLED',
+      FULLY_EXECUTED: 'FILLED',
+      REJECTED: 'CANCELED',
     }
-    return statusMap[status.toLowerCase()] || 'NEW'
+
+    return statusMap[status.toLowerCase()] || statusMap[status] || 'NEW'
   }
 
   /**
@@ -312,22 +488,19 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
-   * Normalize Kraken symbol format (XXBTZUSD -> BTCUSDT)
+   * Normalize Kraken symbol format to our format (XXBTZUSD -> BTC-USD)
+   * Uses symbol mapper with fallback to basic conversion
    */
-  private normalizeSymbol(krakenSymbol: string): string {
-    // Remove leading X's and Z's (Kraken's asset naming convention)
-    return krakenSymbol
-      .replace(/^X+/, '')
-      .replace(/^Z+/, '')
-      .replace('XBT', 'BTC')
+  private async normalizeSymbol(krakenSymbol: string): Promise<string> {
+    return this.symbolMapper.toOurSymbol(krakenSymbol)
   }
 
   /**
-   * Convert common symbol to Kraken format
+   * Convert our symbol format to Kraken format (BTC-USD -> XXBTZUSD)
+   * Uses symbol mapper with fallback to basic conversion
    */
-  private toKrakenSymbol(symbol: string): string {
-    // Basic conversion - may need refinement
-    return symbol.replace('BTC', 'XBT')
+  private async toKrakenSymbol(symbol: string): Promise<string> {
+    return this.symbolMapper.toKrakenSymbol(symbol)
   }
 
   /**
@@ -377,7 +550,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     updateTime?: number
     transactTime?: number
   }): CommonOrder {
-    return {
+    const order2: CommonOrder = {
       symbol: order.symbol,
       orderId: order.orderId,
       clientOrderId: order.clientOrderId || '',
@@ -390,6 +563,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       type: this.mapOrderType(order.type),
       side: order.side.toUpperCase() as OrderSideType,
     }
+    return order2
   }
 
   /**
@@ -463,7 +637,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async getBalance(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FreeAsset>> {
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -477,7 +651,6 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .getAccounts()
         .then((result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
           if (result.result !== 'success' || !result.accounts) {
             const errorDetails = {
               result: result.result,
@@ -507,7 +680,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
 
           // Handle margin accounts
-          for (const [key, account] of Object.entries(accounts)) {
+          /* for (const [key, account] of Object.entries(accounts)) {
             if (
               key !== 'flex' &&
               key !== 'cash' &&
@@ -517,12 +690,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             ) {
               const marginAccount = account as any
               balances.push({
-                asset: marginAccount.currency || 'UNKNOWN',
+                asset: this.symbolMapper.getActualAssetName(
+                  marginAccount.currency || 'UNKNOWN',
+                ),
                 free: parseFloat(marginAccount.auxiliary?.af || '0'),
                 locked: parseFloat(marginAccount.marginRequirements?.im || '0'),
               })
             }
-          }
+          } */
 
           return this.returnGood<FreeAsset>(timeProfile)(balances)
         })
@@ -545,7 +720,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     return this.spotClient
       .getAccountBalance()
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result) {
@@ -555,7 +730,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         const balances: FreeAsset = []
         for (const [asset, balance] of Object.entries(result.result)) {
           balances.push({
-            asset: this.normalizeSymbol(asset),
+            asset: this.symbolMapper.getActualAssetName(asset),
             free: parseFloat(balance as string),
             locked: 0, // Kraken's basic balance doesn't separate locked
           })
@@ -597,9 +772,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       price,
       newClientOrderId,
       type = 'LIMIT',
+      reduceOnly,
     } = order
 
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -617,40 +793,37 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             ? 'mkt'
             : (type as string).toLowerCase()
 
+      const krakenSymbol = await this.toKrakenSymbol(symbol)
+
       const orderParams = {
         orderType: krakenOrderType as 'lmt' | 'mkt',
-        symbol,
+        symbol: krakenSymbol,
         side: side.toLowerCase() as 'buy' | 'sell',
         size: quantity,
         limitPrice: type === 'LIMIT' ? price : undefined,
         cliOrdId: newClientOrderId,
+        reduceOnly,
       }
 
       return this.derivativesClient
         .submitOrder(orderParams)
-        .then((result) => {
+        .then(async (result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
           if (result.result !== 'success' || !result.sendStatus) {
             throw new Error(
               `Failed to create order. Result: ${result.result || 'undefined'}, SendStatus: ${!!result.sendStatus}`,
             )
           }
-
-          const orderData = result.sendStatus
-
-          return this.returnGood<CommonOrder>(timeProfile)(
-            this.futures_convertOrder({
-              orderId: orderData.order_id || '',
-              symbol,
-              clientOrderId: newClientOrderId || orderData.cliOrdId || '',
-              price,
-              origQty: quantity,
-              executedQty: 0,
-              status: orderData.status || 'NEW',
-              type,
-              side,
-            }),
+          if (result.sendStatus.orderEvents?.length === 0) {
+            throw new Error(
+              result.sendStatus.status ||
+                'Failed to create order, no order events returned',
+            )
+          }
+          await sleep(500)
+          return await this.getOrder(
+            { symbol, newClientOrderId: orderParams.cliOrdId || '' },
+            timeProfile,
           )
         })
         .catch(
@@ -674,14 +847,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .submitOrder({
         ordertype: type.toLowerCase() as 'limit' | 'market',
         type: side.toLowerCase() as 'buy' | 'sell',
-        pair: this.toKrakenSymbol(symbol),
+        pair: await this.toKrakenSymbol(symbol),
         volume: quantity.toString(),
         price: type === 'LIMIT' ? price.toString() : undefined,
         userref: newClientOrderId
           ? parseInt(newClientOrderId.substring(0, 8), 16)
           : undefined,
       })
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result || result.error?.length) {
@@ -689,20 +862,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
 
         const orderIds = result.result.txid || []
-        const orderId = orderIds[0] || ''
 
-        return this.returnGood<CommonOrder>(timeProfile)(
-          this.convertOrder({
-            orderId,
-            symbol,
-            clientOrderId: newClientOrderId || '',
-            price: price.toString(),
-            origQty: quantity.toString(),
-            executedQty: '0',
-            status: 'NEW',
-            type,
-            side,
-          }),
+        await sleep(500)
+        return await this.getOrder(
+          { symbol, newClientOrderId: orderIds?.[0] || '' },
+          timeProfile,
         )
       })
       .catch(
@@ -723,7 +887,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -737,7 +901,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .getOrderStatus({
           cliOrdIds: [newClientOrderId],
         })
-        .then((result) => {
+        .then(async (result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
           if (
@@ -745,16 +909,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             !result.orders ||
             result.orders.length === 0
           ) {
-            throw new Error('Order not found')
+            throw new Error('Order not found in active orders')
           }
 
           const orderInfo = result.orders[0]
           const order = orderInfo.order
-
           return this.returnGood<CommonOrder>(timeProfile)(
             this.futures_convertOrder({
               orderId: order.orderId || '',
-              symbol: order.symbol || symbol,
+              symbol: await this.normalizeSymbol(order.symbol || symbol),
               clientOrderId: newClientOrderId,
               price: order.limitPrice,
               origQty: order.quantity,
@@ -765,12 +928,93 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             }),
           )
         })
-        .catch(
-          this.handleKrakenErrors(
+        .catch(async (error) => {
+          // If order not found in active orders, try order events history
+          // getOrderStatus only returns open orders or orders filled/cancelled in last 5 seconds
+          if (error.message?.includes('Order not found')) {
+            try {
+              timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+              const eventsResult = await this.derivativesClient!.getOrderEvents(
+                {
+                  tradeable: await this.toKrakenSymbol(symbol),
+                },
+              )
+
+              timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+              if (!eventsResult.elements) {
+                throw new Error('Failed to get order events')
+              }
+
+              // Find the order by client order ID in events
+              // Events can be: OrderPlaced, OrderRejected, OrderCancelled
+              const orderEvent = eventsResult.elements.find((e: any) => {
+                const order =
+                  e.event?.OrderPlaced?.order ||
+                  e.event?.OrderRejected?.order ||
+                  e.event?.OrderCancelled?.order ||
+                  null
+                return order?.clientId === newClientOrderId
+              })
+
+              if (!orderEvent || !orderEvent.event) {
+                throw new Error('Order not found in history')
+              }
+
+              // Extract order from event
+              const order =
+                orderEvent.event?.OrderPlaced?.order ||
+                orderEvent.event?.OrderRejected?.order ||
+                orderEvent.event?.OrderCancelled?.order ||
+                null
+
+              if (!order) {
+                throw new Error('Order data not found in event')
+              }
+
+              // Determine status based on event type and filled amount
+              let status = 'NEW'
+              if (
+                orderEvent.event.OrderRejected ||
+                orderEvent.event.OrderCancelled
+              ) {
+                status = 'CANCELED'
+              } else if (orderEvent.event.OrderPlaced) {
+                const filled = parseFloat(order.filled || '0')
+                const quantity = parseFloat(order.quantity || '0')
+
+                if (filled > 0) {
+                  status = filled >= quantity ? 'FILLED' : 'PARTIALLY_FILLED'
+                }
+              }
+
+              return this.returnGood<CommonOrder>(timeProfile)(
+                this.futures_convertOrder({
+                  orderId: order.uid || '',
+                  symbol: await this.normalizeSymbol(order.tradeable || symbol),
+                  clientOrderId: newClientOrderId,
+                  price: parseFloat(order.limitPrice || '0'),
+                  origQty: parseFloat(order.quantity || '0'),
+                  executedQty: parseFloat(order.filled || '0'),
+                  status: status,
+                  type: order.orderType?.toLowerCase() || 'lmt',
+                  side: order.direction?.toLowerCase() || 'buy',
+                }),
+              )
+            } catch (historyError) {
+              // If both methods fail, return original error
+              return this.handleKrakenErrors(
+                this.getOrder,
+                this.endProfilerTime(timeProfile, 'exchange'),
+              )(historyError)
+            }
+          }
+
+          // For other errors, use standard error handling
+          return this.handleKrakenErrors(
             this.getOrder,
             this.endProfilerTime(timeProfile, 'exchange'),
-          ),
-        )
+          )(error)
+        })
     }
 
     if (!this.spotClient) {
@@ -785,7 +1029,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     // We need to use userref if it was set, or fetch all open orders
     return this.spotClient
       .getOpenOrders()
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result || result.error?.length) {
@@ -793,13 +1037,20 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
 
         // Find order by client order ID (userref)
+        // Convert client order ID to userref (same way as in submitOrder)
+        const userref = newClientOrderId
+          ? parseInt(newClientOrderId.substring(0, 8), 16)
+          : undefined
+
         const orders = result.result.open || {}
         for (const [orderId, orderData] of Object.entries(orders)) {
-          if (orderData.userref?.toString() === newClientOrderId) {
+          if (orderData.userref?.toString() === userref?.toString()) {
             return this.returnGood<CommonOrder>(timeProfile)(
               this.convertOrder({
                 orderId,
-                symbol: this.normalizeSymbol(orderData.descr?.pair || symbol),
+                symbol: await this.normalizeSymbol(
+                  orderData.descr?.pair || symbol,
+                ),
                 clientOrderId: newClientOrderId,
                 price: orderData.descr?.price || '0',
                 origQty: orderData.vol || '0',
@@ -812,14 +1063,69 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
         }
 
-        throw new Error('Order not found')
+        throw new Error('Order not found in open orders')
       })
-      .catch(
-        this.handleKrakenErrors(
+      .catch(async (error) => {
+        // If order not found in open orders, try closed orders history
+        if (error.message?.includes('Order not found')) {
+          try {
+            timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+            // Convert client order ID to userref (same way as in submitOrder)
+            const userref = newClientOrderId
+              ? parseInt(newClientOrderId.substring(0, 8), 16)
+              : undefined
+
+            const closedResult = await this.spotClient!.getClosedOrders({
+              userref,
+            })
+
+            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+            if (!closedResult.result || closedResult.error?.length) {
+              throw new Error(
+                closedResult.error?.[0] || 'Failed to get closed orders',
+              )
+            }
+
+            // Find order by client order ID (userref) in closed orders
+            const closedOrders = closedResult.result.closed || {}
+            for (const [orderId, orderData] of Object.entries(closedOrders)) {
+              if (orderData.userref?.toString() === userref?.toString()) {
+                return this.returnGood<CommonOrder>(timeProfile)(
+                  this.convertOrder({
+                    orderId,
+                    symbol: await this.normalizeSymbol(
+                      orderData.descr?.pair || symbol,
+                    ),
+                    clientOrderId: newClientOrderId,
+                    price: orderData.descr?.price || '0',
+                    origQty: orderData.vol || '0',
+                    executedQty: orderData.vol_exec || '0',
+                    status: orderData.status || 'FILLED',
+                    type: orderData.descr?.ordertype || 'limit',
+                    side: orderData.descr?.type?.toUpperCase() || 'BUY',
+                  }),
+                )
+              }
+            }
+
+            throw new Error('Order not found in history')
+          } catch (historyError) {
+            // If both methods fail, return original error
+            return this.handleKrakenErrors(
+              this.getOrder,
+              this.endProfilerTime(timeProfile, 'exchange'),
+            )(error)
+          }
+        }
+
+        // For other errors, use standard error handling
+        return this.handleKrakenErrors(
           this.getOrder,
           this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+        )(error)
+      })
   }
 
   async cancelOrder(
@@ -863,7 +1169,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   ): Promise<BaseReturn<CommonOrder>> {
     const { symbol, orderId } = order
 
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -962,7 +1268,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     returnOrders: boolean = false,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number> | BaseReturn<CommonOrder[]>> {
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -974,7 +1280,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
       return this.derivativesClient
         .getOpenOrders()
-        .then((result) => {
+        .then(async (result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
           if (result.result !== 'success' || !result.openOrders) {
@@ -989,27 +1295,33 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             )
           }
 
+          const krakenSymbol = await this.toKrakenSymbol(symbol)
           const filteredOrders = result.openOrders.filter(
-            (o) => o.symbol === symbol,
+            (o) => o.symbol === krakenSymbol,
           )
 
           if (!returnOrders) {
             return this.returnGood<number>(timeProfile)(filteredOrders.length)
           }
 
-          const commonOrders: CommonOrder[] = filteredOrders.map((order) =>
-            this.futures_convertOrder({
-              orderId: order.order_id || '',
-              symbol: order.symbol || symbol,
-              clientOrderId: order.cliOrdId || '',
-              price: order.limitPrice,
-              origQty: order.filledSize + (order.unfilledSize || 0),
-              executedQty: order.filledSize,
-              status: order.status || 'NEW',
-              type: order.orderType || 'lmt',
-              side: order.side || 'buy',
-            }),
-          )
+          const commonOrders: CommonOrder[] = []
+          for (const order of filteredOrders) {
+            commonOrders.push(
+              this.futures_convertOrder({
+                orderId: order.order_id || '',
+                symbol: await this.normalizeSymbol(
+                  order.symbol || krakenSymbol,
+                ),
+                clientOrderId: order.cliOrdId || '',
+                price: order.limitPrice,
+                origQty: order.filledSize + (order.unfilledSize || 0),
+                executedQty: order.filledSize,
+                status: order.status || 'NEW',
+                type: order.orderType || 'lmt',
+                side: order.side || 'buy',
+              }),
+            )
+          }
 
           return this.returnGood<CommonOrder[]>(timeProfile)(commonOrders)
         })
@@ -1032,7 +1344,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     return this.spotClient
       .getOpenOrders()
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result || result.error?.length) {
@@ -1040,7 +1352,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
 
         const orders = result.result.open || {}
-        const krakenSymbol = this.toKrakenSymbol(symbol)
+        const krakenSymbol = await this.toKrakenSymbol(symbol)
         const filteredOrders = Object.entries(orders).filter(
           ([_, order]) => order.descr?.pair === krakenSymbol,
         )
@@ -1049,11 +1361,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           return this.returnGood<number>(timeProfile)(filteredOrders.length)
         }
 
-        const commonOrders: CommonOrder[] = filteredOrders.map(
-          ([orderId, order]) =>
+        const commonOrders: CommonOrder[] = []
+        for (const [orderId, order] of filteredOrders) {
+          commonOrders.push(
             this.convertOrder({
               orderId,
-              symbol: this.normalizeSymbol(order.descr?.pair || symbol),
+              symbol: await this.normalizeSymbol(order.descr?.pair || symbol),
               clientOrderId: order.userref?.toString() || '',
               price: order.descr?.price || '0',
               origQty: order.vol || '0',
@@ -1062,7 +1375,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               type: order.descr?.ordertype || 'limit',
               side: order.descr?.type?.toUpperCase() || 'BUY',
             }),
-        )
+          )
+        }
 
         return this.returnGood<CommonOrder[]>(timeProfile)(commonOrders)
       })
@@ -1082,7 +1396,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1093,7 +1407,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
       return this.derivativesClient
-        .getTicker({ symbol })
+        .getTicker({ symbol: await this.toKrakenSymbol(symbol) })
         .then((result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -1123,7 +1437,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.spotClient
-      .getTicker({ pair: this.toKrakenSymbol(symbol) })
+      .getTicker({ pair: await this.toKrakenSymbol(symbol) })
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -1148,7 +1462,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async getAllPrices(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1160,7 +1474,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
       return this.derivativesClient
         .getTickers()
-        .then((result) => {
+        .then(async (result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
           if (result.result !== 'success' || !result.tickers) {
@@ -1168,13 +1482,19 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               `Failed to get tickers. Result: ${result.result || 'undefined'}, Tickers: ${!!result.tickers}`,
             )
           }
-
-          const prices: AllPricesResponse[] = result.tickers
-            .filter((t) => t.tag === 'perpetual')
-            .map((ticker) => ({
-              pair: ticker.symbol || '',
+          const prices: AllPricesResponse[] = []
+          for (const ticker of result.tickers.filter(
+            (t) =>
+              t.tag === 'perpetual' &&
+              (this.usdm
+                ? t.symbol.startsWith('PF')
+                : t.symbol.startsWith('PI')),
+          )) {
+            prices.push({
+              pair: await this.normalizeSymbol(ticker.symbol || ''),
               price: ticker.last || 0,
-            }))
+            })
+          }
 
           return this.returnGood<AllPricesResponse[]>(timeProfile)(prices)
         })
@@ -1197,19 +1517,20 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     return this.spotClient
       .getTicker()
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result || result.error?.length) {
           throw new Error(result.error?.[0] || 'Failed to get tickers')
         }
 
-        const prices: AllPricesResponse[] = Object.entries(result.result).map(
-          ([pair, ticker]) => ({
-            pair: this.normalizeSymbol(pair),
+        const prices: AllPricesResponse[] = []
+        for (const [pair, ticker] of Object.entries(result.result)) {
+          prices.push({
+            pair: await this.normalizeSymbol(pair),
             price: parseFloat(ticker.c?.[0] || '0'),
-          }),
-        )
+          })
+        }
 
         return this.returnGood<AllPricesResponse[]>(timeProfile)(prices)
       })
@@ -1225,114 +1546,25 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<ExchangeInfo>> {
-    if (this.usdm) {
-      if (!this.derivativesClient) {
-        return this.errorClient(timeProfile)
-      }
+    const full = await this.getAllExchangeInfo(timeProfile)
 
-      timeProfile =
-        (await this.checkLimits('getInstruments', symbol, timeProfile)) ||
-        timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-      return this.derivativesClient
-        .getInstruments()
-        .then((result) => {
-          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
-          if (result.result !== 'success' || !result.instruments) {
-            throw new Error(
-              `Failed to get instruments. Result: ${result.result || 'undefined'}, Instruments: ${!!result.instruments}`,
-            )
-          }
-
-          const instrument = result.instruments.find((i) => i.symbol === symbol)
-          if (!instrument) {
-            throw new Error(`Instrument ${symbol} not found`)
-          }
-
-          const info: ExchangeInfo = {
-            baseAsset: {
-              name: instrument.underlying || symbol,
-              minAmount: 0.001, // Default min
-              maxAmount: instrument.maxPositionSize || 999999999,
-              step: instrument.tickSize || 0.01,
-              maxMarketAmount: instrument.maxPositionSize || 999999999,
-            },
-            quoteAsset: {
-              name: 'USD',
-              minAmount: 0,
-            },
-            maxOrders: 200,
-            priceAssetPrecision: 8,
-          }
-
-          return this.returnGood<ExchangeInfo>(timeProfile)(info)
-        })
-        .catch(
-          this.handleKrakenErrors(
-            this.getExchangeInfo,
-            this.endProfilerTime(timeProfile, 'exchange'),
-          ),
-        )
+    if (full.status !== StatusEnum.ok) {
+      return full
     }
 
-    if (!this.spotClient) {
-      return this.errorClient(timeProfile)
+    const info = full.data.find((e) => e.pair === symbol)
+
+    if (!info) {
+      return this.returnBad(timeProfile)(new Error('Symbol not found'))
     }
 
-    timeProfile =
-      (await this.checkLimits('getAssetPairs', symbol, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    return this.spotClient
-      .getAssetPairs({ pair: this.toKrakenSymbol(symbol) })
-      .then((result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
-        if (!result.result || result.error?.length) {
-          throw new Error(result.error?.[0] || 'Failed to get asset pairs')
-        }
-
-        const pairs = result.result
-        const pairInfo = Object.values(pairs)[0]
-
-        if (!pairInfo) {
-          throw new Error(`Pair ${symbol} not found`)
-        }
-
-        const info: ExchangeInfo = {
-          baseAsset: {
-            name: this.normalizeSymbol(pairInfo.base || ''),
-            minAmount: parseFloat(pairInfo.ordermin || '0'),
-            maxAmount: 999999999,
-            step: Math.pow(10, -(pairInfo.lot_decimals || 8)),
-            maxMarketAmount: 999999999,
-          },
-          quoteAsset: {
-            name: this.normalizeSymbol(pairInfo.quote || ''),
-            minAmount: 0,
-            precision: pairInfo.pair_decimals,
-          },
-          maxOrders: 60, // Starter tier
-          priceAssetPrecision: pairInfo.pair_decimals || 8,
-        }
-
-        return this.returnGood<ExchangeInfo>(timeProfile)(info)
-      })
-      .catch(
-        this.handleKrakenErrors(
-          this.getExchangeInfo,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+    return this.returnGood<ExchangeInfo>(timeProfile)(info)
   }
 
   async getAllExchangeInfo(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<(ExchangeInfo & { pair: string })[]>> {
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1341,6 +1573,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         (await this.checkLimits('getInstruments', undefined, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+      // Determine prefix based on futures type: PF for usdm, PI for coinm
+      const symbolPrefix = this.usdm ? 'PF' : 'PI'
 
       return this.derivativesClient
         .getInstruments()
@@ -1354,27 +1589,49 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
 
           const infos: (ExchangeInfo & { pair: string })[] = result.instruments
-            .filter((i) => i.tradeable)
-            .map((instrument) => ({
-              pair: `${instrument.base}-${instrument.quote}`,
-              baseAsset: {
-                name: instrument.base || '',
-                minAmount: 0.001,
-                maxAmount: instrument.maxPositionSize || 999999999,
-                step: instrument.tickSize || 0.01,
-                maxMarketAmount: instrument.maxPositionSize || 999999999,
-              },
-              quoteAsset: {
-                name: instrument.quote,
-                minAmount: 0,
-              },
-              maxOrders: 200,
-              priceAssetPrecision: 8,
-            }))
+            .filter((i) => i.tradeable && i.symbol.startsWith(symbolPrefix))
+            .map((instrument) => {
+              const tick = instrument.tickSize || 1
+              const priceAssetPrecision =
+                tick < 1 ? Math.ceil(-Math.log10(tick)) : 0
+              return {
+                wsCode: `${instrument.base}/${instrument.quote}`,
+                code: instrument.symbol,
+                pair: `${instrument.base}-${instrument.quote}`,
+                baseAsset: {
+                  name: instrument.base || '',
+                  minAmount: 0.001,
+                  maxAmount: instrument.maxPositionSize || 999999999,
+                  step: 0.001,
+                  maxMarketAmount: instrument.maxPositionSize || 999999999,
+                },
+                quoteAsset: {
+                  name: instrument.quote,
+                  minAmount: instrument.contractSize || 1,
+                },
+                maxOrders: 200,
+                priceAssetPrecision,
+              }
+            })
+
+          // Remove duplicates and update symbol maps
+          const uniqueInfos = [
+            ...new Map(infos.map((info) => [info.pair, info])).values(),
+          ]
+
+          // Update symbol maps for futures
+          // Use info.symbol (e.g., "PF_XBTUSD") as the Kraken format because that's what API calls expect
+          // Use info.pair (e.g., "BTC-USD") as our normalized format
+          this.symbolMapper.updateMaps(
+            uniqueInfos.map((info) => ({
+              pair: info.pair,
+              code: info.code,
+            })),
+          )
 
           return this.returnGood<(ExchangeInfo & { pair: string })[]>(
             timeProfile,
-          )(infos)
+          )(uniqueInfos)
         })
         .catch(
           this.handleKrakenErrors(
@@ -1382,6 +1639,173 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )
+    }
+
+    if (!this.spotClient) {
+      return this.errorClient(timeProfile)
+    }
+
+    timeProfile =
+      (await this.checkLimits('getAssetPairs', undefined, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+    try {
+      // First, get asset info to map Kraken asset names to actual names
+      const assetInfoResult = await this.spotClient.getAssetInfo()
+
+      if (assetInfoResult.result) {
+        this.symbolMapper.updateAssets(assetInfoResult.result)
+      }
+    } catch (error) {
+      Logger.warn(`Failed to get Kraken asset info: ${error.message}`)
+    }
+
+    return this.spotClient
+      .getAssetPairs()
+      .then((result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+        if (!result.result || result.error?.length) {
+          throw new Error(result.error?.[0] || 'Failed to get asset pairs')
+        }
+
+        const infos: (ExchangeInfo & { pair: string })[] = Object.entries(
+          result.result,
+        ).map(([code, pairInfo]) => {
+          // Use actual asset names from API instead of guessing
+          const base = this.symbolMapper.getActualAssetName(pairInfo.base || '')
+          const quote = this.symbolMapper.getActualAssetName(
+            pairInfo.quote || '',
+          )
+          const tick = parseFloat(pairInfo.tick_size || '1')
+          const priceAssetPrecision =
+            tick < 1 ? Math.ceil(-Math.log10(tick)) : 0
+          return {
+            code,
+            wsCode: `${base}/${quote}`,
+            pair: `${base}-${quote}`,
+            baseAsset: {
+              name: base,
+              minAmount: parseFloat(pairInfo.ordermin || '0'),
+              maxAmount:
+                Math.min(
+                  pairInfo.long_position_limit,
+                  pairInfo.short_position_limit,
+                  0,
+                ) || 0,
+              step: Math.pow(10, -(pairInfo.lot_decimals || 8)),
+              maxMarketAmount: 999999999,
+            },
+            quoteAsset: {
+              name: quote,
+              minAmount: +(pairInfo.costmin || 0),
+              precision: pairInfo.pair_decimals,
+            },
+            maxOrders: 200,
+            priceAssetPrecision,
+          }
+        })
+
+        // Update symbol maps (code is always defined for Kraken pairs)
+        this.symbolMapper.updateMaps(
+          infos.map((info) => ({ pair: info.pair, code: info.code! })),
+        )
+
+        return this.returnGood<(ExchangeInfo & { pair: string })[]>(
+          timeProfile,
+        )(infos)
+      })
+      .catch(
+        this.handleKrakenErrors(
+          this.getAllExchangeInfo,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  async getUserFees(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<UserFee>> {
+    if (this.usdm || this.coinm) {
+      // Kraken Futures has different fee structure, using defaults
+      return this.returnGood<UserFee>(timeProfile)({
+        maker: 0.0002, // 0.02%
+        taker: 0.0005, // 0.05%
+      })
+    }
+
+    if (!this.spotClient) {
+      return this.errorClient(timeProfile)
+    }
+
+    timeProfile =
+      (await this.checkLimits('getAssetPairs', symbol, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+    const krakenSymbol = await this.toKrakenSymbol(symbol)
+
+    return this.spotClient
+      .getAssetPairs({ pair: krakenSymbol })
+      .then((result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+        if (!result.result || result.error?.length) {
+          throw new Error(result.error?.[0] || 'Failed to get asset pairs')
+        }
+
+        const pairInfo = result.result[krakenSymbol]
+        if (!pairInfo) {
+          throw new Error(`Pair ${symbol} not found`)
+        }
+
+        // Extract fees from first tier (highest fee for lowest volume)
+        // fees format: [[volume, percent], ...] e.g., [[0, 0.26], [50000, 0.24], ...]
+        const takerFee =
+          pairInfo.fees && pairInfo.fees.length > 0
+            ? parseFloat(pairInfo.fees[0][1] as any) / 100
+            : 0.0026
+        const makerFee =
+          pairInfo.fees_maker && pairInfo.fees_maker.length > 0
+            ? parseFloat(pairInfo.fees_maker[0][1] as any) / 100
+            : 0.0016
+
+        const fee: UserFee = {
+          maker: makerFee,
+          taker: takerFee,
+        }
+
+        return this.returnGood<UserFee>(timeProfile)(fee)
+      })
+      .catch(
+        this.handleKrakenErrors(
+          this.getUserFees,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  async getAllUserFees(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
+    if (this.usdm || this.coinm) {
+      // Return default fees for futures
+      const allPairsResult = await this.getAllExchangeInfo(timeProfile)
+      if (allPairsResult.status !== StatusEnum.ok) {
+        return allPairsResult
+      }
+
+      const fees: (UserFee & { pair: string })[] = allPairsResult.data.map(
+        (info) => ({
+          pair: info.pair,
+          maker: 0.0002,
+          taker: 0.0005,
+        }),
+      )
+
+      return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(fees)
     }
 
     if (!this.spotClient) {
@@ -1402,131 +1826,28 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           throw new Error(result.error?.[0] || 'Failed to get asset pairs')
         }
 
-        const infos: (ExchangeInfo & { pair: string })[] = Object.entries(
-          result.result,
-        ).map(([pair, pairInfo]) => ({
-          pair: this.normalizeSymbol(pair),
-          baseAsset: {
-            name: this.normalizeSymbol(pairInfo.base || ''),
-            minAmount: parseFloat(pairInfo.ordermin || '0'),
-            maxAmount: 999999999,
-            step: Math.pow(10, -(pairInfo.lot_decimals || 8)),
-            maxMarketAmount: 999999999,
-          },
-          quoteAsset: {
-            name: this.normalizeSymbol(pairInfo.quote || ''),
-            minAmount: 0,
-            precision: pairInfo.pair_decimals,
-          },
-          maxOrders: 60,
-          priceAssetPrecision: pairInfo.pair_decimals || 8,
-        }))
-
-        return this.returnGood<(ExchangeInfo & { pair: string })[]>(
-          timeProfile,
-        )(infos)
-      })
-      .catch(
-        this.handleKrakenErrors(
-          this.getAllExchangeInfo,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
-  }
-
-  async getUserFees(
-    symbol: string,
-    timeProfile = this.getEmptyTimeProfile(),
-  ): Promise<BaseReturn<UserFee>> {
-    if (this.usdm) {
-      // Kraken Futures has different fee structure, using defaults
-      return this.returnGood<UserFee>(timeProfile)({
-        maker: 0.0002, // 0.02%
-        taker: 0.0005, // 0.05%
-      })
-    }
-
-    if (!this.spotClient) {
-      return this.errorClient(timeProfile)
-    }
-
-    timeProfile =
-      (await this.checkLimits('getTradingVolume', symbol, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    return this.spotClient
-      .getTradingVolume({ pair: this.toKrakenSymbol(symbol) })
-      .then((result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
-        if (!result.result || result.error?.length) {
-          throw new Error(result.error?.[0] || 'Failed to get trading volume')
-        }
-
-        const fees = result.result.fees?.[this.toKrakenSymbol(symbol)]
-        const fee: UserFee = {
-          maker: fees?.fee ? parseFloat(fees.fee) / 100 : 0.0016,
-          taker: fees?.fee ? parseFloat(fees.fee) / 100 : 0.0026,
-        }
-
-        return this.returnGood<UserFee>(timeProfile)(fee)
-      })
-      .catch(
-        this.handleKrakenErrors(
-          this.getUserFees,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
-  }
-
-  async getAllUserFees(
-    timeProfile = this.getEmptyTimeProfile(),
-  ): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
-    if (this.usdm) {
-      // Return default fees for futures
-      const allPairsResult = await this.getAllExchangeInfo(timeProfile)
-      if (allPairsResult.status !== StatusEnum.ok) {
-        return allPairsResult as any
-      }
-
-      const fees: (UserFee & { pair: string })[] = allPairsResult.data.map(
-        (info) => ({
-          pair: info.pair,
-          maker: 0.0002,
-          taker: 0.0005,
-        }),
-      )
-
-      return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(fees)
-    }
-
-    if (!this.spotClient) {
-      return this.errorClient(timeProfile)
-    }
-
-    timeProfile =
-      (await this.checkLimits('getTradingVolume', undefined, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    return this.spotClient
-      .getTradingVolume()
-      .then((result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
-        if (!result.result || result.error?.length) {
-          throw new Error(result.error?.[0] || 'Failed to get trading volume')
-        }
-
-        const feeData = result.result.fees || {}
         const fees: (UserFee & { pair: string })[] = Object.entries(
-          feeData,
-        ).map(([pair, fee]) => ({
-          pair: this.normalizeSymbol(pair),
-          maker: fee?.fee ? parseFloat(fee.fee) / 100 : 0.0016,
-          taker: fee?.fee ? parseFloat(fee.fee) / 100 : 0.0026,
-        }))
+          result.result,
+        ).map(([_, pairInfo]) => {
+          // Extract fees from first tier (highest fee for lowest volume)
+          const takerFee =
+            pairInfo.fees && pairInfo.fees.length > 0
+              ? parseFloat(pairInfo.fees[0][1] as any) / 100
+              : 0.0026
+          const makerFee =
+            pairInfo.fees_maker && pairInfo.fees_maker.length > 0
+              ? parseFloat(pairInfo.fees_maker[0][1] as any) / 100
+              : 0.0016
+          const base = this.symbolMapper.getActualAssetName(pairInfo.base || '')
+          const quote = this.symbolMapper.getActualAssetName(
+            pairInfo.quote || '',
+          )
+          return {
+            pair: `${base}-${quote}`,
+            maker: makerFee,
+            taker: takerFee,
+          }
+        })
 
         return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
           fees,
@@ -1550,10 +1871,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   ): Promise<BaseReturn<CandleResponse[]>> {
     const intervalMinutes = intervalMap[interval]
 
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
+
+      const krakenSymbol = await this.toKrakenSymbol(symbol)
 
       timeProfile =
         (await this.checkLimits('getCandles', symbol, timeProfile)) ||
@@ -1562,9 +1885,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
       return this.derivativesClient
         .getCandles({
-          tickType: 'trade',
-          symbol,
-          resolution: `${intervalMinutes}m` as any,
+          tickType: 'mark',
+          symbol: krakenSymbol,
+          resolution: interval as FuturesGetCandlesParams['resolution'],
           from: from ? Math.floor(from / 1000) : undefined,
           to: to ? Math.floor(to / 1000) : undefined,
         })
@@ -1606,7 +1929,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     return this.spotClient
       .getCandles({
-        pair: this.toKrakenSymbol(symbol),
+        pair: await this.toKrakenSymbol(symbol),
         interval: intervalMinutes as
           | 1
           | 5
@@ -1672,10 +1995,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     _endTime?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<TradeResponse[]>> {
-    if (this.usdm) {
+    if (this.usdm || this.coinm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
+
+      const krakenSymbol = await this.toKrakenSymbol(symbol)
 
       timeProfile =
         (await this.checkLimits('getTradeHistory', symbol, timeProfile)) ||
@@ -1683,7 +2008,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
       return this.derivativesClient
-        .getTradeHistory({ symbol })
+        .getTradeHistory({ symbol: krakenSymbol })
         .then((result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -1725,7 +2050,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.spotClient
-      .getRecentTrades({ pair: this.toKrakenSymbol(symbol) })
+      .getRecentTrades({ pair: await this.toKrakenSymbol(symbol) })
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -1797,10 +2122,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {
-    if (!this.usdm || !this.derivativesClient) {
+    if (!this.usdm && !this.coinm) {
       return this.returnBad(timeProfile)(
         new Error('Leverage change only supported for futures'),
       )
+    }
+
+    if (!this.derivativesClient) {
+      return this.errorClient(timeProfile)
     }
 
     timeProfile =
@@ -1808,9 +2137,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
+    const krakenSymbol = await this.toKrakenSymbol(symbol)
+
     return this.derivativesClient
       .setLeverageSettings({
-        symbol,
+        symbol: krakenSymbol,
         maxLeverage: leverage,
       })
       .then((result) => {
@@ -1847,10 +2178,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<MarginType>> {
-    if (!this.usdm || !this.derivativesClient) {
+    if (!this.usdm && !this.coinm) {
       return this.returnBad(timeProfile)(
         new Error('Margin type change only supported for futures'),
       )
+    }
+
+    if (!this.derivativesClient) {
+      return this.errorClient(timeProfile)
     }
 
     timeProfile =
@@ -1858,9 +2193,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
+    const krakenSymbol = await this.toKrakenSymbol(symbol)
+
     return this.derivativesClient
       .setLeverageSettings({
-        symbol,
+        symbol: krakenSymbol,
         // Pass maxLeverage only for isolated mode
         // For cross margin, omit maxLeverage to enable dynamic leverage
         maxLeverage: margin === MarginType.ISOLATED ? leverage : undefined,
@@ -1906,10 +2243,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async futures_leverageBracket(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<LeverageBracket[]>> {
-    if (!this.usdm || !this.derivativesClient) {
+    if (!this.usdm && !this.coinm) {
       return this.returnBad(timeProfile)(
         new Error('Leverage brackets only available for futures'),
       )
+    }
+
+    if (!this.derivativesClient) {
+      return this.errorClient(timeProfile)
     }
 
     // Kraken Futures doesn't provide a detailed leverage bracket API
@@ -1930,10 +2271,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<PositionInfo[]>> {
-    if (!this.usdm || !this.derivativesClient) {
+    if (!this.usdm && !this.coinm) {
       return this.returnBad(timeProfile)(
         new Error('Positions only available for futures'),
       )
+    }
+
+    if (!this.derivativesClient) {
+      return this.errorClient(timeProfile)
     }
 
     timeProfile =
@@ -1943,7 +2288,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     return this.derivativesClient
       .getOpenPositions()
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (result.result !== 'success' || !result.openPositions) {
@@ -1954,19 +2299,22 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
         let positions = result.openPositions
         if (symbol) {
-          positions = positions.filter((p) => p.symbol === symbol)
+          const krakenSymbol = await this.toKrakenSymbol(symbol)
+          positions = positions.filter((p) => p.symbol === krakenSymbol)
         }
 
-        const positionInfos: PositionInfo[] = positions.map((pos) =>
-          this.futures_convertPosition({
-            symbol: pos.symbol || '',
-            side: pos.side,
-            size: pos.size,
-            price: pos.price,
-            unrealizedFunding: pos.unrealizedFunding,
-          }),
-        )
-
+        const positionInfos: PositionInfo[] = []
+        for (const pos of positions) {
+          positionInfos.push(
+            this.futures_convertPosition({
+              symbol: await this.normalizeSymbol(pos.symbol || ''),
+              side: pos.side,
+              size: pos.size,
+              price: pos.price,
+              unrealizedFunding: pos.unrealizedFunding,
+            }),
+          )
+        }
         return this.returnGood<PositionInfo[]>(timeProfile)(positionInfos)
       })
       .catch(

@@ -1,4 +1,5 @@
 export type ExchangeInfo = {
+  wsCode?: string
   code?: string
   baseAsset: {
     minAmount: number
@@ -121,6 +122,7 @@ export enum ExchangeEnum {
   hyperliquidLinear = 'hyperliquidLinear',
   kraken = 'kraken',
   krakenUsdm = 'krakenUsdm',
+  krakenCoinm = 'krakenCoinm',
 }
 
 export enum ExchangeDomain {

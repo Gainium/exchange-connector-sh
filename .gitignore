@@ -37,3 +37,6 @@ lerna-debug.log*
 .env
 .vscode/settings.json
 .eslintcache
+
+# Test checkpoints
+.test-checkpoint.txt

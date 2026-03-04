@@ -2,7 +2,7 @@
 
 ## Overview
 
-The **Exchange Connector** service provides a unified API for interacting with various cryptocurrency exchanges. It simplifies the integration process by offering a consistent interface for managing market data, orders, and user accounts across different platforms including Binance, Bybit, Bitget, KuCoin, OKX, and Coinbase.
+The **Exchange Connector** service provides a unified API for interacting with various cryptocurrency exchanges. It simplifies the integration process by offering a consistent interface for managing market data, orders, and user accounts across different platforms including Binance, Bybit, Bitget, KuCoin, OKX, Coinbase, Hyperliquid, and Kraken.
 
 ## Features
 

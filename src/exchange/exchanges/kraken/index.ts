@@ -1594,15 +1594,21 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               const tick = instrument.tickSize || 1
               const priceAssetPrecision =
                 tick < 1 ? Math.ceil(-Math.log10(tick)) : 0
+              const basePrecision =
+                typeof instrument.contractValueTradePrecision === 'number'
+                  ? instrument.contractValueTradePrecision === 0
+                    ? 1
+                    : Math.pow(10, -instrument.contractValueTradePrecision)
+                  : 0.0001
               return {
                 wsCode: `${instrument.base}/${instrument.quote}`,
                 code: instrument.symbol,
                 pair: `${instrument.base}-${instrument.quote}`,
                 baseAsset: {
                   name: instrument.base || '',
-                  minAmount: 0.001,
+                  minAmount: this.coinm ? 0 : basePrecision,
                   maxAmount: instrument.maxPositionSize || 999999999,
-                  step: 0.001,
+                  step: this.coinm ? 0.00000001 : basePrecision,
                   maxMarketAmount: instrument.maxPositionSize || 999999999,
                 },
                 quoteAsset: {
@@ -1890,6 +1896,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           resolution: interval as FuturesGetCandlesParams['resolution'],
           from: from ? Math.floor(from / 1000) : undefined,
           to: to ? Math.floor(to / 1000) : undefined,
+          count,
         })
         .then((result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')

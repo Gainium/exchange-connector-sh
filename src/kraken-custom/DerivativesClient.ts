@@ -1,4 +1,7 @@
-import { DerivativesClient as DerivativesClientBase } from '@siebly/kraken-api'
+import {
+  DerivativesClient as DerivativesClientBase,
+  FuturesGetCandlesParams,
+} from '@siebly/kraken-api'
 import { Method } from 'axios'
 import { serializeParams, hashMessage, neverGuard } from './SpotClient'
 
@@ -9,6 +12,14 @@ export class DerivativesClient extends DerivativesClientBase {
     networkOptions?: ConstructorParameters<typeof DerivativesClientBase>[1],
   ) {
     super(restClientOptions, networkOptions)
+  }
+
+  override getCandles(params: FuturesGetCandlesParams) {
+    const { tickType, symbol, resolution, ...otherParams } = params
+    return this.get(
+      `api/charts/v1/${tickType}/${symbol}/${resolution}`,
+      otherParams,
+    )
   }
 
   override async signRequest<T = any>(

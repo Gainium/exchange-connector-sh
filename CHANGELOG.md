@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-03-06
+
+### Fixed
+- Kraken Coinm base asset precision
+- Get Coinm candles request
+
 ## [1.3.0] - 2026-03-04
 
 ### Added

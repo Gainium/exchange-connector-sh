@@ -335,13 +335,7 @@ const verifyExchange = async (
   ) {
     return verifyHyperliquid(tradeType, key, secret, subaccount)
   }
-  if (
-    [
-      ExchangeEnum.kraken,
-      ExchangeEnum.krakenUsdm,
-      ExchangeEnum.krakenCoinm,
-    ].includes(provider)
-  ) {
+  if ([ExchangeEnum.kraken, ExchangeEnum.krakenUsdm].includes(provider)) {
     return verifyKraken(tradeType, key, secret)
   }
   return { status: false, reason: 'Exchange not supported' }

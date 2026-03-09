@@ -59,7 +59,6 @@ const intervalMap: { [x in ExchangeIntervals]: number } = {
 class KrakenSymbolMapper {
   private static spotInstance: KrakenSymbolMapper
   private static usdmInstance: KrakenSymbolMapper
-  private static coinmInstance: KrakenSymbolMapper
 
   static getSpotInstance() {
     if (!KrakenSymbolMapper.spotInstance) {
@@ -75,20 +74,13 @@ class KrakenSymbolMapper {
     return KrakenSymbolMapper.usdmInstance
   }
 
-  static getCoinmInstance() {
-    if (!KrakenSymbolMapper.coinmInstance) {
-      KrakenSymbolMapper.coinmInstance = new KrakenSymbolMapper('coinm')
-    }
-    return KrakenSymbolMapper.coinmInstance
-  }
-
   private ourSymbolToKraken: Map<string, string> = new Map()
   private krakenToOurSymbol: Map<string, string> = new Map()
   private krakenAssetToActual: Map<string, string> = new Map() // For spot: XXBT -> XBT, ZUSD -> USD
   private isInitialized = false
-  private marketType: 'spot' | 'usdm' | 'coinm'
+  private marketType: 'spot' | 'usdm'
 
-  private constructor(marketType: 'spot' | 'usdm' | 'coinm') {
+  private constructor(marketType: 'spot' | 'usdm') {
     this.marketType = marketType
   }
 
@@ -244,9 +236,6 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     if (this.usdm) {
       this.derivativesClient = new DerivativesClient(derivativesOptions)
       this.symbolMapper = KrakenSymbolMapper.getUsdmInstance()
-    } else if (this.coinm) {
-      this.derivativesClient = new DerivativesClient(derivativesOptions)
-      this.symbolMapper = KrakenSymbolMapper.getCoinmInstance()
     } else {
       this.spotClient = new SpotClient(spotOptions)
       this.symbolMapper = KrakenSymbolMapper.getSpotInstance()
@@ -290,10 +279,6 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
   get usdm() {
     return this.futures === Futures.usdm
-  }
-
-  get coinm() {
-    return this.futures === Futures.coinm
   }
 
   private errorClient(timeProfile: TimeProfile) {
@@ -637,7 +622,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async getBalance(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FreeAsset>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -775,7 +760,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       reduceOnly,
     } = order
 
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -887,7 +872,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1169,7 +1154,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   ): Promise<BaseReturn<CommonOrder>> {
     const { symbol, orderId } = order
 
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1268,7 +1253,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     returnOrders: boolean = false,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number> | BaseReturn<CommonOrder[]>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1396,7 +1381,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1462,7 +1447,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async getAllPrices(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1564,7 +1549,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async getAllExchangeInfo(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<(ExchangeInfo & { pair: string })[]>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -1574,8 +1559,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
-      // Determine prefix based on futures type: PF for usdm, PI for coinm
-      const symbolPrefix = this.usdm ? 'PF' : 'PI'
+      // Kraken USDM linear futures use PF prefix
+      const symbolPrefix = 'PF'
 
       return this.derivativesClient
         .getInstruments()
@@ -1606,9 +1591,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 pair: `${instrument.base}-${instrument.quote}`,
                 baseAsset: {
                   name: instrument.base || '',
-                  minAmount: this.coinm ? 0 : basePrecision,
+                  minAmount: basePrecision,
                   maxAmount: instrument.maxPositionSize || 999999999,
-                  step: this.coinm ? 0.00000001 : basePrecision,
+                  step: basePrecision,
                   maxMarketAmount: instrument.maxPositionSize || 999999999,
                 },
                 quoteAsset: {
@@ -1734,7 +1719,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<UserFee>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       // Kraken Futures has different fee structure, using defaults
       return this.returnGood<UserFee>(timeProfile)({
         maker: 0.0002, // 0.02%
@@ -1796,7 +1781,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async getAllUserFees(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       // Return default fees for futures
       const allPairsResult = await this.getAllExchangeInfo(timeProfile)
       if (allPairsResult.status !== StatusEnum.ok) {
@@ -1877,7 +1862,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   ): Promise<BaseReturn<CandleResponse[]>> {
     const intervalMinutes = intervalMap[interval]
 
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -2002,7 +1987,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     _endTime?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<TradeResponse[]>> {
-    if (this.usdm || this.coinm) {
+    if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
       }
@@ -2129,7 +2114,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {
-    if (!this.usdm && !this.coinm) {
+    if (!this.usdm) {
       return this.returnBad(timeProfile)(
         new Error('Leverage change only supported for futures'),
       )
@@ -2185,7 +2170,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<MarginType>> {
-    if (!this.usdm && !this.coinm) {
+    if (!this.usdm) {
       return this.returnBad(timeProfile)(
         new Error('Margin type change only supported for futures'),
       )
@@ -2250,7 +2235,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   async futures_leverageBracket(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<LeverageBracket[]>> {
-    if (!this.usdm && !this.coinm) {
+    if (!this.usdm) {
       return this.returnBad(timeProfile)(
         new Error('Leverage brackets only available for futures'),
       )
@@ -2278,7 +2263,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<PositionInfo[]>> {
-    if (!this.usdm && !this.coinm) {
+    if (!this.usdm) {
       return this.returnBad(timeProfile)(
         new Error('Positions only available for futures'),
       )

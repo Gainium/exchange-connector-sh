@@ -86,9 +86,6 @@ class ExchangeChooser {
     if (exchange === ExchangeEnum.krakenUsdm) {
       return createExchangeFactory(KrakenExchange, ...[Futures.usdm])
     }
-    if (exchange === ExchangeEnum.krakenCoinm) {
-      return createExchangeFactory(KrakenExchange, ...[Futures.coinm])
-    }
   }
 }
 

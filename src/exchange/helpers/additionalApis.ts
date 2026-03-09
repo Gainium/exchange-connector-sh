@@ -83,9 +83,6 @@ export const getPrices = (exchange: ExchangeEnum) => {
     case ExchangeEnum.krakenUsdm:
       const krakenUsdm = new Kraken(Futures.usdm, '', '')
       return krakenUsdm.getAllPrices()
-    case ExchangeEnum.krakenCoinm:
-      const krakenCoinm = new Kraken(Futures.coinm, '', '')
-      return krakenCoinm.getAllPrices()
     default:
       throw new Error(`getPrices is not supported for ${exchange}`)
   }
@@ -280,14 +277,6 @@ export const getCandles = (
     case ExchangeEnum.krakenUsdm:
       const krakenUsdm = new Kraken(Futures.usdm, '', '')
       return krakenUsdm.getCandles(
-        params.symbol,
-        params.type as ExchangeIntervals,
-        params.startAt,
-        params.endAt,
-      )
-    case ExchangeEnum.krakenCoinm:
-      const krakenCoinm = new Kraken(Futures.coinm, '', '')
-      return krakenCoinm.getCandles(
         params.symbol,
         params.type as ExchangeIntervals,
         params.startAt,

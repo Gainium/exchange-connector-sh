@@ -1893,6 +1893,35 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     return await this.spot_getCandles(symbol, interval, from, to, count)
   }
 
+  /**
+   * Bitget spot `getSpotCandles` (recent) supports a limited lookback per
+   * granularity. Anything older must be fetched via `getSpotHistoricCandles`
+   * which only accepts `endTime` + `limit` and walks backward.
+   * Source: Bitget API docs.
+   */
+  private getSpotIntervalLookbackMs(interval: ExchangeIntervals): number {
+    const day = 24 * 60 * 60 * 1000
+    switch (interval) {
+      case ExchangeIntervals.oneM:
+      case ExchangeIntervals.threeM:
+      case ExchangeIntervals.fiveM:
+        return 30 * day
+      case ExchangeIntervals.fifteenM:
+        return 52 * day
+      case ExchangeIntervals.thirtyM:
+        return 62 * day
+      case ExchangeIntervals.oneH:
+        return 83 * day
+      case ExchangeIntervals.twoH:
+        return 120 * day
+      case ExchangeIntervals.fourH:
+        return 240 * day
+      default:
+        // 6h / 8h / 1d / 1w — effectively no practical limit for our use
+        return 360 * day
+    }
+  }
+
   async spot_getCandles(
     symbol: string,
     interval: ExchangeIntervals,
@@ -1901,43 +1930,80 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     countData?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
-    timeProfile =
-      (await this.checkLimits('getSpotHistoricCandles', 20, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return (
-      to && !from
-        ? this.client.getSpotHistoricCandles({
+    const maxSize = 200
+    const granularity = this.convertInterval(interval) as SpotKlineInterval
+    const step = timeIntervalMap[interval]
+    const lookbackMs = this.getSpotIntervalLookbackMs(interval)
+
+    const mapRow = (d: string[]): CandleResponse => ({
+      open: d[1],
+      high: d[2],
+      low: d[3],
+      close: d[4],
+      volume: d[7],
+      time: +d[0],
+    })
+
+    // Legacy behavior: only `to` provided → single historic call.
+    if (to && !from) {
+      timeProfile =
+        (await this.checkLimits('getSpotHistoricCandles', 20, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      return this.client
+        .getSpotHistoricCandles({
+          symbol,
+          endTime: `${to}`,
+          limit: `${maxSize}`,
+          granularity,
+        })
+        .then((result) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (result.code === '00000') {
+            return this.returnGood<CandleResponse[]>(timeProfile)(
+              (result.data as string[][]).map(mapRow),
+            )
+          }
+          return this.handleBitgetErrors(
+            this.spot_getCandles,
             symbol,
-            endTime: `${to}`,
-            limit: '200',
-            granularity: this.convertInterval(interval) as SpotKlineInterval,
-          })
-        : this.client.getSpotCandles({
+            interval,
+            from,
+            to,
+            countData,
+            timeProfile,
+          )(new BitgetError(result.msg, +result.code))
+        })
+        .catch(
+          this.handleBitgetErrors(
+            this.spot_getCandles,
             symbol,
-            //@ts-ignore
-            startTime: from,
-            //@ts-ignore
-            endTime: to,
-            //@ts-ignore
-            limit: 200,
-            //@ts-ignore
-            granularity: this.convertInterval(interval),
-          })
-    )
-      .then(async (result) => {
+            interval,
+            from,
+            to,
+            countData,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
+        )
+    }
+
+    // No range at all → most recent page.
+    if (!from || !to) {
+      timeProfile =
+        (await this.checkLimits('getSpotCandles', 20, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      try {
+        const result = await this.client.getSpotCandles({
+          symbol,
+          //@ts-ignore
+          limit: maxSize,
+          granularity,
+        })
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {
-          const data = result.data as string[][]
           return this.returnGood<CandleResponse[]>(timeProfile)(
-            data.map((d) => ({
-              open: d[1],
-              high: d[2],
-              low: d[3],
-              close: d[4],
-              volume: d[7],
-              time: +d[0],
-            })),
+            (result.data as string[][]).map(mapRow),
           )
         }
         return this.handleBitgetErrors(
@@ -1947,11 +2013,10 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           from,
           to,
           countData,
-          this.endProfilerTime(timeProfile, 'exchange'),
+          timeProfile,
         )(new BitgetError(result.msg, +result.code))
-      })
-      .catch(
-        this.handleBitgetErrors(
+      } catch (e) {
+        return this.handleBitgetErrors(
           this.spot_getCandles,
           symbol,
           interval,
@@ -1959,8 +2024,90 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           to,
           countData,
           this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+        )(e)
+      }
+    }
+
+    // Both `from` and `to` provided → paginate in chunks of `maxSize`,
+    // selecting recent vs historic endpoint per chunk based on `lookbackMs`.
+    const allCandles: CandleResponse[] = []
+    let cursor = from
+    const totalChunks = Math.max(1, Math.ceil((to - from) / (maxSize * step)))
+    // safety cap
+    const hardLimit = totalChunks + 5
+    for (let attempt = 0; attempt < hardLimit && cursor <= to; attempt++) {
+      const chunkEnd = Math.min(cursor + maxSize * step, to)
+      const useRecent = Date.now() - cursor <= lookbackMs
+
+      try {
+        timeProfile =
+          (await this.checkLimits(
+            useRecent ? 'getSpotCandles' : 'getSpotHistoricCandles',
+            20,
+            timeProfile,
+          )) || timeProfile
+        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+        const result = useRecent
+          ? await this.client.getSpotCandles({
+              symbol,
+              //@ts-ignore
+              startTime: cursor,
+              //@ts-ignore
+              endTime: chunkEnd,
+              //@ts-ignore
+              limit: maxSize,
+              granularity,
+            })
+          : await this.client.getSpotHistoricCandles({
+              symbol,
+              endTime: `${chunkEnd}`,
+              limit: `${maxSize}`,
+              granularity,
+            })
+
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+        if (result.code !== '00000') {
+          return this.handleBitgetErrors(
+            this.spot_getCandles,
+            symbol,
+            interval,
+            from,
+            to,
+            countData,
+            timeProfile,
+          )(new BitgetError(result.msg, +result.code))
+        }
+
+        const data = result.data as string[][]
+        if (!data || data.length === 0) {
+          // nothing in this window — advance to avoid infinite loop
+          cursor = chunkEnd + step
+          continue
+        }
+        allCandles.push(...data.map(mapRow))
+        cursor = chunkEnd + step
+      } catch (e) {
+        return this.handleBitgetErrors(
+          this.spot_getCandles,
+          symbol,
+          interval,
+          from,
+          to,
+          countData,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        )(e)
+      }
+    }
+
+    // Dedup + sort ascending by time (chunks may overlap on boundaries).
+    const seen = new Set<number>()
+    const deduped = allCandles
+      .filter((c) => (seen.has(c.time) ? false : (seen.add(c.time), true)))
+      .sort((a, b) => a.time - b.time)
+
+    return this.returnGood<CandleResponse[]>(timeProfile)(deduped)
   }
 
   async getAllPrices(): Promise<BaseReturn<AllPricesResponse[]>> {

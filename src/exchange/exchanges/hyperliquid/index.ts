@@ -672,6 +672,42 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             new HyperliquidError(result.status, 0),
           )
         }
+        if (
+          result.order.order.orderType === 'Limit' &&
+          result.order.status === 'filled'
+        ) {
+          try {
+            timeProfile =
+              (await this.checkLimits('userFillsByTime', 1, timeProfile)) ||
+              timeProfile
+            timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+            const fills = await this.infoClient
+              .userFillsByTime({
+                startTime: result.order.order.timestamp,
+                endTime: result.order.statusTimestamp,
+                user: this._key,
+              })
+              .then((r) => r.filter((f) => f.oid === result.order.order.oid))
+            if (fills.length) {
+              const base = fills.reduce((acc, fill) => acc + +fill.sz, 0)
+              const quote = fills.reduce(
+                (acc, fill) => acc + +fill.sz * +fill.px,
+                0,
+              )
+              price = (quote / base).toFixed(10)
+              Logger.log(
+                `Calculated price for order ${data.newClientOrderId} based on fills: ${price}`,
+              )
+              result.order.order.limitPx = price
+            }
+            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          } catch (e) {
+            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+            Logger.error(
+              `Error fetching fills for order ${data.newClientOrderId}: ${e.message}`,
+            )
+          }
+        }
         return this.returnGood<CommonOrder>(timeProfile)(
           await this.convertOrder(
             result.order.order,

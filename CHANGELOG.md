@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-04-20
+
+### Changed
+- Hyperliquid request fills for limit orders
+
 ## [1.3.3] - 2026-04-07
 
 ### Changed

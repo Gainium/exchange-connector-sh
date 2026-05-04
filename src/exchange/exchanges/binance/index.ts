@@ -2633,6 +2633,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       const restApiNotEnabled = 'Rest API trading is not enabled'.toLowerCase()
       const throttled =
         'Request throttled by system-level protection'.toLowerCase()
+      const html500 = '500 internal server error'
       const timeProfile: TimeProfile = args[args.length - 1]
       let msg = ''
       try {
@@ -2660,7 +2661,8 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           ) !== -1 ||
         msg.toLowerCase().indexOf(tls) !== -1 ||
         msg.toLowerCase().indexOf(restApiNotEnabled) !== -1 ||
-        msg.toLowerCase().indexOf(throttled) !== -1
+        msg.toLowerCase().indexOf(throttled) !== -1 ||
+        msg.toLowerCase().indexOf(html500) !== -1
       ) {
         if (timeProfile.attempts < this.retry) {
           if (
@@ -2692,6 +2694,12 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           }
           if (msg.toLowerCase().indexOf(restApiNotEnabled) !== -1) {
             Logger.warn(`Rest API trading is not enabled sleep 10s`)
+            await sleep(10 * 1000)
+          }
+          if (msg.toLowerCase().indexOf(html500) !== -1) {
+            Logger.warn(
+              `Binance returned HTML 500 Internal Server Error, sleep 10s`,
+            )
             await sleep(10 * 1000)
           }
           if (e.code === -1015) {

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.5] - 2026-05-05
+
+### Fixed
+- Binance handle HTML 500 error
+
 ## [1.3.4] - 2026-04-20
 
 ### Changed

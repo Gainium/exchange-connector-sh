@@ -180,6 +180,65 @@ export class HyperliquidError extends Error {
 
 type Market = 'spot' | 'futures'
 
+/**
+ * Hyperliquid spot tokens use deployer-chosen names that differ from how
+ * the UI renders them. Aliases here map the on-chain token name to the
+ * display name we expose to the rest of the system.
+ *   UBTC  → BTC   (wrapped BTC token, shown as BTC)
+ *   USDT0 → USDT  (wrapped USDT token, shown as USDT — used by `cash` dex)
+ */
+const TOKEN_ALIASES: Record<string, string> = {
+  UBTC: 'BTC',
+  USDT0: 'USDT',
+}
+const aliasToken = (name: string): string => TOKEN_ALIASES[name] ?? name
+
+export type FuturesAssetInfo = {
+  /** Display pair used as the public identifier (e.g. 'BTC-USDC' or
+   *  'F:TSLA-USDH' when collision-prefixed). */
+  pair: string
+  /** Wire identifier: 'BTC' for HL native, 'xyz:HYUNDAI' for builder dexes. */
+  code: string
+  /** HL asset index used for order placement / leverage updates. */
+  assetIndex: number
+  /** Quote/collateral asset name resolved from `collateralToken`. */
+  quoteAsset: string
+  /** null for HL native; builder dex name (e.g. 'xyz') otherwise. */
+  dexName: string | null
+  /** 0 for HL native; raw `deployerFeeScale` for builder dexes. */
+  deployerFeeScale: number
+  onlyIsolated: boolean
+  szDecimals: number
+  maxLeverage: number
+  isDelisted: boolean
+  marginTableId: number
+}
+
+type RawPerpDex = {
+  name: string
+  fullName?: string
+  deployer?: string
+  oracleUpdater?: string | null
+  feeRecipient?: string | null
+  deployerFeeScale?: string
+} | null
+
+type RawPerpsUniverseEntry = {
+  name: string
+  szDecimals: number
+  maxLeverage: number
+  marginTableId: number
+  isDelisted?: boolean
+  onlyIsolated?: boolean
+  marginMode?: string
+}
+
+type RawPerpsMeta = {
+  universe: RawPerpsUniverseEntry[]
+  marginTables?: Array<[number, unknown]>
+  collateralToken?: number
+}
+
 class HyperliquidAssets {
   static HyperliquidAssetsInstance: HyperliquidAssets
   static getInstance() {
@@ -191,9 +250,12 @@ class HyperliquidAssets {
 
   private assetsSpot: Map<string, number> = new Map()
   private pairsSpot: Map<number, string> = new Map()
-  private assetsInverse: Map<string, number> = new Map()
-  private pairsInverse: Map<number, string> = new Map()
-  private lastUpdate = 0
+  private futuresByPair: Map<string, FuturesAssetInfo> = new Map()
+  private futuresByCode: Map<string, string> = new Map()
+  /** Builder-dex names with at least one listed market (HL native excluded). */
+  private dexNames: Set<string> = new Set()
+  private lastUpdateSpot = 0
+  private lastUpdateFutures = 0
   private updateInterval = 20 * 60000
   private client: hl.InfoClient = new hl.InfoClient({
     transport: new hl.HttpTransport({
@@ -203,29 +265,32 @@ class HyperliquidAssets {
 
   @IdMute(mutex, () => 'getCoinByPair')
   public async getCoinByPair(pair: string, market: Market) {
-    const assets = market === 'spot' ? this.assetsSpot : this.assetsInverse
-    if (
-      assets.size === 0 ||
-      this.lastUpdate + this.updateInterval < Date.now()
-    ) {
-      await this.updateAssets(market)
+    if (market === 'futures') {
+      const info = await this.getFuturesInfo(pair)
+      return `${info?.assetIndex ?? 0}`
     }
-    return `${(market === 'futures' ? 0 : 10000) + (assets.get(pair) ?? 0)}`
+    if (
+      this.assetsSpot.size === 0 ||
+      this.lastUpdateSpot + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets('spot')
+    }
+    return `${10000 + (this.assetsSpot.get(pair) ?? 0)}`
   }
 
   @IdMute(mutex, () => 'getCoinNameByPair')
   public async getCoinNameByPair(pair: string, market: Market) {
     if (market === 'futures') {
-      return pair.split('-')[0]
+      const info = await this.getFuturesInfo(pair)
+      return info?.code ?? pair.split('-')[0]
     }
-    const assets = this.assetsSpot
     if (
-      assets.size === 0 ||
-      this.lastUpdate + this.updateInterval < Date.now()
+      this.assetsSpot.size === 0 ||
+      this.lastUpdateSpot + this.updateInterval < Date.now()
     ) {
-      await this.updateAssets(market)
+      await this.updateAssets('spot')
     }
-    const code = assets.get(pair)
+    const code = this.assetsSpot.get(pair)
     if (typeof code === 'undefined') {
       return pair
     }
@@ -234,17 +299,63 @@ class HyperliquidAssets {
 
   @IdMute(mutex, () => 'getCoinByPair')
   public async getPairByCoin(coin: string, market: Market) {
-    const pairs = market === 'spot' ? this.pairsSpot : this.pairsInverse
+    if (market === 'futures') {
+      if (
+        this.futuresByCode.size === 0 ||
+        this.lastUpdateFutures + this.updateInterval < Date.now()
+      ) {
+        await this.updateAssets('futures')
+      }
+      return this.futuresByCode.get(coin) ?? coin
+    }
     if (
-      pairs.size === 0 ||
-      this.lastUpdate + this.updateInterval < Date.now()
+      this.pairsSpot.size === 0 ||
+      this.lastUpdateSpot + this.updateInterval < Date.now()
     ) {
-      await this.updateAssets(market)
+      await this.updateAssets('spot')
     }
     if (coin === 'PURR/USDC') {
       return 'PURR-USDC'
     }
-    return pairs.get(+coin.replace('@', '')) ?? coin
+    return this.pairsSpot.get(+coin.replace('@', '')) ?? coin
+  }
+
+  public async getFuturesInfo(
+    pair: string,
+  ): Promise<FuturesAssetInfo | undefined> {
+    if (
+      this.futuresByPair.size === 0 ||
+      this.lastUpdateFutures + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets('futures')
+    }
+    return this.futuresByPair.get(pair)
+  }
+
+  public async getDeployerFeeScale(pair: string): Promise<number> {
+    const info = await this.getFuturesInfo(pair)
+    return info?.deployerFeeScale ?? 0
+  }
+
+  public async listFuturesAssets(): Promise<FuturesAssetInfo[]> {
+    if (
+      this.futuresByPair.size === 0 ||
+      this.lastUpdateFutures + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets('futures')
+    }
+    return [...this.futuresByPair.values()]
+  }
+
+  /** Builder-dex names with at least one listed market (HL native excluded). */
+  public async listDexNames(): Promise<string[]> {
+    if (
+      this.futuresByPair.size === 0 ||
+      this.lastUpdateFutures + this.updateInterval < Date.now()
+    ) {
+      await this.updateAssets('futures')
+    }
+    return [...this.dexNames]
   }
 
   protected async checkLimits(request: string, count?: number): Promise<void> {
@@ -261,41 +372,100 @@ class HyperliquidAssets {
 
   @IdMute(mutex, () => 'updateAssets')
   private async updateAssets(market: Market) {
-    if (
-      this.lastUpdate + this.updateInterval > Date.now() &&
-      (market === 'spot' ? this.pairsSpot.size > 0 : this.pairsInverse.size > 0)
-    ) {
-      return
-    }
-    try {
-      if (market === 'spot') {
+    if (market === 'spot') {
+      if (
+        this.lastUpdateSpot + this.updateInterval > Date.now() &&
+        this.pairsSpot.size > 0
+      ) {
+        return
+      }
+      try {
         await this.checkLimits('spotMeta', 20)
-        const assets = await this.client.spotMeta()
-        const { tokens, universe } = assets
+        const { tokens, universe } = await this.client.spotMeta()
         universe.forEach((u) => {
           const base = tokens.find((tk) => tk.index === u.tokens[0])
           const quote = tokens.find((tk) => tk.index === u.tokens[1])
           if (base && quote) {
-            base.name = base.name === 'UBTC' ? 'BTC' : base.name
-            const pair = `${base.name}-${quote.name}`
+            base.name = aliasToken(base.name)
+            const pair = `${base.name}-${aliasToken(quote.name)}`
             this.assetsSpot.set(pair, u.index)
             this.pairsSpot.set(u.index, pair)
           }
         })
+        this.lastUpdateSpot = Date.now()
+      } catch (e) {
+        Logger.error(`Error updating Hyperliquid spot assets: ${e.message}`)
       }
-      if (market === 'futures') {
+      return
+    }
+    // futures: enumerate HL native + builder dexes via perpDexs() + meta({dex})
+    if (
+      this.lastUpdateFutures + this.updateInterval > Date.now() &&
+      this.futuresByPair.size > 0
+    ) {
+      return
+    }
+    try {
+      await this.checkLimits('spotMeta', 20)
+      const spotTokens = (await this.client.spotMeta()).tokens
+      await this.checkLimits('perpDexs', 20)
+      const perpDexs = (await this.client.perpDexs()) as RawPerpDex[]
+      const newByPair = new Map<string, FuturesAssetInfo>()
+      const newByCode = new Map<string, string>()
+      const newDexNames = new Set<string>()
+      for (let i = 0; i < perpDexs.length; i++) {
+        const dex = perpDexs[i]
         await this.checkLimits('meta', 20)
-        const futures = await this.client.meta()
-        futures.universe.forEach((u, i) => {
-          const pair = `${u.name}-USDC`
-          this.assetsInverse.set(pair, i)
-          this.pairsInverse.set(i, pair)
+        const meta = (await (dex
+          ? this.client.meta({ dex: dex.name })
+          : this.client.meta())) as unknown as RawPerpsMeta
+        if (!meta.universe || meta.universe.length === 0) continue
+        if (dex) newDexNames.add(dex.name)
+        const collateralIdx = meta.collateralToken ?? 0
+        const quoteToken = spotTokens.find((t) => t.index === collateralIdx)
+        const quoteAsset = quoteToken?.name
+          ? aliasToken(quoteToken.name)
+          : 'USDC'
+        const deployerFeeScale = dex ? +(dex.deployerFeeScale ?? '0') : 0
+        meta.universe.forEach((u, coinIdx) => {
+          // builder-dex universes return names already prefixed (e.g. 'xyz:HYUNDAI')
+          const code = u.name
+          const baseRaw = dex ? (u.name.split(':')[1] ?? u.name) : u.name
+          const baseName = aliasToken(baseRaw)
+          const basePair = `${baseName}-${quoteAsset}`
+          // Always prefix builder-dex pairs: provider:BASE-QUOTE.
+          // HL native stays unprefixed.
+          const pair = dex ? `${dex.name}:${basePair}` : basePair
+          const assetIndex =
+            i === 0 ? coinIdx : 100000 + (i - 1) * 10000 + coinIdx
+          if (newByPair.has(pair)) {
+            Logger.warn(
+              `Hyperliquid duplicate pair ${pair}: keeping ${newByPair.get(pair)!.code}, dropping ${code}`,
+            )
+            return
+          }
+          newByPair.set(pair, {
+            pair,
+            code,
+            assetIndex,
+            quoteAsset,
+            dexName: dex?.name ?? null,
+            deployerFeeScale,
+            onlyIsolated: !!u.onlyIsolated,
+            szDecimals: u.szDecimals,
+            maxLeverage: u.maxLeverage,
+            isDelisted: !!u.isDelisted,
+            marginTableId: u.marginTableId,
+          })
+          newByCode.set(code, pair)
         })
       }
-      this.lastUpdate = Date.now()
+      this.futuresByPair = newByPair
+      this.futuresByCode = newByCode
+      this.dexNames = newDexNames
+      this.lastUpdateFutures = Date.now()
     } catch (e) {
-      Logger.error(`Error updating Hyperliquid assets: ${e.message}`)
-      return
+      Logger.error(`Error updating Hyperliquid futures assets: ${e.message}`)
     }
   }
 }
@@ -456,15 +626,65 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           return this.returnBad(timeProfile)(new Error('Response timeout'))
         }
       }
-      const get = await this.infoClient.clearinghouseState({
-        user: this._key,
-      })
+      // HL native always settles in USDC; each builder dex has its own
+      // collateral token (USDH, USDE, USDT, …) — fetch one clearinghouseState
+      // per dex and label balances with the dex's quote asset.
+      const assetsCache = HyperliquidAssets.getInstance()
+      const dexNames = await assetsCache.listDexNames()
+      const dexQuoteByName = new Map<string, string>()
+      const allAssets = await assetsCache.listFuturesAssets()
+      for (const a of allAssets) {
+        if (a.dexName) dexQuoteByName.set(a.dexName, a.quoteAsset)
+      }
+
+      type StateOrNull = Awaited<
+        ReturnType<typeof this.infoClient.clearinghouseState>
+      > | null
+
+      const tasks: Array<Promise<{ asset: string; state: StateOrNull }>> = [
+        this.infoClient
+          .clearinghouseState({ user: this._key })
+          .then((state) => ({ asset: 'USDC', state: state as StateOrNull }))
+          .catch((e) => {
+            Logger.error(
+              `Hyperliquid clearinghouseState failed for HL native: ${e?.message ?? e}`,
+            )
+            return { asset: 'USDC', state: null as StateOrNull }
+          }),
+        ...dexNames.map((dex) =>
+          this.infoClient
+            .clearinghouseState({ user: this._key, dex })
+            .then((state) => ({
+              asset: dexQuoteByName.get(dex) ?? 'USDC',
+              state: state as StateOrNull,
+            }))
+            .catch((e) => {
+              Logger.error(
+                `Hyperliquid clearinghouseState failed for dex ${dex}: ${e?.message ?? e}`,
+              )
+              return {
+                asset: dexQuoteByName.get(dex) ?? 'USDC',
+                state: null as StateOrNull,
+              }
+            }),
+        ),
+      ]
+      const states = await Promise.all(tasks)
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
-      res.push({
-        asset: 'USDC',
-        free: +get.withdrawable,
-        locked: +get.marginSummary.accountValue - +get.withdrawable,
+      // Aggregate by collateral asset (multiple USDH dexes sum into one entry).
+      const totals = new Map<string, { free: number; locked: number }>()
+      for (const { asset, state } of states) {
+        if (!state) continue
+        const free = +state.withdrawable
+        const locked = +state.marginSummary.accountValue - free
+        const cur = totals.get(asset) ?? { free: 0, locked: 0 }
+        cur.free += free
+        cur.locked += locked
+        totals.set(asset, cur)
+      }
+      totals.forEach((v, asset) => {
+        res.push({ asset, free: v.free, locked: v.locked })
       })
     } catch (e) {
       return this.handleHyperliquidErrors(
@@ -476,31 +696,34 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.returnGood<FreeAsset>(timeProfile)(res)
   }
 
-  protected async getCoinByPair(pair: string, force = false) {
-    return this.futures && !force
-      ? pair.split('-')[0]
-      : await HyperliquidAssets.getInstance().getCoinByPair(
-          pair,
-          this.futures ? 'futures' : 'spot',
-        )
+  protected async getCoinByPair(pair: string, _force = false) {
+    return await HyperliquidAssets.getInstance().getCoinByPair(
+      pair,
+      this.futures ? 'futures' : 'spot',
+    )
   }
 
-  private async getCoinNameByPair(pair: string, force = false) {
-    return this.futures && !force
-      ? pair.split('-')[0]
-      : await HyperliquidAssets.getInstance().getCoinNameByPair(
-          pair,
-          this.futures ? 'futures' : 'spot',
-        )
+  private async getCoinNameByPair(pair: string, _force = false) {
+    return await HyperliquidAssets.getInstance().getCoinNameByPair(
+      pair,
+      this.futures ? 'futures' : 'spot',
+    )
   }
 
   private async getPairByCoin(coin: string) {
-    return this.futures
-      ? `${coin}-USDC`
-      : await HyperliquidAssets.getInstance().getPairByCoin(
-          coin,
-          this.futures ? 'futures' : 'spot',
-        )
+    return await HyperliquidAssets.getInstance().getPairByCoin(
+      coin,
+      this.futures ? 'futures' : 'spot',
+    )
+  }
+
+  /**
+   * Returns the HIP-3 deployer fee scale for a futures pair, or 0 for HL
+   * native / spot. Used by parent class to gross up base fees.
+   */
+  public async getDeployerFeeScale(pair: string): Promise<number> {
+    if (!this.futures) return 0
+    return HyperliquidAssets.getInstance().getDeployerFeeScale(pair)
   }
 
   async openOrder(
@@ -830,12 +1053,30 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       }
     }
     try {
-      const result = await this.infoClient.frontendOpenOrders({
-        user: this._key,
-      })
+      // Default frontendOpenOrders only returns HL native + spot. Builder
+      // dexes need a per-dex call.
+      const dexNames = this.futures
+        ? await HyperliquidAssets.getInstance().listDexNames()
+        : []
+      const tasks = [
+        this.infoClient.frontendOpenOrders({ user: this._key }),
+        ...dexNames.map((dex) =>
+          this.infoClient
+            .frontendOpenOrders({ user: this._key, dex })
+            .catch((e) => {
+              Logger.error(
+                `Hyperliquid frontendOpenOrders failed for dex ${dex}: ${e?.message ?? e}`,
+              )
+              return [] as Awaited<
+                ReturnType<typeof this.infoClient.frontendOpenOrders>
+              >
+            }),
+        ),
+      ]
+      const results = (await Promise.all(tasks)).flat()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
-      const data = result.filter((r) =>
+      const data = results.filter((r) =>
         this.futures
           ? !r.coin.includes('/') && !r.coin.startsWith('@')
           : r.coin.startsWith('@') || r.coin.includes('/'),
@@ -947,12 +1188,26 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       }
     }
     try {
-      const result = await this.infoClient.clearinghouseState({
-        user: this._key,
-      })
+      // clearinghouseState only returns positions for one dex at a time;
+      // enumerate HL native + every builder dex.
+      const dexNames = await HyperliquidAssets.getInstance().listDexNames()
+      const tasks = [
+        this.infoClient.clearinghouseState({ user: this._key }),
+        ...dexNames.map((dex) =>
+          this.infoClient
+            .clearinghouseState({ user: this._key, dex })
+            .catch((e) => {
+              Logger.error(
+                `Hyperliquid clearinghouseState failed for dex ${dex}: ${e?.message ?? e}`,
+              )
+              return null
+            }),
+        ),
+      ]
+      const states = await Promise.all(tasks)
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
-      const data = result.assetPositions
+      const data = states.flatMap((s) => s?.assetPositions ?? [])
       await Promise.all(
         data.map(async (o) => res.push(await this.convertPosition(o))),
       )
@@ -1043,9 +1298,25 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       }
     }
     try {
-      const result = await this.infoClient.allMids()
+      // Default allMids() returns HL native (perp + spot). For builder dexes
+      // we have to call once per dex with { dex: name }.
+      const dexNames = this.futures
+        ? await HyperliquidAssets.getInstance().listDexNames()
+        : []
+      const allMidsTasks: Promise<Record<string, string>>[] = [
+        this.infoClient.allMids() as Promise<Record<string, string>>,
+        ...dexNames.map(
+          (dex) =>
+            this.infoClient.allMids({ dex }) as Promise<Record<string, string>>,
+        ),
+      ]
+      const allMidsResults = await Promise.all(allMidsTasks)
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      const data = Object.entries(result).filter(([n]) =>
+      const merged: Record<string, string> = Object.assign(
+        {},
+        ...allMidsResults,
+      )
+      const data = Object.entries(merged).filter(([n]) =>
         this.futures
           ? !n.includes('/') && !n.startsWith('@')
           : n.startsWith('@') || n.includes('/'),
@@ -1095,11 +1366,19 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           return this.returnBad(timeProfile)(new Error('Response timeout'))
         }
       }
+      const info = await HyperliquidAssets.getInstance().getFuturesInfo(symbol)
+      let effectiveMargin = margin
+      if (info?.onlyIsolated && margin === MarginType.CROSSED) {
+        Logger.warn(
+          `Hyperliquid ${symbol} only supports isolated margin (onlyIsolated); coercing CROSSED → ISOLATED`,
+        )
+        effectiveMargin = MarginType.ISOLATED
+      }
       return await this.exchangeClient
         .updateLeverage(
           {
             asset: +(await this.getCoinByPair(symbol, true)),
-            isCross: margin === MarginType.CROSSED,
+            isCross: effectiveMargin === MarginType.CROSSED,
             leverage,
           },
           {
@@ -1108,7 +1387,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         )
         .then(() => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-          return this.returnGood<MarginType>(timeProfile)(margin)
+          return this.returnGood<MarginType>(timeProfile)(effectiveMargin)
         })
     } catch (e) {
       this.handleHyperliquidErrors(
@@ -1258,8 +1537,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   private calculatePricePrecision(
     market: Market,
     sizeDecimals: number,
-    baseName: string,
-    quoteName: string,
+    pair: string,
     allPrices: AllPricesResponse[],
   ) {
     const MAX_DECIMALS =
@@ -1268,7 +1546,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         : HyperliquidExchange.MAX_DECIMALS_SPOT
     const maxDecimals = Math.max(0, MAX_DECIMALS - sizeDecimals)
     let pricePrecision = maxDecimals
-    const find = allPrices.find((p) => p.pair === `${baseName}-${quoteName}`)
+    const find = allPrices.find((p) => p.pair === pair)
     if (find && find.price > 0) {
       const price = find.price.toFixed(12)
       let sliceIndex = price.length
@@ -1347,41 +1625,43 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         }
       }
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const get = await this.infoClient.meta()
+      const assets = await HyperliquidAssets.getInstance().listFuturesAssets()
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      const data = get.universe
-      data
-        .filter((d) => !d.isDelisted)
-        .map((d) => {
+      assets
+        .filter((a) => !a.isDelisted)
+        .forEach((a) => {
           const minAmount =
-            d.szDecimals === 0 ? 1 : +`0.${'0'.repeat(d.szDecimals - 1)}1`
+            a.szDecimals === 0 ? 1 : +`0.${'0'.repeat(a.szDecimals - 1)}1`
+          // baseAsset.name carries the dex prefix (e.g. 'xyz:HYUNDAI') so
+          // downstream balance/position trackers can't accidentally aggregate
+          // a builder-dex position with HL native or with another dex that
+          // happens to list the same coin. HL native stays bare ('BTC').
+          const baseAssetName = aliasToken(a.code)
           const priceAssetPrecision = this.calculatePricePrecision(
             'futures',
-            d.szDecimals,
-            d.name,
-            'USDC',
+            a.szDecimals,
+            a.pair,
             allPrices.data,
           )
-          const r: (typeof res)[0] = {
-            code: d.name,
-            pair: `${d.name}-USDC`,
+          res.push({
+            code: a.code,
+            pair: a.pair,
             baseAsset: {
               minAmount,
               maxAmount: 0,
               step: minAmount,
-              name: d.name,
+              name: baseAssetName,
               maxMarketAmount: 0,
             },
             quoteAsset: {
               minAmount: 10,
-              name: 'USDC',
+              name: a.quoteAsset,
             },
             maxOrders: 200,
             priceAssetPrecision,
             minLeverage: '1',
-            maxLeverage: `${d.maxLeverage}`,
-          }
-          res.push(r)
+            maxLeverage: `${a.maxLeverage}`,
+          })
         })
     } catch (e) {
       return this.handleHyperliquidErrors(
@@ -1439,7 +1719,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               return null
             }
 
-            base.name = base.name === 'UBTC' ? 'BTC' : base.name
+            base.name = aliasToken(base.name)
+            quote.name = aliasToken(quote.name)
             const minAmountBase =
               base.szDecimals === 0
                 ? 1
@@ -1448,8 +1729,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             const pricePrecision = this.calculatePricePrecision(
               'spot',
               base.szDecimals,
-              base.name,
-              quote.name,
+              `${base.name}-${quote.name}`,
               allPrices.data,
             )
 

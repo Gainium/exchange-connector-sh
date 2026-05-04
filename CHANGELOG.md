@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.3.5] - 2026-05-05
+## [1.4.0] - 2026-05-04
+
+### Added
+- Hyperliquid HIP-3 support
+
+## [1.3.5] - 2026-05-04
 
 ### Fixed
 - Binance handle HTML 500 error

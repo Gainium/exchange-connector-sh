@@ -611,24 +611,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     }
     const res: FreeAsset = []
     try {
-      timeProfile =
-        (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
-        timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-        const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-        if (diff >= this.timeout) {
-          Logger.error(
-            `Hyperliquid Queue time is too long ${diff / 1000} futures_getBalance ${
-              this.usdm ? 'usdm' : 'coinm'
-            }`,
-          )
-          return this.returnBad(timeProfile)(new Error('Response timeout'))
-        }
-      }
       // HL native always settles in USDC; each builder dex has its own
       // collateral token (USDH, USDE, USDT, …) — fetch one clearinghouseState
       // per dex and label balances with the dex's quote asset.
+      // Calls are serialized through checkLimits() — running them in parallel
+      // bypasses the rate limiter and triggers 429 on Hyperliquid.
       const assetsCache = HyperliquidAssets.getInstance()
       const dexNames = await assetsCache.listDexNames()
       const dexQuoteByName = new Map<string, string>()
@@ -640,36 +627,47 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       type StateOrNull = Awaited<
         ReturnType<typeof this.infoClient.clearinghouseState>
       > | null
-
-      const tasks: Array<Promise<{ asset: string; state: StateOrNull }>> = [
-        this.infoClient
-          .clearinghouseState({ user: this._key })
-          .then((state) => ({ asset: 'USDC', state: state as StateOrNull }))
-          .catch((e) => {
-            Logger.error(
-              `Hyperliquid clearinghouseState failed for HL native: ${e?.message ?? e}`,
-            )
-            return { asset: 'USDC', state: null as StateOrNull }
-          }),
-        ...dexNames.map((dex) =>
-          this.infoClient
-            .clearinghouseState({ user: this._key, dex })
-            .then((state) => ({
-              asset: dexQuoteByName.get(dex) ?? 'USDC',
-              state: state as StateOrNull,
-            }))
-            .catch((e) => {
-              Logger.error(
-                `Hyperliquid clearinghouseState failed for dex ${dex}: ${e?.message ?? e}`,
-              )
-              return {
-                asset: dexQuoteByName.get(dex) ?? 'USDC',
-                state: null as StateOrNull,
-              }
-            }),
-        ),
+      const states: Array<{ asset: string; state: StateOrNull }> = []
+      const targets: Array<{ asset: string; dex?: string }> = [
+        { asset: 'USDC' },
+        ...dexNames.map((dex) => ({
+          asset: dexQuoteByName.get(dex) ?? 'USDC',
+          dex,
+        })),
       ]
-      const states = await Promise.all(tasks)
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      for (const t of targets) {
+        timeProfile =
+          (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
+          timeProfile
+        if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+          const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+          if (diff >= this.timeout) {
+            Logger.error(
+              `Hyperliquid Queue time is too long ${diff / 1000} futures_getBalance ${
+                this.usdm ? 'usdm' : 'coinm'
+              }`,
+            )
+            return this.returnBad(timeProfile)(new Error('Response timeout'))
+          }
+        }
+        try {
+          const state = (await (t.dex
+            ? this.infoClient.clearinghouseState({
+                user: this._key,
+                dex: t.dex,
+              })
+            : this.infoClient.clearinghouseState({
+                user: this._key,
+              }))) as StateOrNull
+          states.push({ asset: t.asset, state })
+        } catch (e) {
+          Logger.error(
+            `Hyperliquid clearinghouseState failed for ${t.dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
+          )
+          states.push({ asset: t.asset, state: null })
+        }
+      }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       // Aggregate by collateral asset (multiple USDH dexes sum into one entry).
@@ -1037,46 +1035,48 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile = this.getEmptyTimeProfile(),
   ) {
     let res: CommonOrder[] = []
-    timeProfile =
-      (await this.checkLimits('getFuturesOpenOrders', 0, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-      if (diff >= this.timeout) {
-        Logger.error(
-          `Hyperliquid Queue time is too long ${diff / 1000} getAllOpenOrders ${
-            this.usdm ? 'usdm' : 'coinm'
-          }`,
-        )
-        return this.returnBad(timeProfile)(new Error('Response timeout'))
-      }
-    }
     try {
       // Default frontendOpenOrders only returns HL native + spot. Builder
-      // dexes need a per-dex call.
+      // dexes need a per-dex call. Calls are serialized through checkLimits
+      // — running them in parallel triggers 429.
       const dexNames = this.futures
         ? await HyperliquidAssets.getInstance().listDexNames()
         : []
-      const tasks = [
-        this.infoClient.frontendOpenOrders({ user: this._key }),
-        ...dexNames.map((dex) =>
-          this.infoClient
-            .frontendOpenOrders({ user: this._key, dex })
-            .catch((e) => {
-              Logger.error(
-                `Hyperliquid frontendOpenOrders failed for dex ${dex}: ${e?.message ?? e}`,
-              )
-              return [] as Awaited<
-                ReturnType<typeof this.infoClient.frontendOpenOrders>
-              >
-            }),
-        ),
-      ]
-      const results = (await Promise.all(tasks)).flat()
+      const targets: Array<string | undefined> = [undefined, ...dexNames]
+      type OrdersResult = Awaited<
+        ReturnType<typeof this.infoClient.frontendOpenOrders>
+      >
+      const results: OrdersResult = []
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      for (const dex of targets) {
+        timeProfile =
+          (await this.checkLimits('getFuturesOpenOrders', 0, timeProfile)) ||
+          timeProfile
+        if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+          const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+          if (diff >= this.timeout) {
+            Logger.error(
+              `Hyperliquid Queue time is too long ${diff / 1000} getAllOpenOrders ${
+                this.usdm ? 'usdm' : 'coinm'
+              }`,
+            )
+            return this.returnBad(timeProfile)(new Error('Response timeout'))
+          }
+        }
+        try {
+          const part = await (dex
+            ? this.infoClient.frontendOpenOrders({ user: this._key, dex })
+            : this.infoClient.frontendOpenOrders({ user: this._key }))
+          results.push(...part)
+        } catch (e) {
+          Logger.error(
+            `Hyperliquid frontendOpenOrders failed for ${dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
+          )
+        }
+      }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
-      const data = results.filter((r) =>
+      const data = (results as OrdersResult).filter((r) =>
         this.futures
           ? !r.coin.includes('/') && !r.coin.startsWith('@')
           : r.coin.startsWith('@') || r.coin.includes('/'),
@@ -1172,39 +1172,46 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       return this.errorFutures(timeProfile)
     }
     const res: PositionInfo[] = []
-    timeProfile =
-      (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-      if (diff >= this.timeout) {
-        Logger.error(
-          `Hyperliquid Queue time is too long ${diff / 1000} futures_getPositions ${
-            this.usdm ? 'usdm' : 'coinm'
-          }`,
-        )
-        return this.returnBad(timeProfile)(new Error('Response timeout'))
-      }
-    }
     try {
       // clearinghouseState only returns positions for one dex at a time;
-      // enumerate HL native + every builder dex.
+      // enumerate HL native + every builder dex. Calls are serialized
+      // through checkLimits — running them in parallel triggers 429.
       const dexNames = await HyperliquidAssets.getInstance().listDexNames()
-      const tasks = [
-        this.infoClient.clearinghouseState({ user: this._key }),
-        ...dexNames.map((dex) =>
-          this.infoClient
-            .clearinghouseState({ user: this._key, dex })
-            .catch((e) => {
-              Logger.error(
-                `Hyperliquid clearinghouseState failed for dex ${dex}: ${e?.message ?? e}`,
-              )
-              return null
-            }),
-        ),
-      ]
-      const states = await Promise.all(tasks)
+      const targets: Array<string | undefined> = [undefined, ...dexNames]
+      type StateOrNull = Awaited<
+        ReturnType<typeof this.infoClient.clearinghouseState>
+      > | null
+      const states: StateOrNull[] = []
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      for (const dex of targets) {
+        timeProfile =
+          (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
+          timeProfile
+        if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+          const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+          if (diff >= this.timeout) {
+            Logger.error(
+              `Hyperliquid Queue time is too long ${diff / 1000} futures_getPositions ${
+                this.usdm ? 'usdm' : 'coinm'
+              }`,
+            )
+            return this.returnBad(timeProfile)(new Error('Response timeout'))
+          }
+        }
+        try {
+          const state = (await (dex
+            ? this.infoClient.clearinghouseState({ user: this._key, dex })
+            : this.infoClient.clearinghouseState({
+                user: this._key,
+              }))) as StateOrNull
+          states.push(state)
+        } catch (e) {
+          Logger.error(
+            `Hyperliquid clearinghouseState failed for ${dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
+          )
+          states.push(null)
+        }
+      }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       const data = states.flatMap((s) => s?.assetPositions ?? [])
@@ -1283,34 +1290,42 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
     const res: AllPricesResponse[] = []
-    timeProfile =
-      (await this.checkLimits('getAllMids', 2, timeProfile)) || timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-      if (diff >= this.timeout) {
-        Logger.error(
-          `Hyperliquid Queue time is too long ${diff / 1000} getAllPrices ${
-            this.usdm ? 'usdm' : 'coinm'
-          }`,
-        )
-        return this.returnBad(timeProfile)(new Error('Response timeout'))
-      }
-    }
     try {
       // Default allMids() returns HL native (perp + spot). For builder dexes
-      // we have to call once per dex with { dex: name }.
+      // we have to call once per dex with { dex: name }. Calls are
+      // serialized through checkLimits — running them in parallel triggers
+      // 429 on Hyperliquid.
       const dexNames = this.futures
         ? await HyperliquidAssets.getInstance().listDexNames()
         : []
-      const allMidsTasks: Promise<Record<string, string>>[] = [
-        this.infoClient.allMids() as Promise<Record<string, string>>,
-        ...dexNames.map(
-          (dex) =>
-            this.infoClient.allMids({ dex }) as Promise<Record<string, string>>,
-        ),
-      ]
-      const allMidsResults = await Promise.all(allMidsTasks)
+      const targets: Array<string | undefined> = [undefined, ...dexNames]
+      const allMidsResults: Record<string, string>[] = []
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      for (const dex of targets) {
+        timeProfile =
+          (await this.checkLimits('getAllMids', 2, timeProfile)) || timeProfile
+        if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+          const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+          if (diff >= this.timeout) {
+            Logger.error(
+              `Hyperliquid Queue time is too long ${diff / 1000} getAllPrices ${
+                this.usdm ? 'usdm' : 'coinm'
+              }`,
+            )
+            return this.returnBad(timeProfile)(new Error('Response timeout'))
+          }
+        }
+        try {
+          const part = (await (dex
+            ? this.infoClient.allMids({ dex })
+            : this.infoClient.allMids())) as Record<string, string>
+          allMidsResults.push(part)
+        } catch (e) {
+          Logger.error(
+            `Hyperliquid allMids failed for ${dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
+          )
+        }
+      }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       const merged: Record<string, string> = Object.assign(
         {},

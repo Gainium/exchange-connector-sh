@@ -193,6 +193,19 @@ const TOKEN_ALIASES: Record<string, string> = {
 }
 const aliasToken = (name: string): string => TOKEN_ALIASES[name] ?? name
 
+/**
+ * Hyperliquid HIP-3 builder dexes let third-party deployers register
+ * arbitrary asset names. Names propagate into pair strings that flow
+ * into Redis keys, file paths, URLs and similar surfaces — names with
+ * '/', '..', spaces, control characters or non-ASCII are unsafe and
+ * have been observed in the wild causing path-traversal-shaped pairs
+ * (e.g. 'tndex:A B:C/../../../../../中'). We require alphanumerics
+ * + '_' + '.' only, and explicitly reject '..' to block traversal.
+ */
+const SAFE_IDENT = /^[A-Za-z0-9_.]{1,32}$/
+const isSafeIdent = (s: string): boolean =>
+  SAFE_IDENT.test(s) && !s.includes('..')
+
 export type FuturesAssetInfo = {
   /** Display pair used as the public identifier (e.g. 'BTC-USDC' or
    *  'F:TSLA-USDH' when collision-prefixed). */
@@ -370,13 +383,25 @@ class HyperliquidAssets {
     return
   }
 
+  /** Backoff before retrying after an empty/failed fetch — keeps a
+   *  persistently-failing endpoint from burning rate-limit budget on
+   *  every consumer call until the regular interval elapses. */
+  private failureRetryInterval = 60 * 1000
+
   @IdMute(mutex, () => 'updateAssets')
   private async updateAssets(market: Market) {
     if (market === 'spot') {
-      if (
-        this.lastUpdateSpot + this.updateInterval > Date.now() &&
+      // Skip if we attempted recently. Use the regular interval when the
+      // cache is populated, a much shorter one when it's empty so we can
+      // recover from a transient failure without hammering. Crucially we
+      // do NOT bypass the guard just because the cache is empty —
+      // bypassing causes every caller to re-fetch on every request.
+      const sinceLast = Date.now() - this.lastUpdateSpot
+      const interval =
         this.pairsSpot.size > 0
-      ) {
+          ? this.updateInterval
+          : this.failureRetryInterval
+      if (this.lastUpdateSpot && sinceLast < interval) {
         return
       }
       try {
@@ -392,80 +417,138 @@ class HyperliquidAssets {
             this.pairsSpot.set(u.index, pair)
           }
         })
-        this.lastUpdateSpot = Date.now()
       } catch (e) {
         Logger.error(`Error updating Hyperliquid spot assets: ${e.message}`)
+      } finally {
+        // Mark "attempted" even on failure so the next request waits the
+        // failureRetryInterval rather than re-fetching immediately.
+        this.lastUpdateSpot = Date.now()
       }
       return
     }
     // futures: enumerate HL native + builder dexes via perpDexs() + meta({dex})
-    if (
-      this.lastUpdateFutures + this.updateInterval > Date.now() &&
-      this.futuresByPair.size > 0
-    ) {
-      return
+    // Same logic as spot branch — see comment there. The `size > 0` gate
+    // used to live here too and caused every consumer call to re-fetch
+    // when the cache was empty (e.g. after a transient network failure),
+    // which produced an unbounded retry storm hitting 429.
+    {
+      const sinceLast = Date.now() - this.lastUpdateFutures
+      const interval =
+        this.futuresByPair.size > 0
+          ? this.updateInterval
+          : this.failureRetryInterval
+      if (this.lastUpdateFutures && sinceLast < interval) {
+        return
+      }
     }
     try {
       await this.checkLimits('spotMeta', 20)
       const spotTokens = (await this.client.spotMeta()).tokens
-      await this.checkLimits('perpDexs', 20)
-      const perpDexs = (await this.client.perpDexs()) as RawPerpDex[]
+      // Hyperliquid testnet has thousands of builder dexes (most empty),
+      // so enumerating them all on demo wastes the rate-limit budget and
+      // never finishes. Skip the perpDexs() fan-out and only fetch HL
+      // native meta on demo.
+      const isDemo = process.env.HYPERLIQUIDENV === 'demo'
+      let perpDexs: RawPerpDex[]
+      if (isDemo) {
+        perpDexs = [null]
+      } else {
+        await this.checkLimits('perpDexs', 20)
+        perpDexs = (await this.client.perpDexs()) as RawPerpDex[]
+      }
       const newByPair = new Map<string, FuturesAssetInfo>()
       const newByCode = new Map<string, string>()
       const newDexNames = new Set<string>()
       for (let i = 0; i < perpDexs.length; i++) {
         const dex = perpDexs[i]
-        await this.checkLimits('meta', 20)
-        const meta = (await (dex
-          ? this.client.meta({ dex: dex.name })
-          : this.client.meta())) as unknown as RawPerpsMeta
-        if (!meta.universe || meta.universe.length === 0) continue
-        if (dex) newDexNames.add(dex.name)
-        const collateralIdx = meta.collateralToken ?? 0
-        const quoteToken = spotTokens.find((t) => t.index === collateralIdx)
-        const quoteAsset = quoteToken?.name
-          ? aliasToken(quoteToken.name)
-          : 'USDC'
-        const deployerFeeScale = dex ? +(dex.deployerFeeScale ?? '0') : 0
-        meta.universe.forEach((u, coinIdx) => {
-          // builder-dex universes return names already prefixed (e.g. 'xyz:HYUNDAI')
-          const code = u.name
-          const baseRaw = dex ? (u.name.split(':')[1] ?? u.name) : u.name
-          const baseName = aliasToken(baseRaw)
-          const basePair = `${baseName}-${quoteAsset}`
-          // Always prefix builder-dex pairs: provider:BASE-QUOTE.
-          // HL native stays unprefixed.
-          const pair = dex ? `${dex.name}:${basePair}` : basePair
-          const assetIndex =
-            i === 0 ? coinIdx : 100000 + (i - 1) * 10000 + coinIdx
-          if (newByPair.has(pair)) {
+        if (dex && !isSafeIdent(dex.name)) {
+          Logger.warn(
+            `Hyperliquid skipping dex with unsafe name: ${JSON.stringify(dex.name)}`,
+          )
+          continue
+        }
+        // Per-dex try/catch — one bad dex must not poison the whole map.
+        // A thrown meta() (or downstream) call previously caused dexNames
+        // to stay empty and all multi-dex consumers to iterate only HL
+        // native, hanging on retries until the rate limiter 429s.
+        try {
+          await this.checkLimits('meta', 20)
+          const meta = (await (dex
+            ? this.client.meta({ dex: dex.name })
+            : this.client.meta())) as unknown as RawPerpsMeta
+          if (!meta.universe || meta.universe.length === 0) continue
+          const collateralIdx = meta.collateralToken ?? 0
+          const quoteToken = spotTokens.find((t) => t.index === collateralIdx)
+          const quoteAsset = quoteToken?.name
+            ? aliasToken(quoteToken.name)
+            : 'USDC'
+          if (!isSafeIdent(quoteAsset)) {
             Logger.warn(
-              `Hyperliquid duplicate pair ${pair}: keeping ${newByPair.get(pair)!.code}, dropping ${code}`,
+              `Hyperliquid skipping ${dex?.name ?? 'native'}: unsafe quote ${JSON.stringify(quoteAsset)}`,
             )
-            return
+            continue
           }
-          newByPair.set(pair, {
-            pair,
-            code,
-            assetIndex,
-            quoteAsset,
-            dexName: dex?.name ?? null,
-            deployerFeeScale,
-            onlyIsolated: !!u.onlyIsolated,
-            szDecimals: u.szDecimals,
-            maxLeverage: u.maxLeverage,
-            isDelisted: !!u.isDelisted,
-            marginTableId: u.marginTableId,
+          if (dex) newDexNames.add(dex.name)
+          const deployerFeeScale = dex ? +(dex.deployerFeeScale ?? '0') : 0
+          meta.universe.forEach((u, coinIdx) => {
+            // Builder-dex universes return names already prefixed (e.g.
+            // 'xyz:HYUNDAI'). Use slice rather than split(':')[1] so an
+            // asset name containing extra colons is preserved intact —
+            // and then sanitized below.
+            const code = u.name
+            const baseRaw =
+              dex && u.name.startsWith(`${dex.name}:`)
+                ? u.name.slice(dex.name.length + 1)
+                : u.name
+            const baseName = aliasToken(baseRaw)
+            if (!isSafeIdent(baseName)) {
+              Logger.warn(
+                `Hyperliquid skipping unsafe asset: ${JSON.stringify(u.name)} (dex=${dex?.name ?? 'native'})`,
+              )
+              return
+            }
+            const basePair = `${baseName}-${quoteAsset}`
+            // Always prefix builder-dex pairs: provider:BASE-QUOTE.
+            // HL native stays unprefixed.
+            const pair = dex ? `${dex.name}:${basePair}` : basePair
+            const assetIndex =
+              i === 0 ? coinIdx : 100000 + (i - 1) * 10000 + coinIdx
+            if (newByPair.has(pair)) {
+              Logger.warn(
+                `Hyperliquid duplicate pair ${pair}: keeping ${newByPair.get(pair)!.code}, dropping ${code}`,
+              )
+              return
+            }
+            newByPair.set(pair, {
+              pair,
+              code,
+              assetIndex,
+              quoteAsset,
+              dexName: dex?.name ?? null,
+              deployerFeeScale,
+              onlyIsolated: !!u.onlyIsolated,
+              szDecimals: u.szDecimals,
+              maxLeverage: u.maxLeverage,
+              isDelisted: !!u.isDelisted,
+              marginTableId: u.marginTableId,
+            })
+            newByCode.set(code, pair)
           })
-          newByCode.set(code, pair)
-        })
+        } catch (e) {
+          Logger.error(
+            `Hyperliquid meta failed for ${dex?.name ?? 'native'}: ${(e as Error)?.message ?? e}`,
+          )
+        }
       }
       this.futuresByPair = newByPair
       this.futuresByCode = newByCode
       this.dexNames = newDexNames
-      this.lastUpdateFutures = Date.now()
     } catch (e) {
       Logger.error(`Error updating Hyperliquid futures assets: ${e.message}`)
+    } finally {
+      // Mark "attempted" even on failure so the next request waits the
+      // failureRetryInterval rather than re-fetching immediately.
+      this.lastUpdateFutures = Date.now()
     }
   }
 }

@@ -511,8 +511,14 @@ class HyperliquidAssets {
             // Always prefix builder-dex pairs: provider:BASE-QUOTE.
             // HL native stays unprefixed.
             const pair = dex ? `${dex.name}:${basePair}` : basePair
-            const assetIndex =
-              i === 0 ? coinIdx : 100000 + (i - 1) * 10000 + coinIdx
+            // HL encodes builder-dex assets as `100000 + slot * 10000 +
+            // coinIdx` where `slot` is the position in `perpDexs()` —
+            // including the null (HL native) slot at index 0. So xyz at
+            // perpDexs[1] uses multiplier 1, not 0. Earlier `(i - 1)` was
+            // an off-by-one and produced asset indices one builder-dex
+            // slot too low (e.g. 100001 for xyz:TSLA instead of 110001),
+            // which HL rejects with "invalid spot".
+            const assetIndex = i === 0 ? coinIdx : 100000 + i * 10000 + coinIdx
             if (newByPair.has(pair)) {
               Logger.warn(
                 `Hyperliquid duplicate pair ${pair}: keeping ${newByPair.get(pair)!.code}, dropping ${code}`,

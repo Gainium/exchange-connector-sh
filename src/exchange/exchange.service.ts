@@ -23,6 +23,7 @@ import {
 } from './types'
 import AbstractExchange from './abstractExchange'
 import ExchangeChooser from './helpers/exchangeChooser'
+import { isExchangeEnabled } from '../utils/adminConfig'
 import {
   AuthData,
   CreateOrderDto,
@@ -244,6 +245,12 @@ export class ExchangeService {
     bybitHost?: BybitHost,
     subaccount?: boolean,
   ): AbstractExchange {
+    if (!isExchangeEnabled(exchange)) {
+      throw new HttpException(
+        `Exchange ${exchange} is disabled by host configuration`,
+        503,
+      )
+    }
     const factory = ExchangeChooser.chooseExchangeFactory(exchange)
     if (!factory) {
       throw new HttpException(`Exchange is not supported`, 200)

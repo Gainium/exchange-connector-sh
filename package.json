@@ -1,6 +1,6 @@
 {
   "name": "exchange-connector",
-  "version": "1.4.3",
+  "version": "1.5.0",
   "description": "",
   "author": "",
   "private": true,
@@ -39,6 +39,7 @@
     "coinbase-advanced-node": "^4.1.0",
     "crypto-js": "^4.2.0",
     "dotenv": "^17.2.0",
+    "ioredis": "^5.4.1",
     "isomorphic-unfetch": "^4.0.2",
     "okx-api": "^2.0.6",
     "reflect-metadata": "^0.2.2",

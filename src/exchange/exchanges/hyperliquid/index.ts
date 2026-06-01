@@ -740,19 +740,74 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             return this.returnBad(timeProfile)(new Error('Response timeout'))
           }
         }
-        try {
-          const state = (await (t.dex
+        const callOnce = () =>
+          t.dex
             ? this.infoClient.clearinghouseState({
                 user: this._key,
                 dex: t.dex,
               })
-            : this.infoClient.clearinghouseState({
-                user: this._key,
-              }))) as StateOrNull
+            : this.infoClient.clearinghouseState({ user: this._key })
+        const isTransientHlError = (err: unknown): boolean => {
+          const e = err as {
+            response?: { status?: number }
+            message?: string
+          }
+          if (e?.response?.status === 422) return true
+          if (e?.message?.includes('Failed to deserialize')) return true
+          return false
+        }
+        try {
+          let state: StateOrNull
+          try {
+            state = (await callOnce()) as StateOrNull
+          } catch (firstErr) {
+            if (!isTransientHlError(firstErr)) throw firstErr
+            const fe = firstErr as {
+              response?: { status?: number }
+              message?: string
+            }
+            const userPrefix =
+              typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
+            Logger.warn(
+              `Hyperliquid clearinghouseState transient ${
+                t.dex ?? 'HL native'
+              } (status=${fe.response?.status ?? '?'}, user=${userPrefix}…); retrying once: ${fe.message ?? firstErr}`,
+            )
+            await new Promise((r) => setTimeout(r, 750))
+            timeProfile =
+              (await this.checkLimits(
+                'getClearinghouseState',
+                2,
+                timeProfile,
+              )) || timeProfile
+            if (
+              timeProfile.inQueueStartTime &&
+              timeProfile.inQueueEndTime &&
+              timeProfile.inQueueEndTime - timeProfile.inQueueStartTime >=
+                this.timeout
+            ) {
+              throw new Error(
+                'Response timeout while waiting for clearinghouseState retry slot',
+              )
+            }
+            state = (await callOnce()) as StateOrNull
+          }
           states.push({ asset: t.asset, state })
         } catch (e) {
+          const err = e as {
+            message?: string
+            response?: { status?: number; statusText?: string }
+            body?: unknown
+          }
+          const status = err.response?.status
+          const userPrefix =
+            typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
           Logger.error(
-            `Hyperliquid clearinghouseState failed for ${t.dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
+            `Hyperliquid clearinghouseState failed for ${
+              t.dex ?? 'HL native'
+            } (status=${status ?? '?'}, user=${userPrefix}…): ${
+              err.message ?? e
+            } body=${typeof err.body === 'string' ? err.body : JSON.stringify(err.body)}`,
           )
           states.push({ asset: t.asset, state: null })
         }

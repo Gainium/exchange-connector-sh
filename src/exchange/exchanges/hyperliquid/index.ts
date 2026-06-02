@@ -560,6 +560,8 @@ class HyperliquidAssets {
 }
 
 class HyperliquidExchange extends AbstractExchange implements Exchange {
+  static FUTURES_BUILDER_FEE = 0.00045
+  static SPOT_BUILDER_FEE = 0.0007
   static MAX_DECIMALS_FUTURES = 6
   static MAX_DECIMALS_SPOT = 8
   static MAX_FIGURES = 5
@@ -573,6 +575,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   private retryErrors: string[]
   protected futures?: Futures
   private demo = process.env.HYPERLIQUIDENV === 'demo'
+  private code?: string
   constructor(
     futures: Futures,
     key: string,
@@ -581,7 +584,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     _environment?: string,
     _keysType?: string,
     _okxSource?: string,
-    _code?: string,
+    code?: string,
     _subaccount?: boolean,
   ) {
     super({ key, secret, passphrase, subaccount: `${_subaccount}` === 'true' })
@@ -596,6 +599,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     this.retry = 10
     this.retryErrors = ['429']
     this.futures = futures === Futures.null ? this.futures : futures
+    this.code = code
   }
 
   private methodNotSupported() {
@@ -638,8 +642,40 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.methodNotSupported()
   }
 
-  async getAffiliate(_uid: string | number): Promise<BaseReturn<boolean>> {
-    return this.methodNotSupported()
+  async getAffiliate(
+    uid: string | number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<boolean>> {
+    try {
+      timeProfile =
+        (await this.checkLimits('getAffiliate', 20, timeProfile)) || timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+        const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+        if (diff >= this.timeout) {
+          Logger.error(
+            `Hyperliquid Queue time is too long ${diff / 1000} getAffiliate ${
+              this.usdm ? 'usdm' : 'coinm'
+            }`,
+          )
+          return this.returnBad(timeProfile)(new Error('Response timeout'))
+        }
+      }
+      const get = await this.infoClient.maxBuilderFee({
+        user: this._key as `0x${string}`,
+        builder: uid.toString() as `0x${string}`,
+      })
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      return this.returnGood<boolean>(timeProfile)(
+        get === HyperliquidExchange.SPOT_BUILDER_FEE * 100000,
+      )
+    } catch (e) {
+      return this.handleHyperliquidErrors(
+        this.getAffiliate,
+        uid,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
+    }
   }
 
   async futures_changeLeverage(
@@ -937,16 +973,34 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     if (!this.futures) {
       orders.r = false
     }
-    return this.exchangeClient
-      .order(
-        {
-          orders: [orders],
-          grouping: 'na',
-        },
-        {
-          vaultAddress: this.subaccount ? (this.key as `0x${string}`) : null,
-        },
+    let builder: hl.OrderParameters['builder'] = undefined
+    if (this.code) {
+      builder = {
+        b: this.code as `0x${string}`,
+        f: this.futures
+          ? HyperliquidExchange.FUTURES_BUILDER_FEE * 100000
+          : HyperliquidExchange.SPOT_BUILDER_FEE * 100000,
+      }
+    }
+    const input: hl.OrderParameters = {
+      orders: [orders],
+      grouping: 'na',
+      builder,
+    }
+    if (this.code) {
+      Logger.log(
+        `Placing order with builder ${this.code} and fee ${
+          this.futures
+            ? HyperliquidExchange.FUTURES_BUILDER_FEE
+            : HyperliquidExchange.SPOT_BUILDER_FEE
+        } on ${this.futures ? 'futures' : 'spot'} market ${input.builder.b} | ${input.builder.f}`,
+        'HyperliquidExchange',
       )
+    }
+    return this.exchangeClient
+      .order(input, {
+        vaultAddress: this.subaccount ? (this.key as `0x${string}`) : null,
+      })
       .then(async (r: any) => {
         const result: PlaceOrderResponse = r
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -1288,16 +1342,30 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       .userFees({ user: this._key })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const baseAdd = +(this.futures
+          ? result.userAddRate
+          : result.userSpotAddRate)
+        const baseCross = +(this.futures
+          ? result.userCrossRate
+          : result.userSpotCrossRate)
+        const builderAdjust = this.code
+          ? this.futures
+            ? HyperliquidExchange.FUTURES_BUILDER_FEE
+            : HyperliquidExchange.SPOT_BUILDER_FEE
+          : 0
+        const fees = await Promise.all(
+          allPairs.data.map(async (p) => {
+            const scale = await this.getDeployerFeeScale(p.pair)
+            const factor = 1 + scale
+            return {
+              pair: p.pair,
+              maker: baseAdd * factor + builderAdjust,
+              taker: baseCross * factor + builderAdjust,
+            }
+          }),
+        )
         return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
-          allPairs.data.map((p) => ({
-            pair: p.pair,
-            maker: +(this.futures
-              ? result.userAddRate
-              : result.userSpotAddRate),
-            taker: +(this.futures
-              ? result.userCrossRate
-              : result.userSpotCrossRate),
-          })),
+          fees,
         )
       })
       .catch(

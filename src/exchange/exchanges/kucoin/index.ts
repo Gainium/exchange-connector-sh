@@ -1157,11 +1157,39 @@ class KucoinExchange extends AbstractExchange implements Exchange {
     return this.returnGood<MarginType>(timeProfile)(margin)
   }
 
-  async futures_getHedge(_symbol?: string): Promise<BaseReturn<boolean>> {
+  async futures_getHedge(
+    _symbol?: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<boolean>> {
     if (!this.futures) {
-      return this.errorFutures(this.getEmptyTimeProfile())
+      return this.errorFutures(timeProfile)
     }
-    return this.returnGood<boolean>(this.getEmptyTimeProfile())(false)
+    timeProfile =
+      (await this.checkLimits('futures_getHedge', LimitType.futures, 2)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getPositionMode()
+      .then(async (res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res.status === StatusEnum.ok) {
+          return this.returnGood<boolean>(timeProfile)(
+            res.data.positionMode === 1,
+          )
+        }
+        return this.handleKucoinErrors(
+          this.futures_getHedge,
+          _symbol,
+          timeProfile,
+        )(new KucoinError(res.reason, res.reasonCode))
+      })
+      .catch(
+        this.handleKucoinErrors(
+          this.futures_getHedge,
+          _symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async futures_leverageBracket(
@@ -1201,11 +1229,37 @@ class KucoinExchange extends AbstractExchange implements Exchange {
       )
   }
 
-  async futures_setHedge(): Promise<BaseReturn<boolean>> {
+  async futures_setHedge(
+    value: boolean,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<boolean>> {
     if (!this.futures) {
-      return this.errorFutures(this.getEmptyTimeProfile())
+      return this.errorFutures(timeProfile)
     }
-    return this.returnGood<boolean>(this.getEmptyTimeProfile())(false)
+    timeProfile =
+      (await this.checkLimits('futures_setHedge', LimitType.futures, 2)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .switchPositionMode({ positionMode: value ? '1' : '0' })
+      .then(async (res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res.status === StatusEnum.ok) {
+          return this.returnGood<boolean>(timeProfile)(value)
+        }
+        return this.handleKucoinErrors(
+          this.futures_setHedge,
+          value,
+          timeProfile,
+        )(new KucoinError(res.reason, res.reasonCode))
+      })
+      .catch(
+        this.handleKucoinErrors(
+          this.futures_setHedge,
+          value,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
   /**
    * Check info from binance provider about limis and set them to {@link KucoinExchange#info}

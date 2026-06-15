@@ -7,7 +7,6 @@ import Coinbase from '../exchanges/coinbase'
 import Hyperliquid from '../exchanges/hyperliquid'
 import Kraken from '../exchanges/kraken'
 import {
-  BybitHost,
   CoinbaseKeysType,
   ExchangeDomain,
   ExchangeEnum,
@@ -117,7 +116,7 @@ const verifyBybit = async (
   tradeType: TradeTypeEnum,
   key: string,
   secret: string,
-  bybitHost?: BybitHost,
+  bybitHost?: string,
 ): Promise<VerifyResponse> => {
   const client = new Bybit(
     tradeType === TradeTypeEnum.spot
@@ -274,7 +273,7 @@ const verifyExchange = async (
   passphrase?: string,
   keysType?: CoinbaseKeysType,
   okxSource?: OKXSource,
-  bybitHost?: BybitHost,
+  bybitHost?: string,
   subaccount?: boolean,
 ): Promise<VerifyResponse> => {
   if (

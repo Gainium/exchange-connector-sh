@@ -19,7 +19,6 @@ import {
   RebateRecord,
   RebateOverview,
   OKXSource,
-  BybitHost,
 } from './types'
 import AbstractExchange from './abstractExchange'
 import ExchangeChooser from './helpers/exchangeChooser'
@@ -242,7 +241,7 @@ export class ExchangeService {
     keysType?: CoinbaseKeysType,
     okxSource?: OKXSource,
     code?: string,
-    bybitHost?: BybitHost,
+    bybitHost?: string,
     subaccount?: boolean,
   ): AbstractExchange {
     if (!isExchangeEnabled(exchange)) {

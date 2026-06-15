@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-06-15
+
+### Changed
+- Bybit REST host is now derived from a user-supplied domain (`api.<host>`) instead of a fixed zone map; legacy zone codes (`eu`/`com`/…) still resolve for unmigrated accounts.
+
 ## [1.6.1] - 2026-06-08
 
 ### Fixed

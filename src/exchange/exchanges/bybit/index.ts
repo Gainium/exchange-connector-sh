@@ -21,8 +21,7 @@ import {
   TimeProfile,
   RebateOverview,
   RebateRecord,
-  BybitHost,
-  bybitHostMap,
+  bybitRestUrl,
 } from '../../types'
 import {
   RestClientV5 as BybitClient,
@@ -81,7 +80,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
     _keysType?: string,
     _okxSource?: string,
     code?: string,
-    bybitHost?: BybitHost,
+    bybitHost?: string,
     _subaccount?: boolean,
   ) {
     super({ key, secret })
@@ -90,7 +89,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
       secret: this.secret ?? '',
       testnet: process.env.ENV === 'sandbox',
       recv_window: 30000,
-      baseUrl: bybitHostMap[bybitHost ?? BybitHost.com] || bybitHostMap.com,
+      baseUrl: bybitRestUrl(bybitHost),
     }
     this.client = new BybitClient(options)
     this.orderClient = new BybitOrderClient(options, {
@@ -912,7 +911,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
   async getAllExchangeInfo(
     timeProfile = this.getEmptyTimeProfile(),
     cursor?: string,
-    bybitHost?: BybitHost,
+    bybitHost?: string,
   ): Promise<
     BaseReturn<
       (ExchangeInfo & {
@@ -928,7 +927,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
       secret: this.secret ?? '',
       testnet: process.env.ENV === 'sandbox',
       recv_window: 30000,
-      baseUrl: bybitHostMap[bybitHost ?? BybitHost.com] || bybitHostMap.com,
+      baseUrl: bybitRestUrl(bybitHost),
     }
     const cl = new BybitClient(opt)
     timeProfile =
@@ -1041,7 +1040,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
       const euPairs = await this.getAllExchangeInfo(
         timeProfile,
         undefined,
-        BybitHost.eu,
+        'bybit.eu',
       )
       if (euPairs.status === StatusEnum.ok) {
         euPairs.data.forEach((p) => {

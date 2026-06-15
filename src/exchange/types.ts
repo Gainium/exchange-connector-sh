@@ -344,20 +344,45 @@ export type RebateOverview = {
   time: number
 }
 
-export enum BybitHost {
-  eu = 'eu',
-  com = 'com',
-  nl = 'nl',
-  tr = 'tr',
-  kz = 'kz',
-  ge = 'ge',
+/**
+ * Legacy zone codes that used to be stored in the per-account `bybitHost`
+ * field before the domain migration. Kept only so the connector can still
+ * resolve accounts that have not been migrated yet (and dropdowns that still
+ * emit the old codes). New accounts store the bare frontend host directly,
+ * e.g. `bybit.eu`. Once the migration has run everywhere this can be dropped.
+ */
+const legacyBybitZoneMap: Record<string, string> = {
+  eu: 'bybit.eu',
+  com: 'bybit.com',
+  nl: 'bybit.nl',
+  kz: 'bybit.kz',
+  ge: 'bybitgeorgia.ge',
+  tr: 'bybit-tr.com',
+  ae: 'bybit.ae',
+  id: 'bybit.id',
 }
 
-export const bybitHostMap: Record<BybitHost, string> = {
-  [BybitHost.eu]: 'https://api.bybit.eu',
-  [BybitHost.com]: 'https://api.bybit.com',
-  [BybitHost.nl]: 'https://api.bybit.eu',
-  [BybitHost.tr]: 'https://api.bybit-tr.com',
-  [BybitHost.kz]: 'https://api.bybit.kz',
-  [BybitHost.ge]: 'https://api.bybitgeorgia.ge',
+/**
+ * Normalize a user-supplied Bybit domain (or legacy zone code) to a bare
+ * frontend host. Scheme, path, port and any leading `www`/`api`/`stream`
+ * label are stripped, so `https://www.bybit.com/login`, `api.bybit.eu` and
+ * `bybit.eu` all collapse to `bybit.eu`. Bybit's REST and WS hosts are
+ * uniformly `api.<host>` / `stream.<host>`, so no curated per-region table
+ * is needed — we route to whatever domain the user declared.
+ */
+export function normalizeBybitHost(input?: string): string {
+  const fallback = 'bybit.com'
+  if (!input) return fallback
+  const raw = input.trim().toLowerCase()
+  if (!raw) return fallback
+  if (legacyBybitZoneMap[raw]) return legacyBybitZoneMap[raw]
+  let host = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+  host = host.split(/[/?#]/)[0].split(':')[0]
+  host = host.replace(/^(www|api|stream)\./, '')
+  return host || fallback
+}
+
+/** Build the Bybit REST base URL from a user-supplied domain / legacy zone. */
+export function bybitRestUrl(input?: string): string {
+  return `https://api.${normalizeBybitHost(input)}`
 }

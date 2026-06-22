@@ -2,6 +2,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeEnum,
   ExchangeInfo,
@@ -77,6 +78,21 @@ export class ExchangeService {
       from,
       to,
       count,
+    )
+  }
+
+  getFundingRateHistory(
+    exchange: ExchangeEnum,
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    return this.getExchange(exchange).getFundingRateHistory(
+      symbol,
+      from,
+      to,
+      limit,
     )
   }
 

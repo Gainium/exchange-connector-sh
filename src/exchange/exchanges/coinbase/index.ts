@@ -3,6 +3,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   ExchangeIntervals,
@@ -1213,6 +1214,17 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
 
   getUsage() {
     return limitHelper.getUsage()
+  }
+
+  async getFundingRateHistory(
+    _symbol: string,
+    _from?: number,
+    _to?: number,
+    _limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    // Coinbase futures are not supported — no funding rates.
+    return this.returnGood<FundingRateResponse[]>(timeProfile)([])
   }
 
   async getTrades(

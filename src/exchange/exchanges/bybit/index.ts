@@ -3,6 +3,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   ExchangeIntervals,
@@ -2006,6 +2007,51 @@ class BybitExchange extends AbstractExchange implements Exchange {
 
   getUsage() {
     return limitHelper.getUsage()
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    timeProfile =
+      (await this.checkLimits('getFundingRateHistory', 'get', timeProfile)) ||
+      timeProfile
+    const category = this.getCategory() as 'linear' | 'inverse'
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getFundingRateHistory({
+        category,
+        symbol,
+        startTime: from ? +from : undefined,
+        endTime: to ? +to : undefined,
+        limit: limit ?? 200,
+      })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res.retMsg !== 'OK') {
+          throw new BybitError(res.retMsg, res.retCode)
+        }
+        return this.returnGood<FundingRateResponse[]>(timeProfile)(
+          (res.result?.list ?? []).map((r) => ({
+            symbol: r.symbol,
+            fundingRate: parseFloat(r.fundingRate),
+            fundingTime: +r.fundingRateTimestamp,
+          })),
+        )
+      })
+      .catch(
+        this.handleBybitErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async getTrades(

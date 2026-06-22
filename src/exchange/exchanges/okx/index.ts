@@ -3,6 +3,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   ExchangeIntervals,
@@ -1571,6 +1572,57 @@ class OKXExchange extends AbstractExchange implements Exchange {
 
   getUsage() {
     return limitHelper.getUsage()
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    timeProfile =
+      (await this.checkLimits('getFundingRateHistory', 3000, 5, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const params: {
+      instId: string
+      before?: string
+      after?: string
+      limit?: string
+    } = {
+      instId: this.updateSymbol(symbol),
+      limit: `${limit ?? 100}`,
+    }
+    // OKX: `before` returns records newer than the fundingTime, `after` older
+    if (typeof from !== 'undefined') {
+      params.before = `${from}`
+    }
+    if (typeof to !== 'undefined') {
+      params.after = `${to}`
+    }
+    return this.client
+      .getFundingRateHistory(params)
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<FundingRateResponse[]>(timeProfile)(
+          (res ?? []).map((r) => ({
+            symbol,
+            fundingRate: parseFloat(r.realizedRate ?? r.fundingRate),
+            fundingTime: +r.fundingTime,
+          })),
+        )
+      })
+      .catch(
+        this.handleOkxErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async getTrades(

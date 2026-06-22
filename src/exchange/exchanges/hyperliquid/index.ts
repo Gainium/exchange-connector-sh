@@ -3,6 +3,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   ExchangeIntervals,
@@ -2344,6 +2345,49 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
 
   getUsage() {
     return limitHelper.getUsage()
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    // Hyperliquid requires startTime; default to a 7d lookback when omitted.
+    const endTime = to ? +to : +new Date()
+    const startTime = from ? +from : endTime - 7 * 24 * 60 * 60 * 1000
+    timeProfile =
+      (await this.checkLimits('fundingHistory', 20, timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.infoClient
+      .fundingHistory({
+        coin: symbol,
+        startTime,
+        endTime,
+      })
+      .then((result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<FundingRateResponse[]>(timeProfile)(
+          (result ?? [])
+            .map((r) => ({
+              symbol,
+              fundingRate: parseFloat(r.fundingRate),
+              fundingTime: +r.time,
+            }))
+            .slice(0, limit),
+        )
+      })
+      .catch(
+        this.handleHyperliquidErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async getTrades(

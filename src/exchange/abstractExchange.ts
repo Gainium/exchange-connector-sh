@@ -2,6 +2,7 @@ import type {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   FreeAsset,
@@ -103,6 +104,13 @@ export interface Exchange {
     startTime?: number,
     endTime?: number,
   ): Promise<BaseReturn<TradeResponse[]>>
+
+  getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+  ): Promise<BaseReturn<FundingRateResponse[]>>
 
   getAllPrices(): Promise<BaseReturn<AllPricesResponse[]>>
 
@@ -388,6 +396,20 @@ abstract class AbsctractExchange implements Exchange {
     startTime?: number,
     endTime?: number,
   ): Promise<BaseReturn<TradeResponse[]>>
+
+  /**
+   * Get settled funding rate history for a futures symbol.
+   * @param {string} symbol Universal symbol
+   * @param {number} [from] Start time (ms, inclusive)
+   * @param {number} [to] End time (ms, inclusive)
+   * @param {number} [limit] Max records
+   */
+  abstract getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+  ): Promise<BaseReturn<FundingRateResponse[]>>
 
   /**
    * Get all prices

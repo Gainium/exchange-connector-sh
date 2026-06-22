@@ -3,6 +3,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   ExchangeIntervals,
@@ -1975,6 +1976,60 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.getCandles,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    if (!this.usdm || !this.derivativesClient) {
+      // Kraken funding rates exist only for futures (derivatives).
+      return this.usdm
+        ? this.errorClient(timeProfile)
+        : this.returnGood<FundingRateResponse[]>(timeProfile)([])
+    }
+    // Caller passes the Kraken futures code (e.g. PF_XBTUSD) directly.
+    timeProfile =
+      (await this.checkLimits('getFundingRateHistory', symbol, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    // Kraken returns the full history (no time filter), ascending by timestamp.
+    return this.derivativesClient
+      .getHistoricalFundingRates({ symbol })
+      .then((result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (!result.rates) {
+          throw new Error('Failed to get funding rates')
+        }
+        return this.returnGood<FundingRateResponse[]>(timeProfile)(
+          result.rates
+            .map((r) => ({
+              symbol,
+              // relativeFundingRate is the fractional rate (vs absolute fundingRate)
+              fundingRate: r.relativeFundingRate,
+              fundingTime: new Date(r.timestamp).getTime(),
+            }))
+            .filter(
+              (r) =>
+                (from ? r.fundingTime >= +from : true) &&
+                (to ? r.fundingTime <= +to : true),
+            )
+            .slice(-(limit ?? Infinity)),
+        )
+      })
+      .catch(
+        this.handleKrakenErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

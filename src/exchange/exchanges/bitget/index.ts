@@ -3,6 +3,7 @@ import {
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   ExchangeIntervals,
@@ -2524,6 +2525,69 @@ class BitgetExchange extends AbstractExchange implements Exchange {
 
   getUsage() {
     return limitHelper.getInstance().getLimits()
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    if (!this.futures) {
+      return this.errorFutures(timeProfile)
+    }
+    const productType = this.getProductTypeBySymbol(symbol)
+    timeProfile =
+      (await this.checkLimits(
+        'getFuturesHistoricFundingRates',
+        20,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    // This Bitget endpoint paginates by page only (no time filter), so we pull
+    // the most recent page and filter to the requested window client-side.
+    return this.client
+      .getFuturesHistoricFundingRates({
+        symbol,
+        productType,
+        pageSize: `${Math.min(limit ?? 100, 100)}`,
+      })
+      .then((result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (result.code !== '00000') {
+          throw new BitgetError(result.msg, +result.code)
+        }
+        const data =
+          (result.data as unknown as {
+            symbol: string
+            fundingRate: string
+            fundingTime: string
+          }[]) ?? []
+        return this.returnGood<FundingRateResponse[]>(timeProfile)(
+          data
+            .map((r) => ({
+              symbol: r.symbol,
+              fundingRate: parseFloat(r.fundingRate),
+              fundingTime: +r.fundingTime,
+            }))
+            .filter(
+              (r) =>
+                (from ? r.fundingTime >= +from : true) &&
+                (to ? r.fundingTime <= +to : true),
+            ),
+        )
+      })
+      .catch(
+        this.handleBitgetErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async getTrades(

@@ -24,6 +24,7 @@ import limitHelper from './limit'
 import {
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   FreeAsset,
@@ -2067,6 +2068,58 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           from,
           to,
           countData,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
+      return this.errorClient(timeProfile)
+    }
+    timeProfile =
+      (await this.checkLimits(
+        'getFundingRateHistory',
+        'request',
+        1,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return client
+      .getFundingRateHistory({
+        symbol,
+        startTime: from ? +from : undefined,
+        endTime: to ? +to : undefined,
+        limit: limit ?? 1000,
+      })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<FundingRateResponse[]>(timeProfile)(
+          (res ?? []).map((r) => ({
+            symbol: r.symbol,
+            fundingRate: parseFloat(`${r.fundingRate}`),
+            fundingTime: +r.fundingTime,
+            markPrice:
+              r.markPrice !== undefined && r.markPrice !== ''
+                ? parseFloat(`${r.markPrice}`)
+                : undefined,
+          })),
+        )
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

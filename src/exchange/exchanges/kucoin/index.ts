@@ -10,6 +10,7 @@ import limitHelper, { LimitType } from './limit'
 import {
   BaseReturn,
   CandleResponse,
+  FundingRateResponse,
   CommonOrder,
   ExchangeInfo,
   FreeAsset,
@@ -2429,6 +2430,67 @@ class KucoinExchange extends AbstractExchange implements Exchange {
 
   getUsage() {
     return limitHelper.getInstance().getLimits()
+  }
+
+  async getFundingRateHistory(
+    symbol: string,
+    from?: number,
+    to?: number,
+    limit?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<FundingRateResponse[]>> {
+    // KuCoin requires an explicit from/to window.
+    const toTime = to ? Math.floor(+to) : +new Date()
+    const fromTime = from ? Math.floor(+from) : toTime - 7 * 24 * 60 * 60 * 1000
+    timeProfile =
+      (await this.checkLimits(
+        'getFundingRateHistory',
+        LimitType.public,
+        5,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getFundingRateHistory({
+        symbol: this.convertSymbolToKucoin(symbol),
+        from: fromTime,
+        to: toTime,
+      })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res.status === StatusEnum.ok) {
+          return this.returnGood<FundingRateResponse[]>(timeProfile)(
+            (res.data ?? [])
+              .map((r) => ({
+                symbol,
+                fundingRate: parseFloat(`${r.fundingRate}`),
+                fundingTime: +r.timepoint,
+              }))
+              .filter(
+                (r) => r.fundingTime >= fromTime && r.fundingTime <= toTime,
+              )
+              .slice(0, limit),
+          )
+        }
+        return this.handleKucoinErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
+          timeProfile,
+        )(new KucoinError(res.reason, res.reasonCode))
+      })
+      .catch(
+        this.handleKucoinErrors(
+          this.getFundingRateHistory,
+          symbol,
+          from,
+          to,
+          limit,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async getTrades(

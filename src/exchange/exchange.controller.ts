@@ -99,6 +99,23 @@ export class ExchangeController {
     )
   }
 
+  @Get('/fundingRateHistory')
+  async getFundingRateHistory(
+    @Query('exchange') exchange: ExchangeEnum,
+    @Query('symbol') symbol: string,
+    @Query('from') from: number = null,
+    @Query('to') to: number = null,
+    @Query('limit') limit: number = null,
+  ) {
+    return this.exchangeService.getFundingRateHistory(
+      exchange,
+      symbol,
+      from,
+      to,
+      limit,
+    )
+  }
+
   @Get('/trades')
   async getTrades(
     @Query('exchange') exchange: ExchangeEnum,

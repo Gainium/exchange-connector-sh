@@ -232,12 +232,16 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     if (!params.endTime) {
       delete params.endTime
     }
+    // Use the apiReferral endpoint (our program is an API referral partner, not
+    // a sub-account broker). It returns per-trade orderId + email, which lets
+    // the consumer attribute rebates to users. The broker sub-account endpoint
+    // (getBrokerSpotCommissionRebate) only returns subaccountId="null" for us.
     return this.client
-      .getBrokerSpotCommissionRebate(params)
-      .then((data) => {
+      .getPrivate('sapi/v1/apiReferral/rebate/recentRecord', params)
+      .then((data: unknown) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.returnGood<RebateRecord[]>(timeProfile)(
-          data as unknown as RebateRecord[],
+          data as RebateRecord[],
         )
       })
       .catch(

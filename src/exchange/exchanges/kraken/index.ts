@@ -850,8 +850,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         const orderIds = result.result.txid || []
 
         await sleep(500)
+        // Re-fetch by the original client order id (not the Kraken txid):
+        // getOrder() resolves spot orders by userref = parseInt(clientOrderId
+        // .substring(0,8), 16), the same value set at submit time above. Passing
+        // the txid here yields parseInt('OQCLML-...',16) = NaN, so a resting
+        // limit order is never matched and the deal is wrongly closed. Mirrors
+        // the futures branch, which passes the original cliOrdId.
         return await this.getOrder(
-          { symbol, newClientOrderId: orderIds?.[0] || '' },
+          { symbol, newClientOrderId: newClientOrderId || orderIds?.[0] || '' },
           timeProfile,
         )
       })

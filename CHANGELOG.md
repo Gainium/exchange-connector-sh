@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-06-28
+
+### Fixed
+- Kraken Futures hedge mode now reports one-way/netting (`getHedge` → false) instead of a hardcoded `true`, which had permanently blocked neutral futures grid bots with "Bot cannot run in hedge mode"
+- Kraken spot `submitOrder` re-resolves the just-placed order by its client order id instead of the Kraken txid, so a resting limit order placed below market is no longer wrongly closed with "Order not found in open orders"
+
 ## [1.7.1] - 2026-06-25
 
 ### Fixed

@@ -2281,16 +2281,21 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     _symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
-    // Kraken Futures supports hedge mode by default
-    return this.returnGood<boolean>(timeProfile)(true)
+    // Kraken Futures uses a one-way / netting position model (a single net
+    // position per contract; orders carry no positionSide). It does not
+    // support hedge mode, so always report one-way. Reporting `true` here
+    // permanently blocked neutral futures grid bots ("Bot cannot run in
+    // hedge mode").
+    return this.returnGood<boolean>(timeProfile)(false)
   }
 
   async futures_setHedge(
-    value: boolean,
+    _value: boolean,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
-    // Kraken Futures hedge mode is always enabled
-    return this.returnGood<boolean>(timeProfile)(value)
+    // Hedge mode cannot be enabled on Kraken Futures (one-way / netting only),
+    // so the account stays in one-way mode regardless of the requested value.
+    return this.returnGood<boolean>(timeProfile)(false)
   }
 
   async futures_leverageBracket(

@@ -38,6 +38,32 @@ class KrakenError extends Error {
   }
 }
 
+/**
+ * Authoritative per-symbol asset class from Kraken Futures' `category` field on
+ * the `/derivatives/api/v3/instruments` response. Kraken's OWN classification —
+ * no name heuristics. Tokenized equities are `xStocks`/`Pre-IPO`; FX perps are
+ * `Forex`; oil etc. is `Commodities`. NOTE: `Real-world assets` and `DTF` are
+ * Kraken's CRYPTO narrative buckets (VET, CFG, LCAP…), so they stay crypto.
+ * Crypto categories (Layer 1/DeFi/Meme/…) and `''` → undefined (main-app
+ * defaults to crypto). Kraken SPOT carries no class signal (every `aclass_base`
+ * is `currency`), so only the futures path is classified.
+ */
+function krakenFuturesAssetClass(
+  category?: string,
+): ExchangeInfo['assetClass'] {
+  switch (category) {
+    case 'xStocks':
+    case 'Pre-IPO':
+      return 'stock'
+    case 'Forex':
+      return 'forex'
+    case 'Commodities':
+      return 'commodity'
+    default:
+      return undefined
+  }
+}
+
 // Interval mapping for Kraken
 const intervalMap: { [x in ExchangeIntervals]: number } = {
   '1m': 1,
@@ -1596,6 +1622,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 wsCode: `${instrument.base}/${instrument.quote}`,
                 code: instrument.symbol,
                 pair: `${instrument.base}-${instrument.quote}`,
+                // Authoritative class from Kraken Futures `category` (undefined
+                // => main-app defaults to crypto). No heuristics.
+                assetClass: krakenFuturesAssetClass(
+                  (instrument as unknown as { category?: string }).category,
+                ),
                 baseAsset: {
                   name: instrument.base || '',
                   minAmount: basePrecision,

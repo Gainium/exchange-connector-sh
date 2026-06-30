@@ -58,6 +58,37 @@ class BybitError extends Error {
   }
 }
 
+/**
+ * Authoritative per-symbol asset class from Bybit's `symbolType` field on the
+ * v5 instruments-info response. This is Bybit's OWN classification — no name
+ * heuristics. Spot tags tokenized equities `xstocks`; linear (perps) tags them
+ * `stock` and tags oil/precious-metal perps `commodity` (Bybit itself labels
+ * XAU/XAG `commodity`, so we keep that — re-bucketing by ticker name would be a
+ * forbidden heuristic). Crypto rows carry `''`/`adventure`/`innovation` → we
+ * return undefined so main-app defaults them to crypto. The forex/metal/etf/
+ * index arms are 1:1 passthroughs that only fire if Bybit literally emits that
+ * value, so they can never produce a false positive.
+ */
+function bybitAssetClass(symbolType?: string): ExchangeInfo['assetClass'] {
+  switch (symbolType) {
+    case 'xstocks':
+    case 'stock':
+      return 'stock'
+    case 'commodity':
+      return 'commodity'
+    case 'forex':
+      return 'forex'
+    case 'metal':
+      return 'metal'
+    case 'etf':
+      return 'etf'
+    case 'index':
+      return 'index'
+    default:
+      return undefined
+  }
+}
+
 class BybitExchange extends AbstractExchange implements Exchange {
   /** Bybit client */
   protected client: BybitClient
@@ -964,6 +995,11 @@ class BybitExchange extends AbstractExchange implements Exchange {
                   const { basePrecision } = d.lotSizeFilter
                   return {
                     pair: d.symbol,
+                    // Authoritative class from Bybit `symbolType` (undefined =>
+                    // main-app defaults to crypto). No heuristics.
+                    assetClass: bybitAssetClass(
+                      (d as unknown as { symbolType?: string }).symbolType,
+                    ),
                     maxOrders: 500,
                     baseAsset: {
                       name: d.baseCoin,
@@ -988,6 +1024,11 @@ class BybitExchange extends AbstractExchange implements Exchange {
                   const inverse = category === 'inverse'
                   return {
                     pair: d.symbol,
+                    // Authoritative class from Bybit `symbolType` (linear perps
+                    // tag tokenized equities `stock` and oil/metals `commodity`).
+                    assetClass: bybitAssetClass(
+                      (d as unknown as { symbolType?: string }).symbolType,
+                    ),
                     maxOrders: 500,
                     baseAsset: {
                       name: d.baseCoin,

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-06-30
+
+### Added
+- Authoritative `assetClass` extended to **Bybit** and **Kraken** (same no-heuristics rule as Bitget):
+  - Bybit reads its own `symbolType` from v5 instruments-info — spot tokenized equities (`xstocks`) → `stock`; linear perps `stock` → `stock` and `commodity` → `commodity` (Bybit's own label for oil/XAU/XAG, kept verbatim).
+  - Kraken Futures reads its own `category` from `/derivatives/api/v3/instruments` — `xStocks`/`Pre-IPO` → `stock`, `Forex` → `forex`, `Commodities` → `commodity`. Kraken's crypto buckets (`Real-world assets`, `DTF`, Layer 1/DeFi/…) stay crypto; Kraken **spot** exposes no class signal (`aclass_base` is uniformly `currency`) so it stays crypto.
+- Investigated and left crypto (no authoritative TradFi field exposed): OKX (`instCategory` is a fee tier; `pre_market` is crypto), Binance, KuCoin, Coinbase, Hyperliquid.
+
 ## [1.8.0] - 2026-06-30
 
 ### Added

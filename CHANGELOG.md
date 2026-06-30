@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-06-30
+
+### Added
+- Authoritative asset class per symbol on `ExchangeInfo` (`assetClass`: crypto/stock/etf/commodity/metal/forex/index). Bitget populates it from the unified v3 instruments endpoint (`symbolType`) for both spot and futures — no heuristics. Other exchanges leave it unset (default crypto downstream).
+
 ## [1.7.2] - 2026-06-28
 
 ### Fixed

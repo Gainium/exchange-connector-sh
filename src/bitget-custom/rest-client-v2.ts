@@ -213,6 +213,19 @@ export class RestClientV2 extends BaseRestClient {
     return this.get(`/api/v2/spot/market/support-symbols`)
   }
 
+  /**
+   * Unified v3 instruments — the only Bitget endpoint that returns the
+   * authoritative asset class per symbol via `symbolType`
+   * (`crypto` | `stock` | `metal` | `commodity`), plus `isReality` on futures.
+   * `category`: SPOT | MARGIN | USDT-FUTURES | COIN-FUTURES | USDC-FUTURES.
+   */
+  getInstrumentsV3(params: {
+    category: string
+    symbol?: string
+  }): Promise<APIResponse<any>> {
+    return this.get(`/api/v3/market/instruments`, params)
+  }
+
   getSpotFundNetFlowData(params: object): Promise<APIResponse<any>> {
     return this.get(`/api/v2/spot/market/fund-net-flow`, params)
   }

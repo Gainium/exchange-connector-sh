@@ -1,6 +1,19 @@
+export type AssetClass =
+  | 'crypto'
+  | 'stock'
+  | 'etf'
+  | 'commodity'
+  | 'metal'
+  | 'forex'
+  | 'index'
+
 export type ExchangeInfo = {
   wsCode?: string
   code?: string
+  // Asset class of the instrument. Producers set this where the exchange exposes
+  // an authoritative signal (e.g. Bitget `isRwa`); consumers (main-app) refine /
+  // default it. Absent => treat as 'crypto'. See platform Danger List #1.
+  assetClass?: AssetClass
   baseAsset: {
     minAmount: number
     maxAmount: number

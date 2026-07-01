@@ -1471,6 +1471,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           >(timeProfile)(
             data
               .filter((d) => d.status === 'online')
+              // Bitget SPOT tokenized stocks (reality tokens rTSLA/rAAPL/…,
+              // v3 `symbolType: stock`) are NOT tradeable through Bitget's API
+              // yet, so we exclude them here rather than surface untradeable
+              // pairs. Re-enable by removing this filter once Bitget supports
+              // API trading for reality stocks. (Metals like PAXG/XAUT are
+              // ordinary spot tokens and stay.)
+              .filter((d) => assetClassMap.get(d.symbol) !== 'stock')
               .map((d) => {
                 const p = prices?.data?.find(
                   (p) => p.pair === `${d.quoteCoin}USDT`,

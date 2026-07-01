@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-07-01
+
+### Added
+- Authoritative `assetClass` for **Hyperliquid** HIP-3 builder-dex (TradFi) perps from its own `perpCategories` info endpoint: `stocks`/`preipo` → `stock`, `commodities` → `commodity`, `indices` → `index`, `fx` → `forex`. Crypto/native perps stay crypto. (Supersedes the 1.9.0 note that Hyperliquid exposes no signal — the signal lives in the separate `perpCategories` endpoint, keyed by `dex:ASSET`.)
+
+### Changed
+- Bitget **SPOT** tokenized stocks (reality tokens `rTSLA`/`rAAPL`/…, v3 `symbolType: stock`) are now **excluded** from spot exchange-info — they are not tradeable through Bitget's API yet, so surfacing them as tradeable pairs was misleading. Re-enable by removing the filter in `spot_getAllExchangeInfo` once Bitget supports API trading for reality stocks. Metals (PAXG/XAUT) are unaffected.
+
 ## [1.9.0] - 2026-06-30
 
 ### Added

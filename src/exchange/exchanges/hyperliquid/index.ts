@@ -226,6 +226,35 @@ export type FuturesAssetInfo = {
   maxLeverage: number
   isDelisted: boolean
   marginTableId: number
+  /** Authoritative asset class from Hyperliquid `perpCategories` (builder-dex
+   *  TradFi perps: stocks/commodities/indices/fx/preipo). Undefined => crypto. */
+  assetClass?: ExchangeInfo['assetClass']
+}
+
+/**
+ * Map Hyperliquid's own `perpCategories` value to our normalized asset class.
+ * This is Hyperliquid's authoritative classification of builder-dex (HIP-3)
+ * TradFi perps — NOT a name heuristic. Hyperliquid lumps precious metals under
+ * `commodities` (GOLD/SILVER/PLATINUM), which we keep verbatim (re-bucketing to
+ * `metal` by ticker name would be a forbidden heuristic). `fx`/`FX` case varies
+ * across dexes. `crypto` and anything unknown => undefined (defaults to crypto).
+ */
+const hyperliquidPerpCategoryToClass = (
+  category?: string,
+): ExchangeInfo['assetClass'] => {
+  switch ((category ?? '').toLowerCase()) {
+    case 'stocks':
+    case 'preipo':
+      return 'stock'
+    case 'commodities':
+      return 'commodity'
+    case 'indices':
+      return 'index'
+    case 'fx':
+      return 'forex'
+    default:
+      return undefined
+  }
 }
 
 type RawPerpDex = {
@@ -544,6 +573,33 @@ class HyperliquidAssets {
         } catch (e) {
           Logger.error(
             `Hyperliquid meta failed for ${dex?.name ?? 'native'}: ${(e as Error)?.message ?? e}`,
+          )
+        }
+      }
+      // Authoritative asset class for builder-dex (HIP-3) TradFi perps.
+      // `perpCategories` maps each wire code (`dex:ASSET`, e.g. `xyz:AAPL`) to
+      // Hyperliquid's own category (stocks/commodities/indices/fx/preipo/crypto).
+      // One call returns every dex. Not exposed by the SDK, so we go through the
+      // transport directly (respects the connector's outbound IP binding). On
+      // any failure we leave classes unset → everything defaults to crypto.
+      if (!isDemo) {
+        try {
+          await this.checkLimits('perpDexs', 20)
+          const cats = (await this.client.transport.request('info', {
+            type: 'perpCategories',
+          })) as [string, string][]
+          if (Array.isArray(cats)) {
+            const catByCode = new Map(cats)
+            for (const info of newByPair.values()) {
+              const cls = hyperliquidPerpCategoryToClass(
+                catByCode.get(info.code),
+              )
+              if (cls) info.assetClass = cls
+            }
+          }
+        } catch (e) {
+          Logger.warn(
+            `Hyperliquid perpCategories failed: ${(e as Error)?.message ?? e}`,
           )
         }
       }
@@ -1874,6 +1930,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           res.push({
             code: a.code,
             pair: a.pair,
+            // Authoritative class from Hyperliquid perpCategories (undefined =>
+            // main-app defaults to crypto). No heuristics.
+            assetClass: a.assetClass,
             baseAsset: {
               minAmount,
               maxAmount: 0,

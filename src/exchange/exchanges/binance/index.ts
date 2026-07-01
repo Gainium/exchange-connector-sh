@@ -406,8 +406,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       .then(
         (
           accountInfo:
-            | FuturesAccountInformation
-            | FuturesCoinMAccountInformation,
+            FuturesAccountInformation | FuturesCoinMAccountInformation,
         ) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
           return this.returnGood<FreeAsset>(timeProfile)(

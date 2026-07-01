@@ -1961,15 +1961,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .getCandles({
         pair: await this.toKrakenSymbol(symbol),
         interval: intervalMinutes as
-          | 1
-          | 5
-          | 15
-          | 30
-          | 60
-          | 240
-          | 1440
-          | 10080
-          | 21600,
+          1 | 5 | 15 | 30 | 60 | 240 | 1440 | 10080 | 21600,
         since: from ? Math.floor(from / 1000) : undefined,
       })
       .then((result) => {

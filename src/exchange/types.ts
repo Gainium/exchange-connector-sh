@@ -1,11 +1,5 @@
 export type AssetClass =
-  | 'crypto'
-  | 'stock'
-  | 'etf'
-  | 'commodity'
-  | 'metal'
-  | 'forex'
-  | 'index'
+  'crypto' | 'stock' | 'etf' | 'commodity' | 'metal' | 'forex' | 'index'
 
 export type ExchangeInfo = {
   wsCode?: string

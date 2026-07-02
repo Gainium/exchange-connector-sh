@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-07-02
+
+### Added
+- Authoritative `assetClass` for **Binance** USDⓈ-M TradFi-Perps, read from the exchange's own `underlyingType` in `getAllExchangeInfo`: `EQUITY`/`KR_EQUITY`/`PREMARKET` → `stock` (an `ETF` subtype → `etf`), `COMMODITY` → `commodity`. `COIN` and Binance's crypto composite `INDEX` (BTCDOM/DEFI/ALL) stay crypto, so existing pairs are untouched. Lets stock/commodity symbols surface under their own asset class downstream.
+
 ## [1.10.0] - 2026-07-01
 
 ### Added

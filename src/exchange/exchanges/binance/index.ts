@@ -64,6 +64,35 @@ export enum HttpMethod {
   PATCH = 'PATCH',
 }
 
+/**
+ * Map Binance USDⓈ-M futures `underlyingType` to our asset class. Binance's
+ * `/fapi/v1/exchangeInfo` is the authoritative signal for its TradFi-Perps
+ * (RWA) listings:
+ *   - `EQUITY` / `KR_EQUITY` / `PREMARKET` → stock (Pre-IPO like OPENAI/ANTHROPIC
+ *     is a `PREMARKET` equity); an `ETF` `underlyingSubType` refines to `etf`.
+ *   - `COMMODITY` → commodity (gold/silver/oil/natgas, all `TradFi` subtype).
+ *   - `INDEX` is Binance's own CRYPTO composite index (BTCDOM/DEFI/ALL, subtype
+ *     `Index`) and `COIN` is crypto — both left undefined so they default to
+ *     crypto and existing pairs are untouched.
+ * Only USDⓈ-M carries these; COIN-M is inverse crypto. See platform Danger List #1.
+ */
+function binanceFuturesAssetClass(
+  underlyingType?: string,
+  underlyingSubType?: string[],
+): ExchangeInfo['assetClass'] {
+  const sub = underlyingSubType || []
+  switch (underlyingType) {
+    case 'EQUITY':
+    case 'KR_EQUITY':
+    case 'PREMARKET':
+      return sub.includes('ETF') ? 'etf' : 'stock'
+    case 'COMMODITY':
+      return 'commodity'
+    default:
+      return undefined
+  }
+}
+
 class BinanceExchange extends AbstractExchange implements Exchange {
   /** Binance client */
   //protected client?: BinanceType
@@ -1464,6 +1493,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
                 quoteAsset,
                 baseAsset,
                 maxOrders,
+                // USDⓈ-M is the only Binance market carrying TradFi-Perps (RWA);
+                // COIN-M is inverse crypto. `underlyingType`/`underlyingSubType`
+                // are on the fapi symbol but not on the SDK's typed shape.
+                assetClass: this.usdm
+                  ? binanceFuturesAssetClass(
+                      //@ts-ignore
+                      pair.underlyingType,
+                      //@ts-ignore
+                      pair.underlyingSubType,
+                    )
+                  : undefined,
                 priceAssetPrecision: this.getPricePrecision(
                   `${priceFilter?.tickSize || '0.1'}`,
                 ),

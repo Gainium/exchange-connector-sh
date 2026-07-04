@@ -722,67 +722,115 @@ class OKXExchange extends AbstractExchange implements Exchange {
         if (res?.length) {
           return this.returnGood<
             (ExchangeInfo & { pair: string; maxLeverage?: string })[]
-          >(timeProfile)(
-            res
-              .filter(
-                (d) =>
-                  d.state === 'live' &&
-                  (category ? d.ctType === category : true),
-              )
-              .map((s) => {
-                let minAmount = this.futures
-                  ? category === 'linear'
-                    ? round(+s.ctVal * +s.minSz, 10)
-                    : 0.0001
-                  : +s.minSz
-                minAmount = isNaN(minAmount)
-                  ? this.futures
-                    ? category === 'linear'
-                      ? +s.ctVal
-                      : 0.0001
-                    : +s.minSz
-                  : minAmount
-                const step = this.futures ? minAmount : +s.lotSz
-                return {
-                  pair: this.futures ? s.instFamily : s.instId,
-                  baseAsset: {
-                    minAmount,
-                    maxAmount: +s.maxLmtSz,
-                    step,
-                    name: this.futures
-                      ? category === 'linear'
-                        ? s.ctValCcy
-                        : //@ts-ignore
-                          s.settleCcy
-                      : s.baseCcy,
-                    maxMarketAmount: +s.maxMktSz || +s.maxLmtSz,
-                    multiplier: this.usdm ? +s.ctVal : undefined,
-                  },
-                  quoteAsset: {
-                    minAmount: this.futures
-                      ? category === 'linear'
-                        ? +s.lotSz
-                        : +s.ctVal
-                      : +s.lotSz,
-                    name: this.futures
-                      ? category === 'linear'
-                        ? //@ts-ignore
-                          s.settleCcy
-                        : s.ctValCcy
-                      : s.quoteCcy,
-                  },
-                  maxOrders: 500,
-                  priceAssetPrecision: this.getPricePrecision(s.tickSz),
-                  maxLeverage: s.lever,
-                }
-              }),
-          )
+          >(timeProfile)(this.mapInstrumentsToInfo(res, category))
         }
         return this.returnBad(timeProfile)(new OKXError('No data', 0))
       })
       .catch(
         this.handleOkxErrors(
           this.getAllExchangeInfo,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /**
+   * Shared mapper: OKX instrument rows → Gainium ExchangeInfo. Used by both the
+   * public `getAllExchangeInfo` and the authenticated, account-scoped
+   * `getAccountSpotExchangeInfo` (OKX Europe) so both produce identical shapes.
+   */
+  private mapInstrumentsToInfo(
+    res:
+      | Awaited<ReturnType<OKXRestClient['getInstruments']>>
+      | Awaited<ReturnType<OKXRestClient['getAccountInstruments']>>,
+    category: 'linear' | 'inverse' | null,
+  ) {
+    return res
+      .filter(
+        (d) => d.state === 'live' && (category ? d.ctType === category : true),
+      )
+      .map((s) => {
+        let minAmount = this.futures
+          ? category === 'linear'
+            ? round(+s.ctVal * +s.minSz, 10)
+            : 0.0001
+          : +s.minSz
+        minAmount = isNaN(minAmount)
+          ? this.futures
+            ? category === 'linear'
+              ? +s.ctVal
+              : 0.0001
+            : +s.minSz
+          : minAmount
+        const step = this.futures ? minAmount : +s.lotSz
+        return {
+          pair: this.futures ? s.instFamily : s.instId,
+          baseAsset: {
+            minAmount,
+            maxAmount: +s.maxLmtSz,
+            step,
+            name: this.futures
+              ? category === 'linear'
+                ? s.ctValCcy
+                : //@ts-ignore
+                  s.settleCcy
+              : s.baseCcy,
+            maxMarketAmount: +s.maxMktSz || +s.maxLmtSz,
+            multiplier: this.usdm ? +s.ctVal : undefined,
+          },
+          quoteAsset: {
+            minAmount: this.futures
+              ? category === 'linear'
+                ? +s.lotSz
+                : +s.ctVal
+              : +s.lotSz,
+            name: this.futures
+              ? category === 'linear'
+                ? //@ts-ignore
+                  s.settleCcy
+                : s.ctValCcy
+              : s.quoteCcy,
+          },
+          maxOrders: 500,
+          priceAssetPrecision: this.getPricePrecision(s.tickSz),
+          maxLeverage: s.lever,
+        }
+      })
+  }
+
+  /**
+   * Authoritative SPOT instrument universe for an OKX Europe account
+   * (`okxSource=my` → eea.okx.com). Unlike `getAllExchangeInfo` (public feed,
+   * which advertises the global USDT set EU accounts cannot trade), this hits
+   * the authenticated, account-scoped `/api/v5/account/instruments` and returns
+   * only what the account may actually trade — USDC/EUR spot. Must be called on
+   * a spot instance (Futures.null) with API keys set. Phase 1 = spot only;
+   * X-Perps (instType FUTURES) are handled separately.
+   */
+  async getAccountSpotExchangeInfo(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<
+    BaseReturn<(ExchangeInfo & { pair: string; maxLeverage?: string })[]>
+  > {
+    timeProfile =
+      (await this.checkLimits('getInstruments', 3000, 10, timeProfile)) ||
+      timeProfile
+    const category = this.getCategory()
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getAccountInstruments({ instType: 'SPOT' })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res?.length) {
+          return this.returnGood<
+            (ExchangeInfo & { pair: string; maxLeverage?: string })[]
+          >(timeProfile)(this.mapInstrumentsToInfo(res, category))
+        }
+        return this.returnBad(timeProfile)(new OKXError('No data', 0))
+      })
+      .catch(
+        this.handleOkxErrors(
+          this.getAccountSpotExchangeInfo,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

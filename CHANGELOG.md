@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-07-04
+
+### Added
+- OKX Europe (`okxsource=my` → eea.okx.com) authoritative spot instruments. New `GET /exchange/account` endpoint + `OKXExchange.getAccountSpotExchangeInfo()` hit the authenticated, account-scoped `/api/v5/account/instruments` and return the account's real tradeable universe (USDC/EUR spot) — the public feed still advertises the global USDT set EU accounts cannot trade. The instrument→`ExchangeInfo` mapper is now shared between the public and account-scoped paths. Non-OKX exchanges resolve to a "not supported" default.
+
 ## [1.11.1] - 2026-07-04
 
 ### Fixed

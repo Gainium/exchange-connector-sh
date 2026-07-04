@@ -345,6 +345,21 @@ abstract class AbsctractExchange implements Exchange {
     BaseReturn<(ExchangeInfo & { pair: string })[]>
   >
 
+  /**
+   * Authoritative, account-scoped SPOT instrument universe. Only exchanges whose
+   * per-account tradeable set diverges from the public feed override this
+   * (OKX Europe: eea.okx.com returns USDC/EUR spot, not the global USDT list).
+   * Requires API credentials on the instance. Default: not supported.
+   */
+  async getAccountSpotExchangeInfo(): Promise<
+    BaseReturn<(ExchangeInfo & { pair: string })[]>
+  > {
+    return this.returnBad(
+      this.getEmptyTimeProfile(),
+      [],
+    )(new Error('Method not supported'))
+  }
+
   /** Get all open orders for given pair
    * @param {string} symbol symbol to look for
    * @param {boolean} returnOrders return orders or orders count

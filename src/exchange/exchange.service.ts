@@ -64,6 +64,28 @@ export class ExchangeService {
     return this.getExchange(exchange).getAllExchangeInfo()
   }
 
+  /**
+   * Authenticated, account-scoped SPOT instrument list — for OKX Europe accounts
+   * (`okxsource=my`) whose authoritative universe (USDC/EUR spot) is only visible
+   * via the exchange's private endpoint, not the public feed. Non-OKX exchanges
+   * fall through to the abstract default ("not supported").
+   */
+  async getAccountSpotExchangeInfo(
+    auth: AuthData,
+  ): Promise<BaseReturn<(ExchangeInfo & { pair: string })[]>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getAccountSpotExchangeInfo()
+  }
+
   getCandles(
     exchange: ExchangeEnum,
     interval: ExchangeIntervals,

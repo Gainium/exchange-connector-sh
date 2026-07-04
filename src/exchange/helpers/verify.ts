@@ -20,6 +20,33 @@ import {
 import { getBinanceBase } from './exchaneUtils'
 import fetch from 'isomorphic-unfetch'
 
+// The `binance` client throws an Error-like object whose useful payload
+// (Binance's `{ code, msg }`) lives on `.body` / `.response.data` / `.message`.
+// Interpolating it directly (`${e}`) renders "[object Object]" and discards the
+// real rejection reason, so verify failures were unreadable in the logs. Extract
+// the meaningful fields defensively.
+const errStr = (e: any): string => {
+  if (e == null) return String(e)
+  const body = e.body ?? e.response?.data
+  const msg = e.message ?? e.msg
+  const bits: string[] = []
+  if (e.code !== undefined) bits.push(`code=${e.code}`)
+  if (body !== undefined) {
+    try {
+      bits.push(typeof body === 'string' ? body : JSON.stringify(body))
+    } catch {
+      /* non-serializable body — skip */
+    }
+  }
+  if (msg) bits.push(String(msg))
+  if (bits.length) return bits.join(' ')
+  try {
+    return JSON.stringify(e)
+  } catch {
+    return String(e)
+  }
+}
+
 const verifyBinance = async (
   tradeType: TradeTypeEnum,
   apiKey: string,
@@ -39,7 +66,10 @@ const verifyBinance = async (
       return client
         .getAccountInfo()
         .then(() => ({ status: true, reason: '' }))
-        .catch((e) => ({ status: false, reason: `Binance us catch ${e}` }))
+        .catch((e) => ({
+          status: false,
+          reason: `Binance us catch ${errStr(e)}`,
+        }))
     } else {
       return client
         .getApiKeyPermissions()
@@ -56,10 +86,13 @@ const verifyBinance = async (
             reason: JSON.stringify(res),
           }
         })
-        .catch((e) => ({ status: false, reason: `Binance catch ${e}` }))
+        .catch((e) => ({
+          status: false,
+          reason: `Binance catch ${errStr(e)}`,
+        }))
     }
   } catch (e) {
-    return { status: false, reason: `Binance catch global ${e}` }
+    return { status: false, reason: `Binance catch global ${errStr(e)}` }
   }
 }
 

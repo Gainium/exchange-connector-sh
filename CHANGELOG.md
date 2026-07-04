@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-07-04
+
+### Fixed
+- Binance/Binance.US API-key verification now reports the exchange's real rejection (`code` + message from the client's `.body`/`.response.data`) instead of the useless `Binance us catch [object Object]`. Add-exchange failures for Binance.US were unreadable in the logs, hiding whether the cause was the key, permissions, or IP.
+
 ## [1.11.0] - 2026-07-02
 
 ### Added

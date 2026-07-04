@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.3] - 2026-07-04
+
+### Fixed
+- Hyperliquid `futures_getBalance` now also bounds `free` by the dex-state's own value — `min(withdrawable, accountValue - locked)` — instead of the raw account-level `withdrawable`. Prevents a phantom balance (e.g. USDT `free=89568` on a state whose `accountValue=0`) from surfacing the account total under a non-primary collateral asset. No change for healthy single-collateral accounts where `withdrawable ≤ accountValue - marginUsed`.
+
 ## [1.13.2] - 2026-07-04
 
 ### Fixed

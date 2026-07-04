@@ -2176,27 +2176,30 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           })[]
         >(timeProfile)(
           pairs
-            .map((d) => {
+            .map((d, i) => {
               const base = tokens.find((t) => t.index === d.tokens[0])
               const quote = tokens.find((t) => t.index === d.tokens[1])
               if (!base || !quote) {
                 return null
               }
 
+              // isCanonical is read off the RAW token before we alias its name.
+              const canonical =
+                !!base.isCanonical || (base.fullName ?? '').startsWith('Unit ')
               base.name = aliasToken(base.name)
               quote.name = aliasToken(quote.name)
-              // Hide un-curated HIP-1 spot tokens that namesquat a TradFi ticker
-              // (permissionless AAPL/TSLA/… deployments with near-zero depth —
-              // one-genesis-address synthetics). The real, curated equity
-              // exposure on HL is the HIP-3 perp, classified on the perp path.
-              if (
+              // Previously we HID un-curated HIP-1 spot tokens that namesquat a
+              // TradFi ticker (AAPL/TSLA/…). Instead we surface every pair and let
+              // the dashboard filter/annotate them: `isCanonical` drives the
+              // pair-picker "Canonical only" toggle (HL-canonical or Unit-bridged
+              // = canonical; permissionless HIP-1 = non-canonical). We still reuse
+              // the perpCategories cross-reference (Unit-guarded) to classify
+              // equity/commodity spot tokens so they land under the right tab.
+              const assetClass =
                 HyperliquidAssets.getInstance().spotNamesquatClass(
                   base.name,
                   base.fullName,
                 )
-              ) {
-                return null
-              }
               const minAmountBase =
                 base.szDecimals === 0
                   ? 1
@@ -2212,6 +2215,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               const res = {
                 code: d.name,
                 pair: `${base.name}-${quote.name}`,
+                assetClass,
+                isCanonical: canonical,
                 baseAsset: {
                   minAmount: minAmountBase,
                   maxAmount: 0,

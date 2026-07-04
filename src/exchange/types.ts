@@ -1,5 +1,11 @@
 export type AssetClass =
-  'crypto' | 'stock' | 'etf' | 'commodity' | 'metal' | 'forex' | 'index'
+  | 'crypto'
+  | 'stock'
+  | 'etf'
+  | 'commodity'
+  | 'metal'
+  | 'forex'
+  | 'index'
 
 export type ExchangeInfo = {
   wsCode?: string
@@ -23,6 +29,12 @@ export type ExchangeInfo = {
   }
   maxOrders: number
   priceAssetPrecision: number
+  // Whether the market is a canonical / officially-curated listing on its
+  // exchange. Currently only Hyperliquid spot sets it (HL `isCanonical` OR a
+  // Unit-bridged asset); everything else leaves it undefined = treated as
+  // canonical. The dashboard's "Canonical only" pair-picker toggle filters on
+  // `=== false` so non-HL exchanges are unaffected.
+  isCanonical?: boolean
   priceMultiplier?: {
     up: number
     down: number

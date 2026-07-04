@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-07-04
+
+### Added
+
+- Hyperliquid spot: emit `isCanonical` per pair (HL-canonical or Unit-bridged = true; permissionless HIP-1 = false) for the dashboard "Canonical only" pair-picker filter.
+
+### Changed
+
+- Hyperliquid spot: stop hiding permissionless TradFi-namesquat tokens; surface every pair and let the dashboard filter/classify them. Equity/RWA spot tokens are still classified via `perpCategories`.
+
 ## [1.13.4] - 2026-07-04
 
 ### Fixed

@@ -2157,59 +2157,61 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             pair: string
           })[]
         >(timeProfile)(
-          pairs.map((d) => {
-            const base = tokens.find((t) => t.index === d.tokens[0])
-            const quote = tokens.find((t) => t.index === d.tokens[1])
-            if (!base || !quote) {
-              return null
-            }
+          pairs
+            .map((d) => {
+              const base = tokens.find((t) => t.index === d.tokens[0])
+              const quote = tokens.find((t) => t.index === d.tokens[1])
+              if (!base || !quote) {
+                return null
+              }
 
-            base.name = aliasToken(base.name)
-            quote.name = aliasToken(quote.name)
-            // Hide un-curated HIP-1 spot tokens that namesquat a TradFi ticker
-            // (permissionless AAPL/TSLA/… deployments with near-zero depth —
-            // one-genesis-address synthetics). The real, curated equity
-            // exposure on HL is the HIP-3 perp, classified on the perp path.
-            if (
-              HyperliquidAssets.getInstance().spotNamesquatClass(
-                base.name,
-                base.fullName,
+              base.name = aliasToken(base.name)
+              quote.name = aliasToken(quote.name)
+              // Hide un-curated HIP-1 spot tokens that namesquat a TradFi ticker
+              // (permissionless AAPL/TSLA/… deployments with near-zero depth —
+              // one-genesis-address synthetics). The real, curated equity
+              // exposure on HL is the HIP-3 perp, classified on the perp path.
+              if (
+                HyperliquidAssets.getInstance().spotNamesquatClass(
+                  base.name,
+                  base.fullName,
+                )
+              ) {
+                return null
+              }
+              const minAmountBase =
+                base.szDecimals === 0
+                  ? 1
+                  : +`0.${'0'.repeat(base.szDecimals - 1)}1`
+
+              const pricePrecision = this.calculatePricePrecision(
+                'spot',
+                base.szDecimals,
+                `${base.name}-${quote.name}`,
+                allPrices.data,
               )
-            ) {
-              return null
-            }
-            const minAmountBase =
-              base.szDecimals === 0
-                ? 1
-                : +`0.${'0'.repeat(base.szDecimals - 1)}1`
 
-            const pricePrecision = this.calculatePricePrecision(
-              'spot',
-              base.szDecimals,
-              `${base.name}-${quote.name}`,
-              allPrices.data,
-            )
-
-            const res = {
-              code: d.name,
-              pair: `${base.name}-${quote.name}`,
-              baseAsset: {
-                minAmount: minAmountBase,
-                maxAmount: 0,
-                step: minAmountBase,
-                name: base.name,
-                maxMarketAmount: 0,
-              },
-              quoteAsset: {
-                minAmount: 10,
-                name: quote.name,
-                precision: quote.szDecimals,
-              },
-              maxOrders: 200,
-              priceAssetPrecision: pricePrecision,
-            }
-            return res
-          }).filter((r) => r !== null),
+              const res = {
+                code: d.name,
+                pair: `${base.name}-${quote.name}`,
+                baseAsset: {
+                  minAmount: minAmountBase,
+                  maxAmount: 0,
+                  step: minAmountBase,
+                  name: base.name,
+                  maxMarketAmount: 0,
+                },
+                quoteAsset: {
+                  minAmount: 10,
+                  name: quote.name,
+                  precision: quote.szDecimals,
+                },
+                maxOrders: 200,
+                priceAssetPrecision: pricePrecision,
+              }
+              return res
+            })
+            .filter((r) => r !== null),
         )
       })
       .catch(

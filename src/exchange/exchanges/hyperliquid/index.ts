@@ -1060,26 +1060,31 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       const totals = new Map<string, { free: number; locked: number }>()
       for (const { asset, state } of states) {
         if (!state) continue
-        // HL reports margin-in-use directly as marginSummary.totalMarginUsed — a
-        // per-collateral, always-non-negative figure (0 for a collateral with no
-        // positions). Deriving locked as `accountValue - withdrawable` went
-        // negative whenever `withdrawable` (an account-level total) exceeded a
-        // given dex-state's `accountValue` — e.g. a non-primary collateral state
-        // reading accountValue=0 while withdrawable carried the account total.
+        // Total balance for a futures collateral MUST equal its equity
+        // (`marginSummary.accountValue`), i.e. free + locked = accountValue.
+        // `free` = the portion available to withdraw / open new orders =
+        // `withdrawable`; `locked` = everything else tied up as margin. Crucially
+        // `locked` is NOT `totalMarginUsed` — that counts only OPEN-POSITION
+        // margin and omits the collateral HL reserves for OPEN ORDERS, so
+        // `withdrawable + totalMarginUsed` under-reports the account by the
+        // open-order margin (e.g. a grid bot with deep resting ladders shows far
+        // less than its real equity). Derive `locked = accountValue - free`
+        // instead — it captures position margin + open-order margin + any other
+        // reserved collateral, and equals the old `accountValue - withdrawable`.
         //
-        // `free` must likewise be bounded by THIS dex-state's own value, not the
-        // raw (account-level) `withdrawable`: min(withdrawable, accountValue -
-        // locked). For a healthy single-collateral account withdrawable <=
-        // accountValue - marginUsed, so this equals `withdrawable` (no change);
-        // for the anomalous accountValue=0 state it collapses to 0, dropping the
-        // phantom balance instead of surfacing the account total under the wrong
-        // asset. Both clamped >= 0.
+        // `free` is bounded by THIS dex-state's own accountValue, not the raw
+        // (account-level) `withdrawable`: for a healthy single-collateral account
+        // withdrawable <= accountValue so this is `withdrawable` (no change); for
+        // the anomalous non-primary state reading accountValue=0 while
+        // withdrawable carries the account total it collapses to free=0/locked=0,
+        // dropping the phantom balance instead of surfacing it under the wrong
+        // asset. Both clamped >= 0, so `locked` can never go negative.
         const accountValue = +state.marginSummary.accountValue || 0
-        const locked = Math.max(0, +state.marginSummary.totalMarginUsed || 0)
         const free = Math.max(
           0,
-          Math.min(+state.withdrawable || 0, accountValue - locked),
+          Math.min(+state.withdrawable || 0, accountValue),
         )
+        const locked = Math.max(0, accountValue - free)
         const cur = totals.get(asset) ?? { free: 0, locked: 0 }
         cur.free += free
         cur.locked += locked

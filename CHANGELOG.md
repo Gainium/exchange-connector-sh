@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-07-05
+
+### Fixed
+
+- Hyperliquid futures balance under-reported total equity. `futures_getBalance` derived `locked` from `marginSummary.totalMarginUsed` (open-position margin only), so `free + locked = withdrawable + positionMargin` omitted the collateral HL reserves for OPEN ORDERS — a leveraged account with deep resting grid/DCA ladders showed far less than its real `accountValue` (e.g. $13.9k for a $20.8k account). Derive `locked = accountValue - free` (free = `min(withdrawable, accountValue)`) so total equals `accountValue`; still clamps `locked >= 0` and collapses the anomalous non-primary `accountValue=0` dex-state to zero (no phantom balance).
+
 ## [1.14.0] - 2026-07-04
 
 ### Added

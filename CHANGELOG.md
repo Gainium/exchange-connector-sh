@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-07-04
+
+### Fixed
+- Hyperliquid `futures_getBalance` now derives `locked` from `marginSummary.totalMarginUsed` (per-collateral, always ≥ 0) instead of `accountValue - withdrawable`, which produced a negative `locked` whenever an account-level `withdrawable` exceeded a given dex-state's `accountValue` (e.g. a non-primary collateral reading `accountValue=0`). Fixes negative locked balances propagating to the `balances` collection and wrong "available" display.
+
 ## [1.13.1] - 2026-07-04
 
 ### Fixed

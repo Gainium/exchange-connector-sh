@@ -1060,8 +1060,15 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       const totals = new Map<string, { free: number; locked: number }>()
       for (const { asset, state } of states) {
         if (!state) continue
+        // `withdrawable` is the collateral available to withdraw (free), and HL
+        // reports margin-in-use directly as marginSummary.totalMarginUsed — a
+        // per-collateral, always-non-negative figure (0 for a collateral with no
+        // positions). Deriving locked as `accountValue - withdrawable` went
+        // negative whenever `withdrawable` (an account-level total) exceeded a
+        // given dex-state's `accountValue` — e.g. a non-primary collateral state
+        // reading accountValue=0 while withdrawable carried the account total.
         const free = +state.withdrawable
-        const locked = +state.marginSummary.accountValue - free
+        const locked = Math.max(0, +state.marginSummary.totalMarginUsed || 0)
         const cur = totals.get(asset) ?? { free: 0, locked: 0 }
         cur.free += free
         cur.locked += locked

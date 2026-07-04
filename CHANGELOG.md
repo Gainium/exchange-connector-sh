@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.4] - 2026-07-04
+
+### Fixed
+- Hyperliquid `spot_getBalance` now clamps a negative spot `hold` to `0`. Hyperliquid can return a negative `hold` on spot-perp / builder-dex wallets (observed live: USDC `total=59953 hold=-85125`, USDT0 `total=0 hold=-89572`); the old `free = total - hold` inflated `free` by the absolute hold (USDC showed `145078` instead of the real `59953`, USDT a phantom `89572`) and `locked = hold` went negative. Now `locked = max(0, hold)` and `free = max(0, total - locked)`, so `free + locked === total` and neither value is phantom. This is the true source of the wrong Hyperliquid free/locked seen in the dashboard; the earlier `futures_getBalance` and main-app `normalizeLocked` fixes addressed the negative-`locked` symptom but not the inflated spot `free`.
+
 ## [1.13.3] - 2026-07-04
 
 ### Fixed

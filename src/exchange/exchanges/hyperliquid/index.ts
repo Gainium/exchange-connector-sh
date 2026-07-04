@@ -2287,13 +2287,25 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
       const data = get.balances
-      data.map((b) =>
+      data.map((b) => {
+        // Hyperliquid spot `hold` is nominally the amount reserved by open
+        // orders and should be >= 0, but the API can return a NEGATIVE hold on
+        // spot-perp / builder-dex wallets (observed live: USDC total=59953
+        // hold=-85125, USDT0 total=0 hold=-89572). The old
+        // `free = total - hold` then INFLATED free by the absolute hold — the
+        // account showed USDC free=145078 instead of the real 59953 and USDT
+        // free=89572 with nothing actually held — and `locked = hold` went
+        // negative. `total` is the authoritative spot balance, so clamp hold to
+        // >= 0: locked is never negative, free never exceeds the real total,
+        // and free + locked === total for every asset.
+        const locked = Math.max(0, +b.hold || 0)
+        const free = Math.max(0, (+b.total || 0) - locked)
         res.push({
           asset: aliasToken(b.coin),
-          free: +b.total - +b.hold,
-          locked: +b.hold,
-        }),
-      )
+          free,
+          locked,
+        })
+      })
     } catch (e) {
       return this.handleHyperliquidErrors(
         this.futures_getBalance,

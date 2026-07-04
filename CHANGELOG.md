@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.1] - 2026-07-04
+
+### Fixed
+- Binance.US API-key verification now hits the spot `GET /api/v3/account` (`getAccountInformation`) instead of the Binance.com-only `GET /sapi/v1/account/info` (`getAccountInfo`), which 404s on Binance.US. Every Binance.US key was being rejected as invalid regardless of its actual validity/permissions.
+
 ## [1.13.0] - 2026-07-04
 
 ### Changed

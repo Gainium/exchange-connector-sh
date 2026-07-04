@@ -63,8 +63,12 @@ const verifyBinance = async (
       baseUrl: getBinanceBase(domain),
     })
     if (domain === ExchangeDomain.us) {
+      // Binance.US only implements the spot `GET /api/v3/account`
+      // (getAccountInformation); the `.com`-only `GET /sapi/v1/account/info`
+      // that getAccountInfo() hits 404s on Binance.US, which made every
+      // Binance.US key verification fail regardless of the key's validity.
       return client
-        .getAccountInfo()
+        .getAccountInformation()
         .then(() => ({ status: true, reason: '' }))
         .catch((e) => ({
           status: false,

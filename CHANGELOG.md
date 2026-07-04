@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-07-04
+
+### Changed
+
+- Hyperliquid: all Unit-bridged spot bases now normalize to their canonical ticker (`UETH→ETH`, `USOL→SOL`, … — previously only `UBTC→BTC`), derived authoritatively from `spotMeta` `fullName` with a collision guard (`UPUMP`/`UMOG`/`UUUSPX` stay raw). Both the display pair and the wallet balance asset are normalized, and the raw Unit pair is dual-registered so bots created before the change still resolve.
+
+### Fixed
+
+- Hyperliquid: spot balances now reconcile to the pair base (`UBTC` wallet asset → `BTC`), so SELL side and bot funds no longer read 0 for spot holdings (forum #4860), for every Unit token — not just BTC.
+
+### Removed
+
+- Hyperliquid: un-curated HIP-1 permissionless spot tokens that namesquat a TradFi ticker (`AAPL`, `TSLA`, `MSFT`, … — one-genesis-address synthetics with near-zero depth) are now hidden from the spot listing. The real, curated equity exposure is the HIP-3 perp, classified on the perp path.
+
 ## [1.12.0] - 2026-07-04
 
 ### Added

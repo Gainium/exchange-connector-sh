@@ -1569,7 +1569,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits(
         'getAllOpenOrders',
         'request',
-        this.isNewLimit ? 80 : 40,
+        // Official Binance spot weight: 6 (new) / 3 (old) with a symbol,
+        // 80 (new) / 40 (old) without. US stays on the old scheme.
+        symbol ? (this.isNewLimit ? 6 : 3) : this.isNewLimit ? 80 : 40,
         timeProfile,
       )) || timeProfile
     const input: { symbol?: string; recvWindow: number } = {

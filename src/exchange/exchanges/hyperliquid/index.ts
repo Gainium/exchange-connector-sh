@@ -1280,7 +1280,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     retryCount = 0,
   ): Promise<BaseReturn<CommonOrder>> {
     timeProfile =
-      (await this.checkLimits('getOrderStatus', 1, timeProfile)) || timeProfile
+      (await this.checkLimits('getOrderStatus', 2, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
       const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
@@ -1326,7 +1326,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         ) {
           try {
             timeProfile =
-              (await this.checkLimits('userFillsByTime', 1, timeProfile)) ||
+              (await this.checkLimits('userFillsByTime', 20, timeProfile)) ||
               timeProfile
             timeProfile = this.startProfilerTime(timeProfile, 'exchange')
             const fills = await this.infoClient
@@ -1477,7 +1477,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       for (const dex of targets) {
         timeProfile =
-          (await this.checkLimits('getFuturesOpenOrders', 0, timeProfile)) ||
+          (await this.checkLimits('getFuturesOpenOrders', 20, timeProfile)) ||
           timeProfile
         if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
           const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime

@@ -64,6 +64,59 @@ function krakenFuturesAssetClass(
   }
 }
 
+/**
+ * Kraken tokenized-equity ("xStocks") underlyings that are ETFs / index
+ * trackers rather than single-name stocks. Keyed by the base with its trailing
+ * `x` stripped (e.g. Kraken base `SPYx` -> `SPY`). Everything tokenized that is
+ * NOT in this set is classified `'stock'`. Curated from Kraken's tokenized
+ * universe (probed 2026-07-06). Membership only affects the `assetClass` tag
+ * surfaced to main-app; it does not gate trading.
+ */
+const KRAKEN_XSTOCK_ETFS = new Set<string>([
+  'SPY',
+  'VOO',
+  'VTI',
+  'VT',
+  'VUG',
+  'VXUS',
+  'QQQ',
+  'TQQQ',
+  'SOXL',
+  'DIA',
+  'IWM',
+  'IJR',
+  'IEMG',
+  'SCHF',
+  'VGK',
+  'EWG',
+  'EWQ',
+  'EWU',
+  'EWY',
+  'FEZ',
+  'GLD',
+  'SLV',
+  'PPLT',
+  'PALL',
+  'GDX',
+  'MOO',
+  'COPX',
+  'URA',
+  'NLR',
+  'ITA',
+  'XLE',
+  'XOP',
+  'SMH',
+  'SOXX',
+  'SGOV',
+  'JPST',
+  'TBLL',
+  'JAAA',
+  'FLBL',
+  'YLDE',
+  'BSP',
+  'BITX',
+])
+
 // Interval mapping for Kraken
 const intervalMap: { [x in ExchangeIntervals]: number } = {
   '1m': 1,
@@ -104,6 +157,10 @@ class KrakenSymbolMapper {
   private ourSymbolToKraken: Map<string, string> = new Map()
   private krakenToOurSymbol: Map<string, string> = new Map()
   private krakenAssetToActual: Map<string, string> = new Map() // For spot: XXBT -> XBT, ZUSD -> USD
+  // Our-symbols (e.g. "AAPLx-USD") that are Kraken tokenized-equity ("xStocks")
+  // pairs. These require the `asset_class: 'tokenized_asset'` param on every
+  // per-pair Kraken call. Replace-set on each getAllExchangeInfo (spot only).
+  private tokenizedSymbols: Set<string> = new Set()
   private isInitialized = false
   private marketType: 'spot' | 'usdm'
 
@@ -165,6 +222,24 @@ class KrakenSymbolMapper {
     }
 
     this.isInitialized = true
+  }
+
+  /**
+   * Record which our-symbols are Kraken tokenized-equity ("xStocks") pairs.
+   * Replace-set: called on each spot getAllExchangeInfo.
+   * @param ourSymbols Our-format symbols (e.g. "AAPLx-USD")
+   */
+  setTokenized(ourSymbols: string[]) {
+    this.tokenizedSymbols = new Set(ourSymbols)
+  }
+
+  /**
+   * Whether an our-symbol is a Kraken tokenized-equity pair (needs the
+   * `asset_class: 'tokenized_asset'` param on per-pair Kraken calls).
+   * @param ourSymbol Symbol in our format (e.g. "AAPLx-USD")
+   */
+  isTokenized(ourSymbol: string): boolean {
+    return this.tokenizedSymbols.has(ourSymbol)
   }
 
   /**
@@ -865,6 +940,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         userref: newClientOrderId
           ? parseInt(newClientOrderId.substring(0, 8), 16)
           : undefined,
+        ...this.xstockParams(symbol),
       })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -922,6 +998,23 @@ class KrakenExchange extends AbstractExchange implements Exchange {
    */
   private isKrakenSpotTxid(id: string): boolean {
     return /^O[A-Z0-9]{5}-[A-Z0-9]{4,6}-[A-Z0-9]{4,6}$/.test(id)
+  }
+
+  /**
+   * Kraken requires `asset_class: 'tokenized_asset'` on every public/private
+   * per-pair call for tokenized-equity ("xStocks") pairs — without it Kraken
+   * replies "Unknown asset pair". Returns the param object to spread into the
+   * Kraken call for a tokenized pair, or `{}` for ordinary crypto spot pairs
+   * (which must NOT carry the param). Spot-only; the futures path never sets
+   * tokenized symbols. NOTE: AssetPairs uses `aclass`, everything else uses
+   * `asset_class` — this helper is for the `asset_class` callers.
+   */
+  private xstockParams(ourSymbol: string): {
+    asset_class?: 'tokenized_asset'
+  } {
+    return this.symbolMapper.isTokenized(ourSymbol)
+      ? { asset_class: 'tokenized_asset' }
+      : {}
   }
 
   /**
@@ -1563,7 +1656,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.spotClient
-      .getTicker({ pair: await this.toKrakenSymbol(symbol) })
+      .getTicker({
+        pair: await this.toKrakenSymbol(symbol),
+        ...this.xstockParams(symbol),
+      })
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -1800,28 +1896,83 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     return this.spotClient
       .getAssetPairs()
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result || result.error?.length) {
           throw new Error(result.error?.[0] || 'Failed to get asset pairs')
         }
 
-        const infos: (ExchangeInfo & { pair: string })[] = Object.entries(
-          result.result,
-        ).map(([code, pairInfo]) => {
-          // Use actual asset names from API instead of guessing
-          const base = this.symbolMapper.getActualAssetName(pairInfo.base || '')
+        // Tokenized-equity ("xStocks") pairs are NOT returned by the default
+        // AssetPairs call — they require the `aclass: 'tokenized_asset'` param
+        // (note: AssetPairs uses `aclass`; every OTHER Kraken call uses
+        // `asset_class`). Additive + flag-gated (default ON) and skipped in
+        // demo/testnet, so ordinary crypto spot pairs are never affected.
+        // A tokenized entry is tagged assetClass 'etf' | 'stock'; crypto
+        // entries stay untagged (undefined => main-app treats as crypto).
+        const xstocksEnabled =
+          process.env.KRAKEN_XSTOCKS_ENABLED !== 'false' &&
+          process.env.KRAKEN_ENV !== 'demo'
+        // Same shape as the default AssetPairs `result.result` entries.
+        const tokenizedPairs: typeof result.result = {}
+        if (xstocksEnabled) {
+          try {
+            const tokenizedResult = await this.spotClient!.getAssetPairs({
+              // `aclass` is the AssetPairs-specific param name; the lib types
+              // AssetPairs as `aclass_base`, so pass through a cast (SpotClient
+              // serializes arbitrary params verbatim).
+              aclass: 'tokenized_asset',
+            } as Parameters<typeof this.spotClient.getAssetPairs>[0])
+            if (tokenizedResult.result && !tokenizedResult.error?.length) {
+              // Kraken returns EACH tokenized market under two identical keys —
+              // an internal `…SPVUSD` settlement key and the altname key
+              // (`AAPLxUSD`). Collapse by altname so every xStock surfaces once
+              // with a clean `code`; otherwise pairDb gets 320 rows for 160
+              // markets (dupes in the picker + ambiguous symbol map).
+              for (const info of Object.values(tokenizedResult.result)) {
+                const altname = (info as { altname?: string }).altname
+                if (altname) tokenizedPairs[altname] = info
+              }
+            }
+          } catch (error) {
+            Logger.warn(
+              `Failed to get Kraken tokenized asset pairs: ${error.message}`,
+            )
+          }
+        }
+        const tokenizedCodes = new Set(Object.keys(tokenizedPairs))
+
+        const infos: (ExchangeInfo & { pair: string })[] = Object.entries({
+          ...result.result,
+          ...tokenizedPairs,
+        }).map(([code, pairInfo]) => {
+          const isTokenized = tokenizedCodes.has(code)
+          // Tokenized bases (e.g. "AAPLx", "BRK.Bx") are already display-ready
+          // — do NOT run them through the crypto asset-name map. Crypto pairs
+          // keep the existing mapping (XXBT -> BTC, ZUSD -> USD).
+          const base = isTokenized
+            ? pairInfo.base || ''
+            : this.symbolMapper.getActualAssetName(pairInfo.base || '')
           const quote = this.symbolMapper.getActualAssetName(
             pairInfo.quote || '',
           )
           const tick = parseFloat(pairInfo.tick_size || '1')
           const priceAssetPrecision =
             tick < 1 ? Math.ceil(-Math.log10(tick)) : 0
+          // Strip the trailing `x` tokenized marker for the ETF lookup
+          // (keep the dot for "BRK.Bx" -> "BRK.B").
+          const underlying = base.endsWith('x') ? base.slice(0, -1) : base
           return {
             code,
             wsCode: `${base}/${quote}`,
             pair: `${base}-${quote}`,
+            ...(isTokenized
+              ? {
+                  assetClass: (KRAKEN_XSTOCK_ETFS.has(underlying)
+                    ? 'etf'
+                    : 'stock') as ExchangeInfo['assetClass'],
+                }
+              : {}),
             baseAsset: {
               name: base,
               minAmount: parseFloat(pairInfo.ordermin || '0'),
@@ -1843,6 +1994,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             priceAssetPrecision,
           }
         })
+
+        // Register which our-symbols are tokenized so per-pair calls inject
+        // `asset_class` (replace-set each call).
+        this.symbolMapper.setTokenized(
+          infos
+            .filter((info) => tokenizedCodes.has(info.code!))
+            .map((info) => info.pair),
+        )
 
         // Update symbol maps (code is always defined for Kraken pairs)
         this.symbolMapper.updateMaps(
@@ -2071,6 +2230,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         interval: intervalMinutes as
           1 | 5 | 15 | 30 | 60 | 240 | 1440 | 10080 | 21600,
         since: from ? Math.floor(from / 1000) : undefined,
+        ...this.xstockParams(symbol),
       })
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -2234,7 +2394,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.spotClient
-      .getRecentTrades({ pair: await this.toKrakenSymbol(symbol) })
+      .getRecentTrades({
+        pair: await this.toKrakenSymbol(symbol),
+        ...this.xstockParams(symbol),
+      })
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-07-06
+
+### Added
+
+- Kraken spot now supports tokenized-equity ("xStocks") pairs (e.g. `AAPLx-USD`, `SPYx-USD`). Kraken hides these from the default `AssetPairs` response and rejects every per-pair call that omits the tokenized flag ("Unknown asset pair"), so none surfaced before. `getAllExchangeInfo` (spot) now makes a second `AssetPairs` call with `aclass: 'tokenized_asset'`, merges those pairs, tags each `assetClass: 'etf' | 'stock'` (ETF/index trackers curated in `KRAKEN_XSTOCK_ETFS`, everything else `'stock'`), and registers them via `KrakenSymbolMapper.setTokenized()`. Per-pair spot calls — `latestPrice` (Ticker), `getCandles` (OHLC), `getTrades` (RecentTrades) and `openOrder` (AddOrder) — inject `asset_class: 'tokenized_asset'` for tokenized symbols via `xstockParams()`. Param-name quirk preserved: `AssetPairs` uses `aclass`, all other calls use `asset_class`.
+- ADDITIVE + flag-gated: enabled by default, disabled with `KRAKEN_XSTOCKS_ENABLED=false`, and skipped in demo/testnet. Ordinary crypto Kraken spot/futures pairs are unaffected — they carry no `assetClass` and never receive the `asset_class` param.
+
 ## [1.14.3] - 2026-07-06
 
 ### Fixed

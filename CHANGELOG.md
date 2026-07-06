@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.1] - 2026-07-06
+
+### Fixed
+
+- Kraken xStock fees: `getUserFees`/`getAllUserFees` now fetch the tokenized universe (`aclass: tokenized_asset`), so fees resolve for stock pairs (e.g. PGx-USD) instead of throwing "Pair not found" → "User fee not found".
+
+
 ## [1.15.0] - 2026-07-06
 
 ### Added

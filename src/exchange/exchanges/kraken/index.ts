@@ -2044,7 +2044,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     const krakenSymbol = await this.toKrakenSymbol(symbol)
 
     return this.spotClient
-      .getAssetPairs({ pair: krakenSymbol })
+      .getAssetPairs({
+        pair: krakenSymbol,
+        // xStocks are absent from the default AssetPairs — without the `aclass`
+        // filter this returns nothing for them, so the fee lookup threw
+        // "Pair not found" → main-app surfaced "User fee not found".
+        ...(this.symbolMapper.isTokenized(symbol)
+          ? { aclass: 'tokenized_asset' }
+          : {}),
+      } as Parameters<typeof this.spotClient.getAssetPairs>[0])
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -2115,16 +2123,41 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     return this.spotClient
       .getAssetPairs()
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result || result.error?.length) {
           throw new Error(result.error?.[0] || 'Failed to get asset pairs')
         }
 
-        const fees: (UserFee & { pair: string })[] = Object.entries(
-          result.result,
-        ).map(([_, pairInfo]) => {
+        // xStocks aren't in the default AssetPairs, so their fees were missing
+        // from the map → "User fee not found" for any Kraken stock pair. Fetch
+        // the tokenized universe too (deduped by altname, same as
+        // getAllExchangeInfo). Additive + flag-gated; never affects crypto.
+        const tokenizedPairs: typeof result.result = {}
+        if (
+          process.env.KRAKEN_XSTOCKS_ENABLED !== 'false' &&
+          process.env.KRAKEN_ENV !== 'demo'
+        ) {
+          try {
+            const tok = await this.spotClient!.getAssetPairs({
+              aclass: 'tokenized_asset',
+            } as Parameters<typeof this.spotClient.getAssetPairs>[0])
+            if (tok.result && !tok.error?.length) {
+              for (const info of Object.values(tok.result)) {
+                const altname = (info as { altname?: string }).altname
+                if (altname) tokenizedPairs[altname] = info
+              }
+            }
+          } catch (error) {
+            Logger.warn(`Failed to get Kraken tokenized fees: ${error.message}`)
+          }
+        }
+
+        const fees: (UserFee & { pair: string })[] = Object.entries({
+          ...result.result,
+          ...tokenizedPairs,
+        }).map(([_, pairInfo]) => {
           // Extract fees from first tier (highest fee for lowest volume)
           const takerFee =
             pairInfo.fees && pairInfo.fees.length > 0

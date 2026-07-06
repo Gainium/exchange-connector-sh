@@ -876,14 +876,32 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         const orderIds = result.result.txid || []
 
         await sleep(500)
-        // Re-fetch by the original client order id (not the Kraken txid):
-        // getOrder() resolves spot orders by userref = parseInt(clientOrderId
-        // .substring(0,8), 16), the same value set at submit time above. Passing
-        // the txid here yields parseInt('OQCLML-...',16) = NaN, so a resting
-        // limit order is never matched and the deal is wrongly closed. Mirrors
-        // the futures branch, which passes the original cliOrdId.
+        // Re-fetch by the Kraken txid via QueryOrders — the ONLY unambiguous
+        // lookup available. getOrder() resolves spot orders by userref =
+        // parseInt(clientOrderId.substring(0,8), 16); every Gainium client id
+        // starts with a shared prefix ("D-…", "GRID-…"), so parseInt stops at
+        // the first non-hex char and MANY orders collide on the same userref
+        // (e.g. all "D-*" ids → 13). With ≥2 such orders on the account,
+        // getOrder() returned a DIFFERENT order's data — an instantly-filled
+        // market Add came back as the account's resting limit order (open/
+        // vol_exec 0), so the fill was silently never registered on the deal
+        // (community thread 4890). QueryOrders also covers the closed-orders
+        // consistency lag for instantly-filled market orders.
+        const txid = orderIds?.[0]
+        if (txid) {
+          const fetched = await this.getSpotOrderByTxid(
+            txid,
+            symbol,
+            newClientOrderId || txid,
+            timeProfile,
+          )
+          if (fetched) {
+            return fetched
+          }
+        }
+        // Fallback: legacy client-order-id (userref) lookup.
         return await this.getOrder(
-          { symbol, newClientOrderId: newClientOrderId || orderIds?.[0] || '' },
+          { symbol, newClientOrderId: newClientOrderId || txid || '' },
           timeProfile,
         )
       })
@@ -893,6 +911,61 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
+  }
+
+  /**
+   * Resolve a spot order by its Kraken txid via QueryOrders. Exact —
+   * immune to the shared-userref collision in getOrder() — and works
+   * regardless of open/closed state. Returns null when the txid can't
+   * be resolved (caller falls back to the legacy userref lookup).
+   */
+  private async getSpotOrderByTxid(
+    txid: string,
+    symbol: string,
+    clientOrderId: string,
+    timeProfile: TimeProfile,
+  ): Promise<BaseReturn<CommonOrder> | null> {
+    if (!this.spotClient) {
+      return null
+    }
+    try {
+      timeProfile =
+        (await this.checkLimits('getOrders', symbol, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      const result = await this.spotClient.getOrders({ txid })
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (!result.result || result.error?.length) {
+        return null
+      }
+      const orderData = result.result[txid]
+      if (!orderData) {
+        return null
+      }
+      return this.returnGood<CommonOrder>(timeProfile)(
+        this.convertOrder({
+          orderId: txid,
+          symbol: await this.normalizeSymbol(orderData.descr?.pair || symbol),
+          clientOrderId,
+          // `price` is the average executed price — the real fill price for
+          // market orders, whose descr.price is '0'. Fall back to the limit
+          // price for unfilled orders.
+          price:
+            +(orderData.price || 0) > 0
+              ? orderData.price
+              : orderData.descr?.price || '0',
+          origQty: orderData.vol || '0',
+          executedQty: orderData.vol_exec || '0',
+          status: orderData.status || 'NEW',
+          type: orderData.descr?.ordertype || 'limit',
+          side: orderData.descr?.type?.toUpperCase() || 'BUY',
+        }),
+      )
+    } catch {
+      // Any failure here is non-fatal — caller falls back to getOrder().
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      return null
+    }
   }
 
   async getOrder(
@@ -1117,7 +1190,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                       orderData.descr?.pair || symbol,
                     ),
                     clientOrderId: newClientOrderId,
-                    price: orderData.descr?.price || '0',
+                    // avg executed price when filled (descr.price is '0'
+                    // for market orders), limit price otherwise
+                    price:
+                      +(orderData.price || 0) > 0
+                        ? orderData.price
+                        : orderData.descr?.price || '0',
                     origQty: orderData.vol || '0',
                     executedQty: orderData.vol_exec || '0',
                     status: orderData.status || 'FILLED',

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-07-06
+
+### Fixed
+
+- Kraken spot order placement re-fetched the just-placed order by userref, which collides across ALL Gainium client order ids (shared "D-…"/"GRID-…" prefixes all parse to the same int) — with ≥2 such orders on an account, an instantly-filled market order came back as a DIFFERENT resting order (open, 0 filled) and the fill was silently never registered on the deal. Now resolves by the Kraken txid via QueryOrders (exact, state-independent), falling back to the legacy lookup. Also report the average executed price (not descr.price, which is '0' for market orders) in QueryOrders/closed-orders results.
+
 ## [1.14.1] - 2026-07-05
 
 ### Fixed

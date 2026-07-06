@@ -914,6 +914,17 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * A Kraken spot order txid: 'O' + three dash-separated uppercase
+   * alphanumeric groups (e.g. OSVJII-BHJHI-XTNXN4). Gainium client order
+   * ids never match this (they start with D-/GRID-/GA- and contain
+   * lowercase), so this cleanly distinguishes "resolve by txid" from
+   * "resolve by userref" when main-app hands us either.
+   */
+  private isKrakenSpotTxid(id: string): boolean {
+    return /^O[A-Z0-9]{5}-[A-Z0-9]{4,6}-[A-Z0-9]{4,6}$/.test(id)
+  }
+
+  /**
    * Resolve a spot order by its Kraken txid via QueryOrders. Exact —
    * immune to the shared-userref collision in getOrder() — and works
    * regardless of open/closed state. Returns null when the txid can't
@@ -1110,6 +1121,25 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     if (!this.spotClient) {
       return this.errorClient(timeProfile)
+    }
+
+    // When main-app resolves a spot order it translates our client id to the
+    // stored Kraken txid first (see the kraken branch of bot getOrder), so a
+    // txid is what actually arrives here for reconcile / order-status polling.
+    // Resolve it exactly via QueryOrders — the userref lookup below can't
+    // (parseInt('O…',16)=NaN) and, even for real client ids, collides because
+    // every Gainium id shares a prefix. This is what repairs missed-fill
+    // reconcile for resting Kraken spot orders (forum #4890).
+    if (this.isKrakenSpotTxid(newClientOrderId)) {
+      const byTxid = await this.getSpotOrderByTxid(
+        newClientOrderId,
+        symbol,
+        newClientOrderId,
+        timeProfile,
+      )
+      if (byTxid) {
+        return byTxid
+      }
     }
 
     timeProfile =

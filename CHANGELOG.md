@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.3] - 2026-07-06
+
+### Fixed
+
+- Kraken spot `getOrder` now resolves a Kraken order txid via QueryOrders (guarded by txid-format detection). main-app already translates our client id to the stored txid before polling Kraken order status (reconcile / checkOrdersAfterReconnect), but the connector could only look up by userref (`parseInt('O…',16)=NaN`), so that path never resolved — resting Kraken spot fills were never reconciled. This repairs the missed-fill reconcile backstop for Kraken (forum #4890); pairs with main-app preserving the local clientOrderId in the merge.
+
 ## [1.14.2] - 2026-07-06
 
 ### Fixed

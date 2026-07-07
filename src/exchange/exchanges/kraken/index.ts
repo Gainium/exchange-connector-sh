@@ -1754,6 +1754,36 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           })
         }
 
+        // xStocks aren't in the default Ticker, so deals on Kraken stock
+        // pairs had no live/last price → the UI showed "Price unavailable"
+        // (and P&L/TP couldn't compute). Fetch the tokenized tickers too
+        // (Kraken returns the last price even out of hours). Filter to
+        // known tokenized symbols so the duplicate `…SPV…` keys drop out.
+        // Additive + flag-gated; never touches crypto prices.
+        if (
+          process.env.KRAKEN_XSTOCKS_ENABLED !== 'false' &&
+          process.env.KRAKEN_ENV !== 'demo'
+        ) {
+          try {
+            const tok = await this.spotClient!.getTicker({
+              asset_class: 'tokenized_asset',
+            } as Parameters<typeof this.spotClient.getTicker>[0])
+            if (tok.result && !tok.error?.length) {
+              for (const [pair, ticker] of Object.entries(tok.result)) {
+                const ourSymbol = await this.normalizeSymbol(pair)
+                if (this.symbolMapper.isTokenized(ourSymbol)) {
+                  prices.push({
+                    pair: ourSymbol,
+                    price: parseFloat(ticker.c?.[0] || '0'),
+                  })
+                }
+              }
+            }
+          } catch (error) {
+            Logger.warn(`Failed to get Kraken tokenized prices: ${error.message}`)
+          }
+        }
+
         return this.returnGood<AllPricesResponse[]>(timeProfile)(prices)
       })
       .catch(

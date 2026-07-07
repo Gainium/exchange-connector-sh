@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.2] - 2026-07-07
+
+### Fixed
+
+- Kraken xStock live prices: `getAllPrices` now also fetches the tokenized Ticker (`asset_class: tokenized_asset`), so deals on Kraken stock pairs get a last/mark price (Kraken serves it even out of hours) instead of "Price unavailable" (which also blocked unrealized P&L / TP-SL).
+
+
 ## [1.15.1] - 2026-07-06
 
 ### Fixed

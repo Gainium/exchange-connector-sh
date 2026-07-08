@@ -1231,6 +1231,69 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return { state, timeProfile }
   }
 
+  /**
+   * Fetch one frontendOpenOrders page (HL native when `dex` is undefined, else
+   * the builder dex) with the same 429/transient retry as
+   * {@link fetchClearinghouseState}. `frontendOpenOrders` is weight 20 and draws
+   * on the SAME per-IP info budget as clearinghouseState, so its per-dex fan-out
+   * was a major 429 contributor; a per-dex error previously just dropped that
+   * dex's open orders for the poll. No cache here — open orders is read by a
+   * single endpoint, so there is nothing to coalesce.
+   */
+  private async fetchOpenOrdersForDex(
+    dex: string | undefined,
+    timeProfile: TimeProfile,
+  ): Promise<{
+    orders: Awaited<ReturnType<typeof this.infoClient.frontendOpenOrders>>
+    timeProfile: TimeProfile
+    timedOut?: boolean
+  }> {
+    timeProfile =
+      (await this.checkLimits('getFuturesOpenOrders', 20, timeProfile)) ||
+      timeProfile
+    if (
+      timeProfile.inQueueStartTime &&
+      timeProfile.inQueueEndTime &&
+      timeProfile.inQueueEndTime - timeProfile.inQueueStartTime >= this.timeout
+    ) {
+      return { orders: [], timeProfile, timedOut: true }
+    }
+    const callOnce = () =>
+      dex
+        ? this.infoClient.frontendOpenOrders({ user: this._key, dex })
+        : this.infoClient.frontendOpenOrders({ user: this._key })
+    const maxRetries = 2
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const orders = await callOnce()
+        return { orders, timeProfile }
+      } catch (err) {
+        const kind = hlInfoErrorKind(err)
+        if (
+          (kind !== 'rate' && kind !== 'transient') ||
+          attempt >= maxRetries
+        ) {
+          throw err
+        }
+        const waitMs =
+          kind === 'rate'
+            ? (hlRetryAfterMs(err) ?? Math.min(2000, 500 * (attempt + 1)))
+            : 750
+        const userPrefix =
+          typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
+        Logger.warn(
+          `Hyperliquid frontendOpenOrders ${kind} ${
+            dex ?? 'HL native'
+          } (user=${userPrefix}…) attempt ${attempt + 1}/${
+            maxRetries + 1
+          }; wait ${waitMs}ms`,
+        )
+        await sleep(waitMs)
+        await this.checkLimits('getFuturesOpenOrders', 20)
+      }
+    }
+  }
+
   async futures_getBalance(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FreeAsset>> {
@@ -1736,37 +1799,37 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     let res: CommonOrder[] = []
     try {
       // Default frontendOpenOrders only returns HL native + spot. Builder
-      // dexes need a per-dex call. Calls are serialized through checkLimits
-      // — running them in parallel triggers 429.
+      // dexes need a per-dex call. Only query HL native + dexes this wallet is
+      // active on (shared HyperliquidDexActivity set — an open order is itself
+      // an activity signal that cross-feeds balance/positions discovery).
       const dexNames = this.futures
         ? await HyperliquidAssets.getInstance().listDexNames()
         : []
-      const targets: Array<string | undefined> = [undefined, ...dexNames]
+      const activity = HyperliquidDexActivity.getInstance()
+      const plan = this.futures
+        ? activity.plan(this._key, 'openOrders', dexNames)
+        : { dexes: [] as string[], fullSweep: false }
+      const targets: Array<string | undefined> = [undefined, ...plan.dexes]
       type OrdersResult = Awaited<
         ReturnType<typeof this.infoClient.frontendOpenOrders>
       >
       const results: OrdersResult = []
+      const seenActive = new Set<string>()
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       for (const dex of targets) {
-        timeProfile =
-          (await this.checkLimits('getFuturesOpenOrders', 20, timeProfile)) ||
-          timeProfile
-        if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-          const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-          if (diff >= this.timeout) {
+        try {
+          const r = await this.fetchOpenOrdersForDex(dex, timeProfile)
+          timeProfile = r.timeProfile
+          if (r.timedOut) {
             Logger.error(
-              `Hyperliquid Queue time is too long ${diff / 1000} getAllOpenOrders ${
+              `Hyperliquid Queue time is too long getAllOpenOrders ${
                 this.usdm ? 'usdm' : 'coinm'
               }`,
             )
             return this.returnBad(timeProfile)(new Error('Response timeout'))
           }
-        }
-        try {
-          const part = await (dex
-            ? this.infoClient.frontendOpenOrders({ user: this._key, dex })
-            : this.infoClient.frontendOpenOrders({ user: this._key }))
-          results.push(...part)
+          results.push(...r.orders)
+          if (dex && r.orders.length > 0) seenActive.add(dex)
         } catch (e) {
           Logger.error(
             `Hyperliquid frontendOpenOrders failed for ${dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
@@ -1774,6 +1837,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         }
       }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (this.futures) {
+        if (plan.fullSweep) activity.observe(this._key, seenActive)
+        else for (const dex of seenActive) activity.markActive(this._key, dex)
+      }
 
       const data = (results as OrdersResult).filter((r) =>
         this.futures

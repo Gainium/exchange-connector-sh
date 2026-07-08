@@ -765,6 +765,217 @@ class HyperliquidAssets {
   }
 }
 
+/** Read a non-negative integer env var, falling back to `def`. */
+const hlEnvInt = (name: string, def: number): number => {
+  const v = Number(process.env[name])
+  return Number.isFinite(v) && v >= 0 ? v : def
+}
+
+/**
+ * Adaptive Hyperliquid `clearinghouseState` fan-out control.
+ *
+ * `clearinghouseState` is per-dex: covering HL native + every HIP-3 builder dex
+ * means one info call per dex. The builder-dex list has grown to ~10 and keeps
+ * growing, so a naive poll fires ~10 calls — and it runs twice per cycle
+ * (balance + positions), for every HL user sharing an egress IP. That blew past
+ * Hyperliquid's ~1200 weight/min/IP info budget (clearinghouseState = 2 wt) and
+ * returned 429, silently dropping that dex's state for the poll.
+ *
+ * A dex the user has no position / balance / resting order on returns empty
+ * state, so skipping it loses nothing. This tracker remembers, per wallet, which
+ * dexes the user is actually active on so routine polls hit only HL native +
+ * those dexes. New activity is discovered by:
+ *   - {@link markActive} when we place an order on a dex (instant; covers all
+ *     Gainium-driven trades before the position/balance even settles), and
+ *   - a periodic FULL sweep (every `fullSweepMs`) that re-queries every dex and
+ *     picks up out-of-band activity (manual HL trades, funding, transfers).
+ * A dex is dropped once it has shown no activity for `activeTtlMs`.
+ *
+ * Env knobs (rate-limit tuning without a redeploy):
+ *   HL_DEX_FANOUT_ADAPTIVE=0  -> disable; always full fan-out (old behaviour)
+ *   HL_DEX_FULL_SWEEP_MS      -> full-sweep cadence (default 60000)
+ *   HL_DEX_ACTIVE_TTL_MS      -> how long a dex stays "active" (default 300000)
+ */
+class HyperliquidDexActivity {
+  private static instance: HyperliquidDexActivity
+  static getInstance(): HyperliquidDexActivity {
+    if (!HyperliquidDexActivity.instance) {
+      HyperliquidDexActivity.instance = new HyperliquidDexActivity()
+    }
+    return HyperliquidDexActivity.instance
+  }
+
+  private readonly adaptive = process.env.HL_DEX_FANOUT_ADAPTIVE !== '0'
+  private readonly fullSweepMs = hlEnvInt('HL_DEX_FULL_SWEEP_MS', 60_000)
+  private readonly activeTtlMs = hlEnvInt('HL_DEX_ACTIVE_TTL_MS', 5 * 60_000)
+
+  /** wallet(lowercased) -> { active dex -> lastSeenMs; method -> lastFullSweepMs } */
+  private readonly perUser = new Map<
+    string,
+    { active: Map<string, number>; sweepAt: Map<string, number> }
+  >()
+
+  private entry(user: string) {
+    const key = `${user ?? ''}`.toLowerCase()
+    let e = this.perUser.get(key)
+    if (!e) {
+      e = { active: new Map(), sweepAt: new Map() }
+      this.perUser.set(key, e)
+    }
+    return e
+  }
+
+  /**
+   * Which builder dexes to query for this poll. HL native is always queried by
+   * the caller and is NOT included here. `fullSweep` is true when every dex is
+   * being returned, so the caller knows this pass rebuilds the active set.
+   */
+  plan(
+    user: string,
+    method: string,
+    allDexes: string[],
+  ): { dexes: string[]; fullSweep: boolean } {
+    if (!this.adaptive) return { dexes: allDexes, fullSweep: true }
+    const now = Date.now()
+    const e = this.entry(user)
+    const last = e.sweepAt.get(method) ?? 0
+    if (now - last >= this.fullSweepMs) {
+      e.sweepAt.set(method, now)
+      return { dexes: allDexes, fullSweep: true }
+    }
+    const listed = new Set(allDexes)
+    const dexes: string[] = []
+    for (const [dex, seen] of e.active) {
+      if (listed.has(dex) && now - seen < this.activeTtlMs) dexes.push(dex)
+    }
+    return { dexes, fullSweep: false }
+  }
+
+  /** Record a single dex as active right now (e.g. on order placement). */
+  markActive(user: string, dex?: string | null): void {
+    if (!dex) return
+    this.entry(user).active.set(dex, Date.now())
+  }
+
+  /**
+   * Refresh the active set from a completed pass: `seenActive` are the dexes
+   * that showed a position/balance/order this pass. Also prunes dexes that have
+   * shown no activity within `activeTtlMs`.
+   */
+  observe(user: string, seenActive: Iterable<string>): void {
+    const now = Date.now()
+    const e = this.entry(user)
+    for (const dex of seenActive) e.active.set(dex, now)
+    for (const [dex, seen] of e.active) {
+      if (now - seen >= this.activeTtlMs) e.active.delete(dex)
+    }
+  }
+}
+
+/** Does a clearinghouseState carry any activity worth tracking the dex for? */
+const hlStateHasActivity = (state: unknown): boolean => {
+  const s = state as {
+    assetPositions?: unknown[]
+    marginSummary?: { accountValue?: string | number }
+    withdrawable?: string | number
+  } | null
+  if (!s) return false
+  if (Array.isArray(s.assetPositions) && s.assetPositions.length > 0)
+    return true
+  if ((Number(s.marginSummary?.accountValue) || 0) > 0) return true
+  if ((Number(s.withdrawable) || 0) > 0) return true
+  return false
+}
+
+/** Classify an HL info-endpoint error for retry decisions. */
+const hlInfoErrorKind = (err: unknown): 'rate' | 'transient' | 'fatal' => {
+  const e = err as {
+    response?: { status?: number }
+    status?: number
+    message?: string
+  }
+  const status = e?.response?.status ?? e?.status
+  const msg = `${e?.message ?? ''}`.toLowerCase()
+  if (
+    status === 429 ||
+    msg.includes('too many requests') ||
+    msg.includes('429')
+  )
+    return 'rate'
+  if (status === 422 || msg.includes('failed to deserialize'))
+    return 'transient'
+  return 'fatal'
+}
+
+/** Best-effort Retry-After (ms) from an HL 429, capped so we never stall long. */
+const hlRetryAfterMs = (err: unknown): number | undefined => {
+  const resp = (err as { response?: { headers?: unknown } })?.response
+  const headers = resp?.headers as
+    | { get?: (k: string) => string | null }
+    | Record<string, string>
+    | undefined
+  if (!headers) return undefined
+  const raw =
+    typeof (headers as { get?: unknown }).get === 'function'
+      ? (headers as { get: (k: string) => string | null }).get('retry-after')
+      : ((headers as Record<string, string>)['retry-after'] ??
+        (headers as Record<string, string>)['Retry-After'])
+  if (raw == null) return undefined
+  const secs = Number(raw)
+  if (Number.isFinite(secs)) return Math.min(5000, Math.max(0, secs * 1000))
+  const at = Date.parse(String(raw))
+  if (!Number.isNaN(at)) return Math.min(5000, Math.max(0, at - Date.now()))
+  return undefined
+}
+
+/**
+ * Optional short-TTL cache + in-flight coalescing for identical
+ * `clearinghouseState` fetches (same wallet + dex + network). balance and
+ * positions read the same per-dex state each poll; within the TTL the second
+ * reuses the first instead of issuing another info call. OFF by default — set
+ * HL_CH_STATE_CACHE_MS to a small value (1000-2000) to enable. Trades up to
+ * `ttlMs` of staleness (may miss a fill inside the window) for fewer info calls.
+ */
+class HyperliquidChStateCache {
+  private static instance: HyperliquidChStateCache
+  static getInstance(): HyperliquidChStateCache {
+    if (!HyperliquidChStateCache.instance) {
+      HyperliquidChStateCache.instance = new HyperliquidChStateCache()
+    }
+    return HyperliquidChStateCache.instance
+  }
+
+  private readonly ttlMs = hlEnvInt('HL_CH_STATE_CACHE_MS', 0)
+  private readonly cache = new Map<string, { at: number; value: unknown }>()
+  private readonly inflight = new Map<string, Promise<unknown>>()
+
+  get enabled(): boolean {
+    return this.ttlMs > 0
+  }
+
+  /** Fresh cached value, or undefined if disabled/absent/expired. */
+  peek(key: string): unknown | undefined {
+    if (!this.enabled) return undefined
+    const hit = this.cache.get(key)
+    if (hit && Date.now() - hit.at < this.ttlMs) return hit.value
+    if (hit) this.cache.delete(key)
+    return undefined
+  }
+  set(key: string, value: unknown): void {
+    if (this.enabled) this.cache.set(key, { at: Date.now(), value })
+  }
+  inFlight(key: string): Promise<unknown> | undefined {
+    return this.enabled ? this.inflight.get(key) : undefined
+  }
+  track(key: string, p: Promise<unknown>): void {
+    if (!this.enabled) return
+    this.inflight.set(key, p)
+    void p.finally(() => {
+      if (this.inflight.get(key) === p) this.inflight.delete(key)
+    })
+  }
+}
+
 class HyperliquidExchange extends AbstractExchange implements Exchange {
   static FUTURES_BUILDER_FEE = 0.00045
   static SPOT_BUILDER_FEE = 0.0007
@@ -934,6 +1145,92 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     }
   }
 
+  /**
+   * Fetch one `clearinghouseState` (HL native when `dex` is undefined, else the
+   * builder dex). Centralizes rate-limit acquisition, the queue-timeout bail,
+   * and retry/backoff so both balance and positions behave identically.
+   *
+   * Retry (was previously only in the balance path, and only for 422/deserialize):
+   *   - 429 "too many requests" -> honor Retry-After (capped), else short backoff.
+   *     A 429 used to fall straight through to the caller's catch and drop that
+   *     dex's state (`null`); it is now recovered instead.
+   *   - 422 / "Failed to deserialize" -> short fixed backoff.
+   *   - anything else -> rethrow to the caller (logged + state dropped as before).
+   * Each retry re-acquires a rate-limit slot so it counts against local budget.
+   *
+   * When the short-TTL cache is enabled (HL_CH_STATE_CACHE_MS>0) a fresh cached
+   * value or an in-flight identical fetch is returned WITHOUT consuming a
+   * rate-limit slot; `timedOut` is only ever set on the fetch path.
+   */
+  private async fetchClearinghouseState(
+    dex: string | undefined,
+    timeProfile: TimeProfile,
+  ): Promise<{ state: unknown; timeProfile: TimeProfile; timedOut?: boolean }> {
+    const cache = HyperliquidChStateCache.getInstance()
+    const key = `${`${this._key}`.toLowerCase()}|${dex ?? 'native'}|${
+      this.demo ? 't' : 'm'
+    }`
+
+    const cached = cache.peek(key)
+    if (cached !== undefined) return { state: cached, timeProfile }
+    const flight = cache.inFlight(key)
+    if (flight) return { state: await flight, timeProfile }
+
+    timeProfile =
+      (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
+      timeProfile
+    if (
+      timeProfile.inQueueStartTime &&
+      timeProfile.inQueueEndTime &&
+      timeProfile.inQueueEndTime - timeProfile.inQueueStartTime >= this.timeout
+    ) {
+      return { state: null, timeProfile, timedOut: true }
+    }
+
+    const callOnce = () =>
+      dex
+        ? this.infoClient.clearinghouseState({ user: this._key, dex })
+        : this.infoClient.clearinghouseState({ user: this._key })
+
+    const run = (async () => {
+      const maxRetries = 2
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await callOnce()
+        } catch (err) {
+          const kind = hlInfoErrorKind(err)
+          if (
+            (kind !== 'rate' && kind !== 'transient') ||
+            attempt >= maxRetries
+          ) {
+            throw err
+          }
+          const waitMs =
+            kind === 'rate'
+              ? (hlRetryAfterMs(err) ?? Math.min(2000, 500 * (attempt + 1)))
+              : 750
+          const userPrefix =
+            typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
+          Logger.warn(
+            `Hyperliquid clearinghouseState ${kind} ${
+              dex ?? 'HL native'
+            } (user=${userPrefix}…) attempt ${attempt + 1}/${
+              maxRetries + 1
+            }; wait ${waitMs}ms`,
+          )
+          await sleep(waitMs)
+          // Re-acquire a rate-limit slot for the retry (another real HTTP call).
+          await this.checkLimits('getClearinghouseState', 2)
+        }
+      }
+    })()
+
+    cache.track(key, run)
+    const state = await run
+    cache.set(key, state)
+    return { state, timeProfile }
+  }
+
   async futures_getBalance(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FreeAsset>> {
@@ -948,93 +1245,46 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       // Calls are serialized through checkLimits() — running them in parallel
       // bypasses the rate limiter and triggers 429 on Hyperliquid.
       const assetsCache = HyperliquidAssets.getInstance()
-      const dexNames = await assetsCache.listDexNames()
+      const allDexNames = await assetsCache.listDexNames()
       const dexQuoteByName = new Map<string, string>()
       const allAssets = await assetsCache.listFuturesAssets()
       for (const a of allAssets) {
         if (a.dexName) dexQuoteByName.set(a.dexName, a.quoteAsset)
       }
 
+      // Only query HL native + dexes this wallet is active on (see
+      // HyperliquidDexActivity). Empty dexes return empty state, so skipping
+      // them loses no data while cutting the per-poll info-call fan-out that
+      // drove the 429s.
+      const activity = HyperliquidDexActivity.getInstance()
+      const plan = activity.plan(this._key, 'balance', allDexNames)
       type StateOrNull = Awaited<
         ReturnType<typeof this.infoClient.clearinghouseState>
       > | null
       const states: Array<{ asset: string; state: StateOrNull }> = []
       const targets: Array<{ asset: string; dex?: string }> = [
         { asset: 'USDC' },
-        ...dexNames.map((dex) => ({
+        ...plan.dexes.map((dex) => ({
           asset: dexQuoteByName.get(dex) ?? 'USDC',
           dex,
         })),
       ]
+      const seenActive = new Set<string>()
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       for (const t of targets) {
-        timeProfile =
-          (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
-          timeProfile
-        if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-          const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-          if (diff >= this.timeout) {
+        try {
+          const r = await this.fetchClearinghouseState(t.dex, timeProfile)
+          timeProfile = r.timeProfile
+          if (r.timedOut) {
             Logger.error(
-              `Hyperliquid Queue time is too long ${diff / 1000} futures_getBalance ${
+              `Hyperliquid Queue time is too long futures_getBalance ${
                 this.usdm ? 'usdm' : 'coinm'
               }`,
             )
             return this.returnBad(timeProfile)(new Error('Response timeout'))
           }
-        }
-        const callOnce = () =>
-          t.dex
-            ? this.infoClient.clearinghouseState({
-                user: this._key,
-                dex: t.dex,
-              })
-            : this.infoClient.clearinghouseState({ user: this._key })
-        const isTransientHlError = (err: unknown): boolean => {
-          const e = err as {
-            response?: { status?: number }
-            message?: string
-          }
-          if (e?.response?.status === 422) return true
-          if (e?.message?.includes('Failed to deserialize')) return true
-          return false
-        }
-        try {
-          let state: StateOrNull
-          try {
-            state = (await callOnce()) as StateOrNull
-          } catch (firstErr) {
-            if (!isTransientHlError(firstErr)) throw firstErr
-            const fe = firstErr as {
-              response?: { status?: number }
-              message?: string
-            }
-            const userPrefix =
-              typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
-            Logger.warn(
-              `Hyperliquid clearinghouseState transient ${
-                t.dex ?? 'HL native'
-              } (status=${fe.response?.status ?? '?'}, user=${userPrefix}…); retrying once: ${fe.message ?? firstErr}`,
-            )
-            await new Promise((r) => setTimeout(r, 750))
-            timeProfile =
-              (await this.checkLimits(
-                'getClearinghouseState',
-                2,
-                timeProfile,
-              )) || timeProfile
-            if (
-              timeProfile.inQueueStartTime &&
-              timeProfile.inQueueEndTime &&
-              timeProfile.inQueueEndTime - timeProfile.inQueueStartTime >=
-                this.timeout
-            ) {
-              throw new Error(
-                'Response timeout while waiting for clearinghouseState retry slot',
-              )
-            }
-            state = (await callOnce()) as StateOrNull
-          }
-          states.push({ asset: t.asset, state })
+          states.push({ asset: t.asset, state: r.state as StateOrNull })
+          if (t.dex && hlStateHasActivity(r.state)) seenActive.add(t.dex)
         } catch (e) {
           const err = e as {
             message?: string
@@ -1055,6 +1305,10 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         }
       }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      // Rebuild the active-dex set from what this pass actually saw (prunes
+      // dexes the user has fully exited; refreshes the rest).
+      if (plan.fullSweep) activity.observe(this._key, seenActive)
+      else for (const dex of seenActive) activity.markActive(this._key, dex)
 
       // Aggregate by collateral asset (multiple USDH dexes sum into one entry).
       const totals = new Map<string, { free: number; locked: number }>()
@@ -1239,6 +1493,24 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             order,
             this.endProfilerTime(timeProfile, 'exchange'),
           )(new HyperliquidError(result.response.data.statuses[0].error, 0))
+        }
+        // Discovery hint: mark this order's builder dex active so the next
+        // balance/positions poll queries it immediately instead of waiting for
+        // the periodic full sweep. Best-effort — never block the order flow.
+        if (this.futures) {
+          try {
+            const info = await HyperliquidAssets.getInstance().getFuturesInfo(
+              order.symbol,
+            )
+            if (info?.dexName) {
+              HyperliquidDexActivity.getInstance().markActive(
+                this._key,
+                info.dexName,
+              )
+            }
+          } catch {
+            /* ignore — discovery hint only */
+          }
         }
         const getOrderPayload = {
           symbol: order.symbol,
@@ -1617,35 +1889,32 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       // clearinghouseState only returns positions for one dex at a time;
       // enumerate HL native + every builder dex. Calls are serialized
       // through checkLimits — running them in parallel triggers 429.
-      const dexNames = await HyperliquidAssets.getInstance().listDexNames()
-      const targets: Array<string | undefined> = [undefined, ...dexNames]
+      // Only query HL native + dexes this wallet is active on (see
+      // HyperliquidDexActivity) instead of fanning out to every builder dex.
+      const activity = HyperliquidDexActivity.getInstance()
+      const allDexNames = await HyperliquidAssets.getInstance().listDexNames()
+      const plan = activity.plan(this._key, 'positions', allDexNames)
+      const targets: Array<string | undefined> = [undefined, ...plan.dexes]
       type StateOrNull = Awaited<
         ReturnType<typeof this.infoClient.clearinghouseState>
       > | null
       const states: StateOrNull[] = []
+      const seenActive = new Set<string>()
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       for (const dex of targets) {
-        timeProfile =
-          (await this.checkLimits('getClearinghouseState', 2, timeProfile)) ||
-          timeProfile
-        if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-          const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-          if (diff >= this.timeout) {
+        try {
+          const r = await this.fetchClearinghouseState(dex, timeProfile)
+          timeProfile = r.timeProfile
+          if (r.timedOut) {
             Logger.error(
-              `Hyperliquid Queue time is too long ${diff / 1000} futures_getPositions ${
+              `Hyperliquid Queue time is too long futures_getPositions ${
                 this.usdm ? 'usdm' : 'coinm'
               }`,
             )
             return this.returnBad(timeProfile)(new Error('Response timeout'))
           }
-        }
-        try {
-          const state = (await (dex
-            ? this.infoClient.clearinghouseState({ user: this._key, dex })
-            : this.infoClient.clearinghouseState({
-                user: this._key,
-              }))) as StateOrNull
-          states.push(state)
+          states.push(r.state as StateOrNull)
+          if (dex && hlStateHasActivity(r.state)) seenActive.add(dex)
         } catch (e) {
           Logger.error(
             `Hyperliquid clearinghouseState failed for ${dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
@@ -1654,6 +1923,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         }
       }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (plan.fullSweep) activity.observe(this._key, seenActive)
+      else for (const dex of seenActive) activity.markActive(this._key, dex)
 
       const data = states.flatMap((s) => s?.assetPositions ?? [])
       await Promise.all(

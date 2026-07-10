@@ -808,56 +808,97 @@ class HyperliquidDexActivity {
   private readonly adaptive = process.env.HL_DEX_FANOUT_ADAPTIVE !== '0'
   private readonly fullSweepMs = hlEnvInt('HL_DEX_FULL_SWEEP_MS', 60_000)
   private readonly activeTtlMs = hlEnvInt('HL_DEX_ACTIVE_TTL_MS', 5 * 60_000)
+  // Open-orders relies on the clearinghouse-driven discovery below and does NOT
+  // full-sweep every poll (its frontendOpenOrders call is weight 20 — the
+  // heaviest info draw). It keeps its OWN, much slower safety sweep purely to
+  // cover the one edge clearinghouse discovery can miss: a reduce-only resting
+  // order on a dex whose collateral has since dropped to ~0 (accountValue ~0 =>
+  // not "active"), plus bootstrap before the first discovery has run.
+  private readonly openSweepMs = hlEnvInt('HL_OPENORDERS_SWEEP_MS', 20 * 60_000)
 
   constructor() {
     // Emit the EFFECTIVE config once at first use so a deployed env tune is
     // verifiable from the logs (dotenv-loaded vars aren't visible via pm2 env).
     Logger.log(
-      `HL dex fan-out config: adaptive=${this.adaptive} fullSweepMs=${this.fullSweepMs} activeTtlMs=${this.activeTtlMs}`,
+      `HL dex fan-out config: adaptive=${this.adaptive} fullSweepMs=${this.fullSweepMs} activeTtlMs=${this.activeTtlMs} openSweepMs=${this.openSweepMs}`,
       'HyperliquidDexActivity',
     )
   }
 
-  /** wallet(lowercased) -> { active dex -> lastSeenMs; method -> lastFullSweepMs } */
+  /**
+   * wallet(lowercased) -> {
+   *   active:      dex -> lastSeenMs (shared across all 3 methods),
+   *   discoveryAt: last clearinghouse discovery sweep (balance+positions share it),
+   *   openSweepAt: last open-orders safety sweep,
+   * }
+   */
   private readonly perUser = new Map<
     string,
-    { active: Map<string, number>; sweepAt: Map<string, number> }
+    { active: Map<string, number>; discoveryAt: number; openSweepAt: number }
   >()
 
   private entry(user: string) {
     const key = `${user ?? ''}`.toLowerCase()
     let e = this.perUser.get(key)
     if (!e) {
-      e = { active: new Map(), sweepAt: new Map() }
+      e = { active: new Map(), discoveryAt: 0, openSweepAt: 0 }
       this.perUser.set(key, e)
     }
     return e
   }
 
-  /**
-   * Which builder dexes to query for this poll. HL native is always queried by
-   * the caller and is NOT included here. `fullSweep` is true when every dex is
-   * being returned, so the caller knows this pass rebuilds the active set.
-   */
-  plan(
-    user: string,
-    method: string,
+  private activeDexes(
+    e: { active: Map<string, number> },
     allDexes: string[],
-  ): { dexes: string[]; fullSweep: boolean } {
-    if (!this.adaptive) return { dexes: allDexes, fullSweep: true }
-    const now = Date.now()
-    const e = this.entry(user)
-    const last = e.sweepAt.get(method) ?? 0
-    if (now - last >= this.fullSweepMs) {
-      e.sweepAt.set(method, now)
-      return { dexes: allDexes, fullSweep: true }
-    }
+    now: number,
+  ): string[] {
     const listed = new Set(allDexes)
     const dexes: string[] = []
     for (const [dex, seen] of e.active) {
       if (listed.has(dex) && now - seen < this.activeTtlMs) dexes.push(dex)
     }
-    return { dexes, fullSweep: false }
+    return dexes
+  }
+
+  /**
+   * Discovery plan for the clearinghouseState methods (balance + positions).
+   * They SHARE one `discoveryAt` timer, so only the first of the two past the
+   * interval does the all-dex sweep that rebuilds the active set — the other
+   * (and every open-orders poll) rides that shared result. HL native is always
+   * queried by the caller and is not included here.
+   */
+  planClearinghouse(
+    user: string,
+    allDexes: string[],
+  ): { dexes: string[]; fullSweep: boolean } {
+    if (!this.adaptive) return { dexes: allDexes, fullSweep: true }
+    const now = Date.now()
+    const e = this.entry(user)
+    if (now - e.discoveryAt >= this.fullSweepMs) {
+      e.discoveryAt = now
+      return { dexes: allDexes, fullSweep: true }
+    }
+    return { dexes: this.activeDexes(e, allDexes, now), fullSweep: false }
+  }
+
+  /**
+   * Plan for open-orders: normally just the shared active set (no fan-out),
+   * with an occasional slow safety sweep (`openSweepMs`) to bootstrap and to
+   * catch the reduce-only-on-empty-dex edge. This removes ~3/4 of the weight-20
+   * open-orders sweeps versus sweeping every interval.
+   */
+  planOpenOrders(
+    user: string,
+    allDexes: string[],
+  ): { dexes: string[]; fullSweep: boolean } {
+    if (!this.adaptive) return { dexes: allDexes, fullSweep: true }
+    const now = Date.now()
+    const e = this.entry(user)
+    if (now - e.openSweepAt >= this.openSweepMs) {
+      e.openSweepAt = now
+      return { dexes: allDexes, fullSweep: true }
+    }
+    return { dexes: this.activeDexes(e, allDexes, now), fullSweep: false }
   }
 
   /** Record a single dex as active right now (e.g. on order placement). */
@@ -1338,7 +1379,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       // them loses no data while cutting the per-poll info-call fan-out that
       // drove the 429s.
       const activity = HyperliquidDexActivity.getInstance()
-      const plan = activity.plan(this._key, 'balance', allDexNames)
+      const plan = activity.planClearinghouse(this._key, allDexNames)
       type StateOrNull = Awaited<
         ReturnType<typeof this.infoClient.clearinghouseState>
       > | null
@@ -1825,7 +1866,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         : []
       const activity = HyperliquidDexActivity.getInstance()
       const plan = this.futures
-        ? activity.plan(this._key, 'openOrders', dexNames)
+        ? activity.planOpenOrders(this._key, dexNames)
         : { dexes: [] as string[], fullSweep: false }
       const targets: Array<string | undefined> = [undefined, ...plan.dexes]
       type OrdersResult = Awaited<
@@ -1978,7 +2019,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       // HyperliquidDexActivity) instead of fanning out to every builder dex.
       const activity = HyperliquidDexActivity.getInstance()
       const allDexNames = await HyperliquidAssets.getInstance().listDexNames()
-      const plan = activity.plan(this._key, 'positions', allDexNames)
+      const plan = activity.planClearinghouse(this._key, allDexNames)
       const targets: Array<string | undefined> = [undefined, ...plan.dexes]
       type StateOrNull = Awaited<
         ReturnType<typeof this.infoClient.clearinghouseState>

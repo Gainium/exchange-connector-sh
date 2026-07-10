@@ -292,6 +292,59 @@ class KrakenSymbolMapper {
   }
 }
 
+/**
+ * Process-wide cache of the last CONFIRMED Kraken Futures leverage-preference
+ * state, keyed by account + Kraken symbol.
+ *
+ * Kraken applies leverage/margin as a persistent per-symbol account setting, but
+ * the bot engine re-sends it (changeMarginType + changeLeverage, both of which hit
+ * `/derivatives/api/v3/leveragepreferences`) on every deal open. A multi-pair
+ * futures bot therefore sprays setLeverageSettings across many symbols in a short
+ * window and blows Kraken's rate budget -> HTTP 429 `apiLimitExceeded`, which also
+ * blocks the actual order that follows.
+ *
+ * Exchange instances are created fresh per HTTP request (see
+ * exchange.service.getExchange), so an instance field would never survive between
+ * calls — this MUST live at module scope to actually dedupe. We skip the API call
+ * when the desired state already matches the last confirmed one, and only ever
+ * write the cache on confirmed success. A TTL bounds staleness (e.g. if the user
+ * changes leverage on Kraken directly) so it self-heals.
+ */
+type KrakenLeveragePref = 'cross' | number // number => isolated maxLeverage
+const krakenLeveragePrefCache = new Map<
+  string,
+  { pref: KrakenLeveragePref; ts: number }
+>()
+const KRAKEN_LEVERAGE_PREF_TTL = 30 * 60 * 1000 // 30 min safety re-sync
+
+// djb2 hash so we key on the account without retaining raw API secrets in a
+// long-lived module map.
+function hashKrakenKey(key: string | undefined): string {
+  let h = 5381
+  const k = key ?? ''
+  for (let i = 0; i < k.length; i++) h = ((h << 5) + h + k.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}
+
+function krakenLeveragePrefKey(
+  apiKey: string | undefined,
+  krakenSymbol: string,
+): string {
+  return `${hashKrakenKey(apiKey)}:${krakenSymbol}`
+}
+
+function krakenLeveragePrefMatches(
+  cacheKey: string,
+  pref: KrakenLeveragePref,
+): boolean {
+  const cached = krakenLeveragePrefCache.get(cacheKey)
+  return (
+    !!cached &&
+    cached.pref === pref &&
+    Date.now() - cached.ts < KRAKEN_LEVERAGE_PREF_TTL
+  )
+}
+
 class KrakenExchange extends AbstractExchange implements Exchange {
   /** Kraken Spot client */
   protected spotClient?: SpotClient
@@ -346,6 +399,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     this.retry = 10
     this.retryErrors = [
       'EAPI:Rate limit exceeded',
+      // Kraken *Futures* returns a different rate-limit shape than spot:
+      // { result: 'error', error: 'apiLimitExceeded', httpStatus: 429 }. The spot
+      // string above never matches it, so futures 429s used to be thrown straight
+      // through (surfacing to users as an uncategorized `apiLimitExceeded`). Retry
+      // it with the same exponential backoff.
+      'apiLimitExceeded',
       'EService:Timeout',
       'EService:Unavailable',
       'EService:Busy',
@@ -2542,12 +2601,19 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       return this.errorClient(timeProfile)
     }
 
+    const krakenSymbol = await this.toKrakenSymbol(symbol)
+    const cacheKey = krakenLeveragePrefKey(this.key, krakenSymbol)
+
+    // Skip the (rate-limited) API call when the isolated leverage is already known
+    // to be set to this value. Don't spend a checkLimits token either.
+    if (krakenLeveragePrefMatches(cacheKey, leverage)) {
+      return this.returnGood<number>(timeProfile)(leverage)
+    }
+
     timeProfile =
       (await this.checkLimits('setLeveragePreference', symbol, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    const krakenSymbol = await this.toKrakenSymbol(symbol)
 
     return this.derivativesClient
       .setLeverageSettings({
@@ -2563,6 +2629,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           )
         }
 
+        krakenLeveragePrefCache.set(cacheKey, {
+          pref: leverage,
+          ts: Date.now(),
+        })
         return this.returnGood<number>(timeProfile)(leverage)
       })
       .catch(
@@ -2598,12 +2668,22 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       return this.errorClient(timeProfile)
     }
 
+    const krakenSymbol = await this.toKrakenSymbol(symbol)
+    const cacheKey = krakenLeveragePrefKey(this.key, krakenSymbol)
+    // Both changeMarginType and changeLeverage write the same leveragepreferences
+    // setting, so they share one cache entry. Isolated => the maxLeverage value;
+    // cross => the 'cross' sentinel (setLeverageSettings called without maxLeverage).
+    const desiredPref: KrakenLeveragePref =
+      margin === MarginType.ISOLATED ? leverage : 'cross'
+
+    if (krakenLeveragePrefMatches(cacheKey, desiredPref)) {
+      return this.returnGood<MarginType>(timeProfile)(margin)
+    }
+
     timeProfile =
       (await this.checkLimits('setLeverageSettings', symbol, timeProfile)) ||
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    const krakenSymbol = await this.toKrakenSymbol(symbol)
 
     return this.derivativesClient
       .setLeverageSettings({
@@ -2621,6 +2701,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           )
         }
 
+        krakenLeveragePrefCache.set(cacheKey, {
+          pref: desiredPref,
+          ts: Date.now(),
+        })
         return this.returnGood<MarginType>(timeProfile)(margin)
       })
       .catch(

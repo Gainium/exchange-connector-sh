@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.3] - 2026-07-10
+
+### Fixed
+
+- Kraken Futures rate-limit (`{error:"apiLimitExceeded", httpStatus:429}`) is now retried with backoff. The retry list only had spot's `EAPI:Rate limit exceeded`, so futures 429s were thrown straight through and surfaced to users as an uncategorized `apiLimitExceeded`.
+
+### Changed
+
+- `futures_changeLeverage` / `futures_changeMarginType` now dedupe redundant `setLeverageSettings` calls via a process-level cache of the last confirmed leverage-preference per (account, symbol). Multi-pair futures bots re-set leverage/margin on every deal open, spraying the `leveragepreferences` endpoint across pairs and self-inflicting the 429s above. Cache writes only on confirmed success; 30-min TTL self-heals external changes.
+
 ## [1.15.2] - 2026-07-07
 
 ### Fixed

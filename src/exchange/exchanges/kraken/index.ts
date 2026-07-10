@@ -688,6 +688,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     symbol: string
     clientOrderId?: string
     price?: number
+    avgPrice?: number
     origQty?: number
     executedQty?: number
     status: string
@@ -696,13 +697,28 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     updateTime?: number
     transactTime?: number
   }): CommonOrder {
+    // Kraken Futures order objects only expose the LIMIT price, so callers pass the
+    // real (size-weighted) average fill price as `avgPrice` for filled orders. Mirror
+    // the Binance-futures contract: `price` carries the fill price when known so
+    // downstream (deal entry/avg) records the actual execution, not the limit.
+    const avgPrice =
+      order.avgPrice && isFinite(order.avgPrice) ? order.avgPrice : undefined
+    // Give main-app the fill notional so its order-fill logic resolves the true
+    // average (quote/base) instead of the limit price on both the placement and
+    // poll/reconcile paths.
+    const cummulativeQuoteQty =
+      avgPrice && order.executedQty
+        ? (avgPrice * order.executedQty).toString()
+        : undefined
     const order2: CommonOrder = {
       symbol: order.symbol,
       orderId: order.orderId,
       clientOrderId: order.clientOrderId || '',
       transactTime: order.transactTime || Date.now(),
       updateTime: order.updateTime || Date.now(),
-      price: order.price?.toString() || '0',
+      price: (avgPrice ?? order.price)?.toString() || '0',
+      avgPrice: avgPrice?.toString() || '',
+      cummulativeQuoteQty,
       origQty: order.origQty?.toString() || '0',
       executedQty: order.executedQty?.toString() || '0',
       status: this.mapOrderStatus(order.status),
@@ -710,6 +726,44 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       side: order.side.toUpperCase() as OrderSideType,
     }
     return order2
+  }
+
+  /**
+   * Kraken Futures `getOrderStatus` / `getOrderEvents` responses only carry the
+   * order's LIMIT price, never its execution price — so a limit order that fills
+   * better than its limit would be recorded at the (worse) limit price, understating
+   * deal P/L. This fetches the account fills and returns the size-weighted average
+   * execution price for the given order. Returns null when no matching fills are
+   * found or on any error, so callers fall back to the limit price. Only call when
+   * the order has a non-zero filled quantity to avoid needless rate-limit spend.
+   */
+  private async futures_getAvgFillPrice(
+    orderId?: string,
+    clientOrderId?: string,
+  ): Promise<number | null> {
+    if (!this.derivativesClient || (!orderId && !clientOrderId)) return null
+    try {
+      const result = await this.derivativesClient.getFills()
+      if (result.result !== 'success' || !result.fills?.length) return null
+      const matches = result.fills.filter(
+        (f) =>
+          (clientOrderId && f.cliOrdId === clientOrderId) ||
+          (orderId && f.order_id === orderId),
+      )
+      if (!matches.length) return null
+      let notional = 0
+      let size = 0
+      for (const fill of matches) {
+        notional += fill.price * fill.size
+        size += fill.size
+      }
+      if (size <= 0) return null
+      return notional / size
+    } catch {
+      // getFills failed (e.g. transient 429) — fall back to the limit price rather
+      // than break order recording.
+      return null
+    }
   }
 
   /**
@@ -1168,12 +1222,20 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
           const orderInfo = result.orders[0]
           const order = orderInfo.order
+          const avgFillPrice =
+            (order.filled || 0) > 0
+              ? await this.futures_getAvgFillPrice(
+                  order.orderId,
+                  newClientOrderId,
+                )
+              : null
           return this.returnGood<CommonOrder>(timeProfile)(
             this.futures_convertOrder({
               orderId: order.orderId || '',
               symbol: await this.normalizeSymbol(order.symbol || symbol),
               clientOrderId: newClientOrderId,
               price: order.limitPrice,
+              avgPrice: avgFillPrice ?? undefined,
               origQty: order.quantity,
               executedQty: order.filled,
               status: orderInfo.status || 'NEW',
@@ -1241,12 +1303,20 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 }
               }
 
+              const avgFillPrice =
+                parseFloat(order.filled || '0') > 0
+                  ? await this.futures_getAvgFillPrice(
+                      order.uid,
+                      newClientOrderId,
+                    )
+                  : null
               return this.returnGood<CommonOrder>(timeProfile)(
                 this.futures_convertOrder({
                   orderId: order.uid || '',
                   symbol: await this.normalizeSymbol(order.tradeable || symbol),
                   clientOrderId: newClientOrderId,
                   price: parseFloat(order.limitPrice || '0'),
+                  avgPrice: avgFillPrice ?? undefined,
                   origQty: parseFloat(order.quantity || '0'),
                   executedQty: parseFloat(order.filled || '0'),
                   status: status,

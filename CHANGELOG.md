@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.4] - 2026-07-10
+
+### Fixed
+
+- Kraken Futures now records the **actual average fill price** instead of the limit price. `getOrderStatus`/`getOrderEvents` only expose an order's `limitPrice`, so a limit order that filled better than its limit (common for marketable base orders) was reported at the worse limit price — understating deal P/L (e.g. entry booked at 63528 when Kraken filled at 63264, showing +$1.52 net where the real result was ~+$2.79). `getOrder` now fetches `getFills` for filled orders, computes the size-weighted average execution price, and passes it through as `avgPrice` + `price` + `cummulativeQuoteQty` so main-app's fill logic resolves the true entry on both the placement and poll/reconcile paths. Falls back to the limit price when no fills match (or on a transient `getFills` error), so order recording never breaks.
+
 ## [1.15.3] - 2026-07-10
 
 ### Fixed

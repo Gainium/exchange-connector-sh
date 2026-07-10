@@ -809,6 +809,15 @@ class HyperliquidDexActivity {
   private readonly fullSweepMs = hlEnvInt('HL_DEX_FULL_SWEEP_MS', 60_000)
   private readonly activeTtlMs = hlEnvInt('HL_DEX_ACTIVE_TTL_MS', 5 * 60_000)
 
+  constructor() {
+    // Emit the EFFECTIVE config once at first use so a deployed env tune is
+    // verifiable from the logs (dotenv-loaded vars aren't visible via pm2 env).
+    Logger.log(
+      `HL dex fan-out config: adaptive=${this.adaptive} fullSweepMs=${this.fullSweepMs} activeTtlMs=${this.activeTtlMs}`,
+      'HyperliquidDexActivity',
+    )
+  }
+
   /** wallet(lowercased) -> { active dex -> lastSeenMs; method -> lastFullSweepMs } */
   private readonly perUser = new Map<
     string,
@@ -948,6 +957,15 @@ class HyperliquidChStateCache {
   private readonly ttlMs = hlEnvInt('HL_CH_STATE_CACHE_MS', 0)
   private readonly cache = new Map<string, { at: number; value: unknown }>()
   private readonly inflight = new Map<string, Promise<unknown>>()
+
+  constructor() {
+    Logger.log(
+      `HL clearinghouseState cache: ${
+        this.ttlMs > 0 ? `ON ttlMs=${this.ttlMs}` : 'OFF'
+      }`,
+      'HyperliquidChStateCache',
+    )
+  }
 
   get enabled(): boolean {
     return this.ttlMs > 0

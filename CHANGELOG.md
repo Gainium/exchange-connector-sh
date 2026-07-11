@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.6] - 2026-07-11
+
+### Fixed
+
+- Hyperliquid connection verification now rejects an **API/agent wallet address** entered in place of the main account address. HL signs orders with the agent key but executes them on the master account, while every info request (balance/positions/orders) targets the address stored on the connection — so an agent address verified "fine" (an empty balance is a valid response) yet left the bot blind to its own positions and fills: `unknownOid` on order read-back, deals frozen with no recorded entry, and (via base-order retries) doubled positions with no take-profit. `verifyHyperliquid` now calls HL `userRole` on the entered address and, when it resolves to `role: "agent"`, fails verification with a clear message naming the correct main account address to use.
+
+### Reverted
+
+- Reverted the 1.15.5 Hyperliquid numeric-`oid` fallback in `getOrder`. It was built on a misdiagnosis — the observed `unknownOid` reports were either transient cloid lag already handled by the existing retry, or (the real case) an agent address being queried, which no order-read fallback can fix. The fallback added latency on the failing path without resolving any real defect. `getOrder`/`openOrder` return to the 1.15.4 behaviour.
+
 ## [1.15.5] - 2026-07-11
 
 ### Fixed

@@ -1110,6 +1110,32 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.key as `0x${string}`
   }
 
+  /**
+   * Hyperliquid account role for this connection's address, per HL's own
+   * `userRole`. Used at verify time to catch the common onboarding mistake of
+   * pasting an **API/agent wallet** address in place of the main account:
+   * every info request (balance/positions/orders) must target the master, so
+   * an agent address silently returns empty and the bot never sees its own
+   * fills. Returns `{ role: 'unknown' }` on any lookup error so verification
+   * falls through to the existing balance check rather than hard-failing.
+   */
+  async getAccountRole(): Promise<{ role: string; master?: string }> {
+    try {
+      const r = await this.infoClient.userRole({ user: this._key })
+      return {
+        role: r.role,
+        master: r.role === 'agent' ? r.data.user : undefined,
+      }
+    } catch (e) {
+      Logger.warn(
+        `Hyperliquid userRole check failed for ${this._key}: ${
+          (e as Error)?.message ?? e
+        }`,
+      )
+      return { role: 'unknown' }
+    }
+  }
+
   private errorFutures(timeProfile: TimeProfile) {
     return this.returnBad(timeProfile)(new Error('Futures type missed'))
   }
@@ -1634,25 +1660,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             /* ignore — discovery hint only */
           }
         }
-        const status0 = result.response.data.statuses[0]
-        // HL hands back the authoritative numeric oid synchronously on
-        // placement (filled or resting). Keep it so getOrder can fall back to
-        // it when the cloid index lags and keeps returning unknownOid.
-        const placedOid =
-          'filled' in status0
-            ? status0.filled.oid
-            : 'resting' in status0
-              ? status0.resting.oid
-              : undefined
         const getOrderPayload = {
           symbol: order.symbol,
           newClientOrderId: order.newClientOrderId,
-          oid: placedOid,
         }
         if (order.type === 'MARKET') {
           await sleep(500)
         }
-        const price = 'filled' in status0 ? status0.filled.avgPx : `${order.price}`
+        const price =
+          'filled' in result.response.data.statuses[0]
+            ? result.response.data.statuses[0].filled.avgPx
+            : `${order.price}`
         try {
           return await this.getOrder(getOrderPayload, timeProfile, price, true)
         } catch (e) {
@@ -1675,12 +1693,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   }
 
   async getOrder(
-    data: { symbol: string; newClientOrderId: string; oid?: number },
+    data: { symbol: string; newClientOrderId: string },
     timeProfile = this.getEmptyTimeProfile(),
     price = '',
     useRetry = false,
     retryCount = 0,
-    useOid = false,
   ): Promise<BaseReturn<CommonOrder>> {
     timeProfile =
       (await this.checkLimits('getOrderStatus', 2, timeProfile)) || timeProfile
@@ -1699,10 +1716,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.infoClient
       .orderStatus({
         user: this._key,
-        oid:
-          useOid && data.oid !== undefined
-            ? data.oid
-            : (data.newClientOrderId as `0x${string}`),
+        oid: data.newClientOrderId as `0x${string}`,
       })
       .then(async (r: any) => {
         const result: OrderResponse = r
@@ -1720,18 +1734,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               price,
               useRetry,
               retryCount + 1,
-              useOid,
             )
-          }
-          // Cloid lookups can keep returning unknownOid even for an order HL
-          // actually accepted — its cloid→oid index lags under load. The place
-          // response already handed us the authoritative numeric oid, which
-          // resolves immediately; retry by oid before surfacing an error.
-          if (!useOid && data.oid !== undefined) {
-            Logger.warn(
-              `Hyperliquid cloid ${data.newClientOrderId} still unknownOid after retries; falling back to numeric oid ${data.oid}`,
-            )
-            return this.getOrder(data, timeProfile, price, true, 0, true)
           }
           return this.returnBad(timeProfile)(
             new HyperliquidError(result.status, 0),

@@ -253,6 +253,22 @@ const verifyHyperliquid = async (
     undefined,
     subaccount,
   )
+  // Guard against the common onboarding mistake of entering the Hyperliquid
+  // API/agent wallet address instead of the main account address. HL executes
+  // orders (signed by the agent key) on the master, but every info request
+  // targets the entered address — so an agent address verifies "fine" (empty
+  // balance is a valid response) while the bot is blind to its own positions
+  // and fills. Reject it with the correct address to use.
+  const roleInfo = await client.getAccountRole()
+  if (roleInfo.role === 'agent') {
+    return {
+      status: false,
+      reason:
+        `This is a Hyperliquid API wallet (agent) address, which is only used ` +
+        `for signing. Enter your main account's public address` +
+        `${roleInfo.master ? ` (${roleInfo.master})` : ''} instead.`,
+    }
+  }
   return await client
     .getBalance()
     .then((res) => ({

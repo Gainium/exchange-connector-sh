@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.5] - 2026-07-11
+
+### Fixed
+
+- Hyperliquid orders no longer surface a spurious `unknownOid` error for orders the exchange actually accepted. After placing an order, `getOrder` re-fetched it **by cloid** (`newClientOrderId`); under load HL's cloid→oid index lags, so `orderStatus` returned `unknownOid`, and once the retry window (~9.5s) was exhausted the error propagated to the bot even though the order had been placed (and often filled). The place response already returns HL's **authoritative numeric `oid`** synchronously — `openOrder` now captures it and `getOrder` falls back to querying by that oid (which resolves immediately) before giving up. Prior fixes only lengthened the cloid retry window; this removes the root cause.
+
 ## [1.15.4] - 2026-07-10
 
 ### Fixed

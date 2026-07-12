@@ -1078,19 +1078,29 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         // consistency lag for instantly-filled market orders.
         const txid = orderIds?.[0]
         if (txid) {
-          const fetched = await this.getSpotOrderByTxid(
-            txid,
-            symbol,
-            newClientOrderId || txid,
-            timeProfile,
-          )
-          if (fetched) {
-            return fetched
+          // QueryOrders can briefly lag right after submit, so a single miss
+          // does not mean the order failed — we hold its txid and the submit
+          // succeeded. Retry the exact lookup a few times before ever touching
+          // the userref path, which collides (all client ids → one userref) and
+          // would report a just-placed order as "not found" (false negative).
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const fetched = await this.getSpotOrderByTxid(
+              txid,
+              symbol,
+              newClientOrderId || txid,
+              timeProfile,
+            )
+            if (fetched) {
+              return fetched
+            }
+            await sleep(500)
           }
         }
-        // Fallback: legacy client-order-id (userref) lookup.
+        // Last resort: prefer the Kraken txid so getOrder() re-routes through
+        // the exact isKrakenSpotTxid() path; only fall back to the ambiguous
+        // client-order-id/userref lookup when no txid was returned at all.
         return await this.getOrder(
-          { symbol, newClientOrderId: newClientOrderId || txid || '' },
+          { symbol, newClientOrderId: txid || newClientOrderId || '' },
           timeProfile,
         )
       })

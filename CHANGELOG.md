@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.7] - 2026-07-12
+
+### Fixed
+
+- Kraken spot `submitOrder` no longer reports a just-placed order as "Order not found in open orders". After a successful submit we hold the order's txid, so the post-submit confirmation now retries the exact `getSpotOrderByTxid` (QueryOrders) lookup a few times to ride out Kraken's brief read-after-write lag before ever falling back to the ambiguous userref path — and the final fallback prefers the txid so `getOrder` re-routes through the exact `isKrakenSpotTxid` lookup. Previously a single QueryOrders miss dropped straight to the userref lookup, where every Gainium client id collapses to one shared userref (`parseInt(id.slice(0,8),16)` stops at the first non-hex char, e.g. all `CMB-*` → 12), so a live order could not be matched and combo/grid/dca placement surfaced a false failure.
+
 ## [1.15.6] - 2026-07-11
 
 ### Fixed

@@ -1993,7 +1993,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     countData?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
-    const maxSize = 200
+    // Bitget candle page caps differ by endpoint (verified against the live
+    // API docs): recent /spot/market/candles serves up to 1000 per call, but
+    // /spot/market/history-candles is hard-capped at 200. Paging recent reads
+    // at 1000 cuts request count — and the rate-limit "must sleep" churn it
+    // drives — by ~5x.
+    const recentMaxSize = 1000
+    const historicMaxSize = 200
     const granularity = this.convertInterval(interval) as SpotKlineInterval
     const step = timeIntervalMap[interval]
     const lookbackMs = this.getSpotIntervalLookbackMs(interval)
@@ -2017,7 +2023,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         .getSpotHistoricCandles({
           symbol,
           endTime: `${to}`,
-          limit: `${maxSize}`,
+          limit: `${historicMaxSize}`,
           granularity,
         })
         .then((result) => {
@@ -2060,7 +2066,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         const result = await this.client.getSpotCandles({
           symbol,
           //@ts-ignore
-          limit: maxSize,
+          limit: recentMaxSize,
           granularity,
         })
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -2095,12 +2101,22 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     // selecting recent vs historic endpoint per chunk based on `lookbackMs`.
     const allCandles: CandleResponse[] = []
     let cursor = from
-    const totalChunks = Math.max(1, Math.ceil((to - from) / (maxSize * step)))
+    // Size the safety cap off the smaller (historic) page so it never
+    // under-counts iterations when a range mixes recent + historic chunks.
+    const totalChunks = Math.max(
+      1,
+      Math.ceil((to - from) / (historicMaxSize * step)),
+    )
     // safety cap
     const hardLimit = totalChunks + 5
     for (let attempt = 0; attempt < hardLimit && cursor <= to; attempt++) {
-      const chunkEnd = Math.min(cursor + maxSize * step, to)
       const useRecent = Date.now() - cursor <= lookbackMs
+      // Stride each chunk by the page size of the endpoint it will use: a
+      // recent chunk advances 1000 bars, a historic chunk 200. Striding recent
+      // at 200 would waste 5x the calls; striding historic at 1000 would skip
+      // bars the 200-capped history endpoint can't return.
+      const size = useRecent ? recentMaxSize : historicMaxSize
+      const chunkEnd = Math.min(cursor + size * step, to)
 
       try {
         timeProfile =
@@ -2119,13 +2135,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
               //@ts-ignore
               endTime: chunkEnd,
               //@ts-ignore
-              limit: maxSize,
+              limit: recentMaxSize,
               granularity,
             })
           : await this.client.getSpotHistoricCandles({
               symbol,
               endTime: `${chunkEnd}`,
-              limit: `${maxSize}`,
+              limit: `${historicMaxSize}`,
               granularity,
             })
 

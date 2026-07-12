@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.8] - 2026-07-12
+
+### Changed
+
+- Bitget spot candle reads now page the recent `/spot/market/candles` endpoint at its documented max of 1000 candles/call (was 200), while `/spot/market/history-candles` stays correctly capped at 200. Each range read that stays inside the recent-lookback window now issues ~5x fewer upstream requests, which is the dominant driver of the `Bitget request must sleep` rate-limit churn in the connector fleet (getSpotCandles was the single largest source). Chunk striding in the mixed recent/historic path advances by the page size of the endpoint each chunk uses, so no bars are skipped. Futures candles are unchanged (they use the 200-capped history endpoint; raising them requires an endpoint switch, tracked separately).
+
 ## [1.15.7] - 2026-07-12
 
 ### Fixed

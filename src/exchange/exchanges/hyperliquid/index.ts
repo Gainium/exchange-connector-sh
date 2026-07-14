@@ -25,6 +25,7 @@ import {
 } from '../../types'
 import * as hl from '@nktkas/hyperliquid'
 import limitHelper from './limit'
+import { makeSharedNonce } from './nonce'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { IdMute, IdMutex } from '../../../utils/mutex'
@@ -1071,6 +1072,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       transport: new hl.HttpTransport({ isTestnet: this.demo }),
       wallet: this.secret as `0x${string}`,
       isTestnet: this.demo,
+      // Per-signer monotonic nonce shared across all in-process clients. The SDK
+      // default is per-client, but this connector builds a fresh client per
+      // request, so concurrent same-signer actions would otherwise collide on
+      // the same Date.now() nonce → "duplicate nonce". See ./nonce.ts.
+      nonceManager: makeSharedNonce(this.secret as string),
     })
     this.retry = 10
     this.retryErrors = ['429']
@@ -2864,7 +2870,13 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         msg.indexOf('timeout of 300000ms exceeded'.toLowerCase()) !== -1 ||
         msg.indexOf(restApiNotEnabled) !== -1 ||
         msg.indexOf(cannotCancel) !== -1 ||
-        msg.indexOf(unknownError) !== -1
+        msg.indexOf(unknownError) !== -1 ||
+        // Nonce collisions are pre-execution rejections (the action never ran),
+        // so re-signing with a fresh, higher nonce is safe and self-heals the
+        // "duplicate nonce" churn from concurrent same-signer requests across
+        // the connector fleet. See ./nonce.ts.
+        msg.indexOf('duplicate nonce') !== -1 ||
+        msg.indexOf('invalid nonce') !== -1
       ) {
         if (timeProfile.attempts < this.retry) {
           if (msg.indexOf(restApiNotEnabled) !== -1) {
@@ -3001,6 +3013,15 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               `Hyperliquid Cannot cancel order wait 10s ${timeProfile.attempts}`,
             )
             await sleep(10000)
+          }
+          if (
+            msg.indexOf('duplicate nonce') !== -1 ||
+            msg.indexOf('invalid nonce') !== -1
+          ) {
+            Logger.warn(
+              `Hyperliquid nonce collision, re-sign wait 0.2s ${timeProfile.attempts} ${cb.name} ${this.key}`,
+            )
+            await sleep(200)
           }
           timeProfile.attempts++
           args.splice(args.length - 1, 1, timeProfile)

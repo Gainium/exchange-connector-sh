@@ -409,6 +409,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       'EService:Unavailable',
       'EService:Busy',
       'EGeneral:Temporary lockout',
+      // Nonce collisions (spot `EAPI:Invalid nonce`; futures lowercase
+      // `invalid nonce` / `duplicate nonce`) are pre-execution rejections — the
+      // order/cancel never reached the matching engine — so re-signing with a
+      // fresh, higher nonce is safe. Combo-bot Kraken legs hit this the same way
+      // Hyperliquid does; retry self-heals it instead of alerting the user.
+      'EAPI:Invalid nonce',
+      'invalid nonce',
+      'duplicate nonce',
       '500',
       '502',
       '503',

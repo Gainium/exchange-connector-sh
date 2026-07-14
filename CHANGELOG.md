@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.15.8] - 2026-07-12
+## [1.15.9] - 2026-07-14
+
+### Fixed
+
+- Hyperliquid signed actions no longer fail with `invalid nonce: duplicate nonce` under concurrent same-signer requests. The connector builds a fresh `ExchangeClient` per request, so the SDK's per-client nonce counter never spanned concurrent requests — two actions in the same millisecond emitted an identical `Date.now()` nonce (worst in cancel-heavy DCA/grid rebalances, which fire many single-order cancels back to back). A per-signer monotonic nonce is now shared across all in-process clients, and nonce collisions are added to the retry set for both Hyperliquid and Kraken (combo-bot Kraken legs hit the same class via `EAPI:Invalid nonce`). Nonce rejections are pre-execution, so re-signing with a fresh, higher nonce is safe and cannot double-place or double-cancel. This removes the transient, self-recovering `botError` alerts users were getting for it.
 
 ### Changed
 

@@ -248,6 +248,11 @@ class KrakenSymbolMapper {
    * @returns Symbol in Kraken format (e.g., "XXBTZUSD")
    */
   async toKrakenSymbol(ourSymbol: string): Promise<string> {
+    // Defensive: an undefined/empty symbol used to reach `.replace()` below and
+    // throw a bare TypeError that got mislabeled as a "Kraken API error".
+    if (!ourSymbol) {
+      return ''
+    }
     if (!this.isInitialized) {
       return await new Promise((resolve) => {
         setTimeout(() => {
@@ -269,6 +274,10 @@ class KrakenSymbolMapper {
    * @returns Symbol in our format (e.g., "BTC-USDT")
    */
   async toOurSymbol(krakenSymbol: string): Promise<string> {
+    // Defensive: guard the `.replace()` below against undefined/empty input.
+    if (!krakenSymbol) {
+      return ''
+    }
     if (!this.isInitialized) {
       return await new Promise((resolve) => {
         setTimeout(() => {
@@ -510,10 +519,26 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         errorDetails = { message: e.message, httpStatus }
       }
 
+      // Distinguish genuine Kraken API rejections from our own JS bugs. A bare
+      // TypeError/ReferenceError etc. (no error body/response) is a connector
+      // code fault, not something Kraken rejected — logging it as a "Kraken API
+      // error" hides it among real exchange rejections.
+      const isJsError =
+        !errorBody &&
+        !errorResponse?.data &&
+        (e instanceof TypeError ||
+          e instanceof ReferenceError ||
+          e instanceof RangeError ||
+          e instanceof SyntaxError)
+
       // Log comprehensive error information including request details
       Logger.error(
-        `[${httpStatus || 'NO_STATUS'}] Kraken API error: ${actualError}`,
-        `Details: ${JSON.stringify(errorDetails)}, ${cb.name} called with params: ${JSON.stringify(requestParams)}`,
+        isJsError
+          ? `[${httpStatus || 'NO_STATUS'}] Kraken connector error (${e.name}): ${actualError}`
+          : `[${httpStatus || 'NO_STATUS'}] Kraken API error: ${actualError}`,
+        `Details: ${JSON.stringify(errorDetails)}, ${cb.name} called with params: ${JSON.stringify(requestParams)}${
+          isJsError ? `, stack: ${e.stack}` : ''
+        }`,
       )
 
       // Check if error is retryable
@@ -1620,17 +1645,17 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   async getAllOpenOrders(
-    symbol: string,
+    symbol?: string,
     returnOrders?: false,
     timeProfile?: TimeProfile,
   ): Promise<BaseReturn<number>>
   async getAllOpenOrders(
-    symbol: string,
+    symbol: string | undefined,
     returnOrders: true,
     timeProfile?: TimeProfile,
   ): Promise<BaseReturn<CommonOrder[]>>
   async getAllOpenOrders(
-    symbol: string,
+    symbol?: string,
     returnOrders: boolean = false,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number> | BaseReturn<CommonOrder[]>> {
@@ -1661,10 +1686,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             )
           }
 
-          const krakenSymbol = await this.toKrakenSymbol(symbol)
-          const filteredOrders = result.openOrders.filter(
-            (o) => o.symbol === krakenSymbol,
-          )
+          // No symbol => return ALL open orders (matches the connector-family
+          // contract, e.g. Binance). Only map+filter when a symbol is given;
+          // calling toKrakenSymbol(undefined) used to crash in the mapper.
+          const krakenSymbol = symbol
+            ? await this.toKrakenSymbol(symbol)
+            : undefined
+          const filteredOrders = krakenSymbol
+            ? result.openOrders.filter((o) => o.symbol === krakenSymbol)
+            : result.openOrders
 
           if (!returnOrders) {
             return this.returnGood<number>(timeProfile)(filteredOrders.length)
@@ -1676,7 +1706,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               this.futures_convertOrder({
                 orderId: order.order_id || '',
                 symbol: await this.normalizeSymbol(
-                  order.symbol || krakenSymbol,
+                  order.symbol || krakenSymbol || '',
                 ),
                 clientOrderId: order.cliOrdId || '',
                 price: order.limitPrice,
@@ -1718,10 +1748,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
 
         const orders = result.result.open || {}
-        const krakenSymbol = await this.toKrakenSymbol(symbol)
-        const filteredOrders = Object.entries(orders).filter(
-          ([_, order]) => order.descr?.pair === krakenSymbol,
-        )
+        // No symbol => return ALL open orders (connector-family contract).
+        const krakenSymbol = symbol
+          ? await this.toKrakenSymbol(symbol)
+          : undefined
+        const filteredOrders = krakenSymbol
+          ? Object.entries(orders).filter(
+              ([_, order]) => order.descr?.pair === krakenSymbol,
+            )
+          : Object.entries(orders)
 
         if (!returnOrders) {
           return this.returnGood<number>(timeProfile)(filteredOrders.length)
@@ -1732,7 +1767,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           commonOrders.push(
             this.convertOrder({
               orderId,
-              symbol: await this.normalizeSymbol(order.descr?.pair || symbol),
+              symbol: await this.normalizeSymbol(
+                order.descr?.pair || symbol || '',
+              ),
               clientOrderId: order.userref?.toString() || '',
               price: order.descr?.price || '0',
               origQty: order.vol || '0',

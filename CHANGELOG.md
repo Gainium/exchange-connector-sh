@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.10] - 2026-07-14
+
+### Fixed
+
+- Kraken `getAllOpenOrders` no longer throws `Cannot read properties of undefined (reading 'replace')` when called without a symbol. Every other connector treats `getAllOpenOrders(symbol?)` as "all open orders for the account" when the symbol is omitted (e.g. the fill-failsafe reconciliation path calls it with no symbol), and the connector's own HTTP layer declares `symbol` optional — but the Kraken implementation required it and unconditionally ran `toKrakenSymbol(symbol)`, so an undefined symbol reached `String.prototype.replace` in the symbol mapper and crashed. The crash was caught by `handleKrakenErrors` and returned as an error result, so Kraken open-order polling **failed silently** for affected accounts (bot could not see its open orders → risk of missed/duplicate order logic) rather than crash-looping. Kraken now honors the connector-family contract: with no symbol it returns all open orders (skips the per-symbol filter), and only maps+filters when a symbol is given. Both spot and futures branches are fixed.
+
+### Changed
+
+- `KrakenSymbolMapper.toKrakenSymbol` / `toOurSymbol` now return `''` for undefined/empty input instead of throwing on `.replace()` — a defensive guard for the mapper's ~30 call sites (widest-blast-radius `core/` code).
+- `handleKrakenErrors` now distinguishes connector-side JS faults (`TypeError`/`ReferenceError`/`RangeError`/`SyntaxError` with no error body/response) from genuine Kraken API rejections: they log as `Kraken connector error (<name>)` with a stack instead of masquerading as `Kraken API error`, so log-triage can tell a code bug from an exchange rejection.
+
 ## [1.15.9] - 2026-07-14
 
 ### Fixed

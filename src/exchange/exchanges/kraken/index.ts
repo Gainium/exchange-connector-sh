@@ -560,6 +560,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       const isRateLimit = ['EAPI:Rate limit exceeded', 'apiLimitExceeded'].some(
         (code) => actualError.includes(code) || e.message.includes(code),
       )
+      // Adaptive tier: a real rate-limit rejection means this account's true
+      // Kraken budget is tighter than we assumed — drop it to Starter for a
+      // cooldown window (no-op unless per-account limits are enabled).
+      if (isRateLimit) {
+        limitHelper.noteRateLimited(hashKrakenKey(this.key))
+      }
       const maxAttempts = isRateLimit ? 3 : this.retry
 
       if (shouldRetry && timeProfile.attempts < maxAttempts) {
@@ -600,6 +606,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       timeProfile = this.startProfilerTime(timeProfile, 'queue')
     }
 
+    // Per-account budget key: hash of this connection's API key (never the key
+    // itself). No-op unless KRAKEN_PER_ACCOUNT_LIMITS is on, in which case the
+    // limiter tracks each account's Kraken budget separately — correct only
+    // because the balancer routes an account's private calls to one connector
+    // instance (KRAKEN_STICKY_ROUTING). With the flag off this is ignored and
+    // the legacy global counter is used.
+    const accountKey = hashKrakenKey(this.key)
+
     let waitTime = 0
     if (isOrderMethod && symbol) {
       const orderType =
@@ -608,9 +622,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           : method === 'cancelOrder'
             ? 'cancel'
             : 'amend'
-      waitTime = await limitHelper.addOrderCall(symbol, orderType)
+      waitTime = await limitHelper.addOrderCall(symbol, orderType, accountKey)
     } else {
-      waitTime = await limitHelper.addRestCall(isHeavyMethod)
+      waitTime = await limitHelper.addRestCall(isHeavyMethod, accountKey)
     }
 
     if (waitTime > 0) {
@@ -1976,7 +1990,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               }
             }
           } catch (error) {
-            Logger.warn(`Failed to get Kraken tokenized prices: ${error.message}`)
+            Logger.warn(
+              `Failed to get Kraken tokenized prices: ${error.message}`,
+            )
           }
         }
 
@@ -2487,7 +2503,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .getCandles({
         pair: await this.toKrakenSymbol(symbol),
         interval: intervalMinutes as
-          1 | 5 | 15 | 30 | 60 | 240 | 1440 | 10080 | 21600,
+          | 1
+          | 5
+          | 15
+          | 30
+          | 60
+          | 240
+          | 1440
+          | 10080
+          | 21600,
         since: from ? Math.floor(from / 1000) : undefined,
         ...this.xstockParams(symbol),
       })

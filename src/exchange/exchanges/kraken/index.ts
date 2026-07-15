@@ -549,13 +549,25 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           (httpStatus && String(httpStatus).includes(code)),
       )
 
-      if (shouldRetry && timeProfile.attempts < this.retry) {
-        const waitTime = Math.min(
-          1000 * Math.pow(2, timeProfile.attempts),
-          10000,
-        )
+      // Rate-limit rejections are the one retryable class where fast, deep
+      // retry is counterproductive: every attempt re-costs Kraken's
+      // per-account counter (decay only ~0.33–0.5/s), so 10 retries capped at
+      // 10s apart amplify a saturation storm instead of riding it out
+      // (2026-07-14: ~2.3k logged rate-limit errors fleet-wide in 4h, most of
+      // them retry attempts). Give these fewer, slower attempts sized to the
+      // counter decay; each retry still re-enters checkLimits, so the local
+      // budget accounting is preserved.
+      const isRateLimit = ['EAPI:Rate limit exceeded', 'apiLimitExceeded'].some(
+        (code) => actualError.includes(code) || e.message.includes(code),
+      )
+      const maxAttempts = isRateLimit ? 3 : this.retry
+
+      if (shouldRetry && timeProfile.attempts < maxAttempts) {
+        const waitTime = isRateLimit
+          ? 30000
+          : Math.min(1000 * Math.pow(2, timeProfile.attempts), 10000)
         Logger.warn(
-          `Retrying after ${waitTime}ms (attempt ${timeProfile.attempts + 1}/${this.retry})`,
+          `Retrying after ${waitTime}ms (attempt ${timeProfile.attempts + 1}/${maxAttempts})`,
         )
         await sleep(waitTime)
 

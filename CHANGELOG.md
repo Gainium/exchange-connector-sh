@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.11] - 2026-07-15
+
+### Changed
+
+- **Kraken: rate-limit rejections now retry 3x with 30s spacing instead of 10x with <=10s backoff.** `EAPI:Rate limit exceeded` / `apiLimitExceeded` shared the generic retry policy (10 attempts, exponential backoff capped at 10s), so under sustained per-account saturation every throttled call spawned up to 10 more requests while Kraken's counter only decays at ~0.33-0.5/s -- amplifying the storm (2026-07-14: ~2.3k logged rate-limit errors fleet-wide in 4h). Rate-limit-class errors now get at most 3 attempts spaced 30s apart (sized to the counter decay); all other retryable errors keep the existing policy. Retries still re-enter `checkLimits`, preserving local budget accounting.
+
 ## [1.15.10] - 2026-07-14
 
 ### Fixed

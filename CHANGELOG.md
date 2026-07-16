@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-07-16
+
+### Fixed
+
+- **Hyperliquid: a persistent `clearinghouseState` 429 no longer crashes the whole connector process.** When the short-TTL clearinghouseState cache is enabled (`HL_CH_STATE_CACHE_MS>0`, set to `1500` in prod), `HyperliquidChStateCache.track()` registered the in-flight fetch with `void p.finally(cleanup)`. `.finally()` returns a *new* promise that re-raises `p`'s rejection; that derived chain had no `.catch()`, so although the primary consumer (`await run` in `fetchClearinghouseState`, caught by the balance/positions fan-out) handled the error, the floating finally-chain surfaced it as an **unhandled rejection** — which Node ≥15 turns into a process exit. A sustained Hyperliquid rate-limit therefore killed the connector (pm2 auto-restarted it), cascading into main-app `balance … hyperliquidLinear` Internal Server Errors, `[Funding] NOTOK`, and market-archive backfill failures for that venue. The retry/backoff added in 1.15.x did not prevent this: it fires *before* the final rejection, and the crash came from the exhausted-retry rejection escaping via the un-caught finally-chain. `track()` now swallows the finally-chain rejection (`.finally(cleanup).catch(() => {})`); the real error is still handled by the awaiting consumer. Bug only manifests with the cache enabled (prod), which is why it never reproduced in local dev (cache defaults OFF).
+
 ## [1.15.11] - 2026-07-15
 
 ### Changed

@@ -1030,9 +1030,16 @@ class HyperliquidChStateCache {
   track(key: string, p: Promise<unknown>): void {
     if (!this.enabled) return
     this.inflight.set(key, p)
-    void p.finally(() => {
-      if (this.inflight.get(key) === p) this.inflight.delete(key)
-    })
+    // `.finally()` returns a promise that RE-RAISES p's rejection; the primary
+    // consumer (`await run` / `await flight`) already handles that error, so this
+    // derived chain must swallow it. Without the trailing `.catch()` a persistent
+    // 429 on clearinghouseState surfaced as an unhandled rejection here and killed
+    // the whole connector process (Node ≥15 exits on unhandledRejection).
+    void p
+      .finally(() => {
+        if (this.inflight.get(key) === p) this.inflight.delete(key)
+      })
+      .catch(() => {})
   }
 }
 

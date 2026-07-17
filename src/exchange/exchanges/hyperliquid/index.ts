@@ -1043,6 +1043,123 @@ class HyperliquidChStateCache {
   }
 }
 
+/**
+ * Short-TTL cache + in-flight coalescing for `getAllPrices` (Hyperliquid
+ * `allMids`).
+ *
+ * `getAllPrices` fans out ONE `allMids` info call per dex (HL native + every
+ * HIP-3 builder dex — currently ~10 and growing), serialized through the shared
+ * per-IP rate budget. It is called by `latestPrice` (once per single-symbol
+ * price lookup), `getExchangeInfo`, and both `*_getAllExchangeInfo` paths, so
+ * many callers overlap in time and each re-runs the full fan-out. Under load
+ * that is the dominant driver of Hyperliquid's per-IP `429` throttling of our
+ * info calls.
+ *
+ * Mids are GLOBAL market data (identical for every user on the process), so a
+ * single result can be shared:
+ *   - `inFlight` coalescing collapses a burst of concurrent callers onto ONE
+ *     fan-out instead of N (this is the biggest win — it kills the 429 burst a
+ *     herd of `latestPrice` calls would otherwise cause on a cold cache), and
+ *   - a `ttlMs` fresh window lets later callers reuse the last result instead of
+ *     re-fetching.
+ * Only the caller that actually issues the fan-out consumes rate-limit weight;
+ * coalesced/cached callers issue no info calls, so the throttle sees fewer
+ * requests. Correctness is unchanged: the SAME set of dexes is still covered
+ * (unlike per-dex active-dex scoping, which would starve `getAllExchangeInfo`
+ * of pairs on idle dexes) — only the call FREQUENCY drops.
+ *
+ * OFF by default (self-hosted) — set `HL_ALLMIDS_CACHE_MS` to a small value
+ * (1000-2000) to enable on prod. `HL_ALLMIDS_STALE_MS` (default 0) optionally
+ * extends the window during which a previously-good result is served if a fresh
+ * fetch hard-fails (e.g. a 429 burst), hiding the throttle from users at the
+ * cost of extra staleness; 0 disables stale-serving.
+ *
+ * Keyed per (network, market) because spot and futures instances filter the
+ * same raw mids differently. Entries are trivially small (one price array).
+ *
+ * IMPORTANT (bug #93): every derived promise chain here terminates in
+ * `.catch(() => {})` so a rejected fetch can never surface as an unhandled
+ * rejection and kill the connector process — the same failure mode that took
+ * down the connector via `HyperliquidChStateCache`.
+ */
+class HyperliquidMidsCache {
+  private static instance: HyperliquidMidsCache
+  static getInstance(): HyperliquidMidsCache {
+    if (!HyperliquidMidsCache.instance) {
+      HyperliquidMidsCache.instance = new HyperliquidMidsCache()
+    }
+    return HyperliquidMidsCache.instance
+  }
+
+  private readonly ttlMs = hlEnvInt('HL_ALLMIDS_CACHE_MS', 0)
+  private readonly staleMs = hlEnvInt('HL_ALLMIDS_STALE_MS', 0)
+  private readonly cache = new Map<
+    string,
+    { at: number; value: AllPricesResponse[] }
+  >()
+  private readonly inflight = new Map<string, Promise<AllPricesResponse[]>>()
+
+  constructor() {
+    Logger.log(
+      `HL allMids cache: ${
+        this.ttlMs > 0
+          ? `ON ttlMs=${this.ttlMs} staleMs=${this.staleMs}`
+          : 'OFF'
+      }`,
+      'HyperliquidMidsCache',
+    )
+  }
+
+  get enabled(): boolean {
+    return this.ttlMs > 0
+  }
+
+  /** Fresh cached value (within `ttlMs`), or undefined if disabled/absent/expired. */
+  peekFresh(key: string): AllPricesResponse[] | undefined {
+    if (!this.enabled) return undefined
+    const hit = this.cache.get(key)
+    if (hit && Date.now() - hit.at < this.ttlMs) return hit.value
+    return undefined
+  }
+
+  /**
+   * Last value still within `ttlMs + staleMs` — used ONLY as a fallback when a
+   * fresh fetch hard-fails. Returns undefined when stale-serving is disabled
+   * (`staleMs === 0`) or the value has aged out of the stale window.
+   */
+  peekStale(key: string): AllPricesResponse[] | undefined {
+    if (!this.enabled || this.staleMs <= 0) return undefined
+    const hit = this.cache.get(key)
+    if (hit && Date.now() - hit.at < this.ttlMs + this.staleMs) return hit.value
+    if (hit) this.cache.delete(key)
+    return undefined
+  }
+
+  set(key: string, value: AllPricesResponse[]): void {
+    if (this.enabled) this.cache.set(key, { at: Date.now(), value })
+  }
+
+  inFlight(key: string): Promise<AllPricesResponse[]> | undefined {
+    return this.enabled ? this.inflight.get(key) : undefined
+  }
+
+  /**
+   * Register the in-flight fan-out so concurrent callers coalesce onto it, and
+   * record its result in the cache on success. Both derived chains end in
+   * `.catch(() => {})`; the primary consumer (`await flight`) handles the error.
+   */
+  track(key: string, p: Promise<AllPricesResponse[]>): void {
+    if (!this.enabled) return
+    this.inflight.set(key, p)
+    void p
+      .finally(() => {
+        if (this.inflight.get(key) === p) this.inflight.delete(key)
+      })
+      .catch(() => {})
+    void p.then((v) => this.set(key, v)).catch(() => {})
+  }
+}
+
 class HyperliquidExchange extends AbstractExchange implements Exchange {
   static FUTURES_BUILDER_FEE = 0.00045
   static SPOT_BUILDER_FEE = 0.0007
@@ -2166,8 +2283,28 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   async getAllPrices(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
-    const res: AllPricesResponse[] = []
-    try {
+    // Mids are global market data, so a short-TTL cache + in-flight coalescing
+    // lets a burst of overlapping callers (latestPrice per symbol,
+    // getExchangeInfo, *_getAllExchangeInfo) reuse ONE dex fan-out instead of
+    // each re-running it — cutting the per-IP info-call rate that drives HL's
+    // 429 throttling. OFF by default (HL_ALLMIDS_CACHE_MS=0); behaviour with
+    // the cache disabled is identical to the pre-cache code path below.
+    const cache = HyperliquidMidsCache.getInstance()
+    const cacheKey = `${this.demo ? 'testnet' : 'mainnet'}:${
+      this.futures ? 'futures' : 'spot'
+    }`
+    const QUEUE_TIMEOUT = '__HL_ALLMIDS_QUEUE_TIMEOUT__'
+
+    if (cache.enabled) {
+      const fresh = cache.peekFresh(cacheKey)
+      if (fresh) return this.returnGood<AllPricesResponse[]>(timeProfile)(fresh)
+    }
+
+    // Runs the full fan-out and returns the FINAL, filtered price array
+    // (identical to the uncached result); throws on hard failure. Only one of
+    // these executes for a burst of concurrent callers when caching is on.
+    const compute = async (): Promise<AllPricesResponse[]> => {
+      const res: AllPricesResponse[] = []
       // Default allMids() returns HL native (perp + spot). For builder dexes
       // we have to call once per dex with { dex: name }. Calls are
       // serialized through checkLimits — running them in parallel triggers
@@ -2189,7 +2326,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
                 this.usdm ? 'usdm' : 'coinm'
               }`,
             )
-            return this.returnBad(timeProfile)(new Error('Response timeout'))
+            throw new Error(QUEUE_TIMEOUT)
           }
         }
         try {
@@ -2221,16 +2358,46 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           }),
         ),
       )
+      return res.filter((p) => !p.pair.startsWith('@'))
+    }
+
+    try {
+      let data: AllPricesResponse[]
+      if (cache.enabled) {
+        let flight = cache.inFlight(cacheKey)
+        if (!flight) {
+          flight = compute()
+          // track() records the result on success and always terminates its
+          // derived chains with .catch(() => {}) — a rejected fan-out cannot
+          // become an unhandled rejection (bug #93).
+          cache.track(cacheKey, flight)
+        }
+        data = await flight
+      } else {
+        data = await compute()
+      }
+      return this.returnGood<AllPricesResponse[]>(timeProfile)(data)
     } catch (e) {
+      // Under a 429 burst, optionally keep serving the last good mids
+      // (HL_ALLMIDS_STALE_MS) so users don't see degraded prices; no-op when
+      // stale-serving is disabled.
+      const stale = cache.peekStale(cacheKey)
+      if (stale) {
+        Logger.warn(
+          `Hyperliquid allMids fetch failed (${
+            (e as Error)?.message ?? e
+          }); serving stale mids`,
+        )
+        return this.returnGood<AllPricesResponse[]>(timeProfile)(stale)
+      }
+      if ((e as Error)?.message === QUEUE_TIMEOUT) {
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
       return this.handleHyperliquidErrors(
         this.getAllPrices,
         this.endProfilerTime(timeProfile, 'exchange'),
       )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
     }
-
-    return this.returnGood<AllPricesResponse[]>(timeProfile)(
-      res.filter((p) => !p.pair.startsWith('@')),
-    )
   }
 
   async futures_changeMarginType(

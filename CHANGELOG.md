@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.3] - 2026-07-18
+
+### Fixed
+
+- **Kraken Futures: a partially- or fully-filled resting order is no longer reported as `NEW`, which was causing the bot to re-buy the same size at the same price (forum #4924).** Kraken Futures reports a resting order with a raw status of `ENTERED_BOOK` / `partiallyFilled` / `untouched` even when `filled > 0`. `getOrderStatus` (primary) and `getAllOpenOrders` passed that raw status straight into `mapOrderStatus`, which lacked the Futures statuses (only spot `"partially filled"` with a space existed) so everything fell through to `NEW`. main-app keys off `PARTIALLY_FILLED`/`FILLED`, so the fill was never recorded and the bot opened the position again. Both futures paths now derive the status from `executedQty` vs `origQty` via a new `futures_deriveOrderStatus` helper (mirroring the `getOrderEvents` fallback: a terminal cancel/reject wins, otherwise fill-derived), and `mapOrderStatus` gained the Futures raw statuses plus an idempotent `PARTIALLY_FILLED` mapping so a derived status survives the re-map in `futures_convertOrder`. Unit repro: `src/exchange/exchanges/kraken/partial-fill.spec.ts` (10 assertions).
+
 ## [1.16.1] - 2026-07-16
 
 ### Fixed

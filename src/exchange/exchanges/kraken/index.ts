@@ -680,9 +680,43 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       'partially filled': 'PARTIALLY_FILLED',
       FULLY_EXECUTED: 'FILLED',
       REJECTED: 'CANCELED',
+      // Kraken Futures raw statuses (getOrderStatus / getOpenOrders) — without
+      // these a resting-but-(partially)filled order fell through to NEW (#4924).
+      entered_book: 'NEW',
+      untouched: 'NEW',
+      partiallyfilled: 'PARTIALLY_FILLED',
+      fullyexecuted: 'FILLED',
+      // Idempotent on our own canonical value so a status we derived from fills
+      // survives the re-map inside futures_convertOrder (also repairs the
+      // getOrderEvents fallback, which already passes PARTIALLY_FILLED here).
+      partially_filled: 'PARTIALLY_FILLED',
     }
 
     return statusMap[status.toLowerCase()] || statusMap[status] || 'NEW'
+  }
+
+  /**
+   * Derive the canonical status of a Kraken Futures order from its fill amounts.
+   * Kraken reports a resting order that is partially or fully filled with a raw
+   * status of ENTERED_BOOK / partiallyFilled / untouched (getOrderStatus &
+   * getOpenOrders), so the raw status alone never yields PARTIALLY_FILLED/FILLED
+   * — main-app then keys off status, misses the fill and re-buys the same size
+   * (forum #4924). Mirror the getOrderEvents path: a terminal cancel/reject
+   * wins, otherwise derive from executed vs original quantity.
+   */
+  private futures_deriveOrderStatus(
+    rawStatus: string,
+    executedQty: number,
+    origQty: number,
+  ): OrderStatusType {
+    const mapped = this.mapOrderStatus(rawStatus)
+    if (mapped === 'CANCELED') return 'CANCELED'
+    if (executedQty > 0) {
+      return executedQty >= origQty && origQty > 0
+        ? 'FILLED'
+        : 'PARTIALLY_FILLED'
+    }
+    return mapped
   }
 
   /**
@@ -1307,7 +1341,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               avgPrice: avgFillPrice ?? undefined,
               origQty: order.quantity,
               executedQty: order.filled,
-              status: orderInfo.status || 'NEW',
+              status: this.futures_deriveOrderStatus(
+                orderInfo.status || 'NEW',
+                order.filled || 0,
+                order.quantity || 0,
+              ),
               type: order.type || 'lmt',
               side: order.side || 'buy',
             }),
@@ -1728,6 +1766,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
           const commonOrders: CommonOrder[] = []
           for (const order of filteredOrders) {
+            const origQty = order.filledSize + (order.unfilledSize || 0)
             commonOrders.push(
               this.futures_convertOrder({
                 orderId: order.order_id || '',
@@ -1736,9 +1775,13 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 ),
                 clientOrderId: order.cliOrdId || '',
                 price: order.limitPrice,
-                origQty: order.filledSize + (order.unfilledSize || 0),
+                origQty,
                 executedQty: order.filledSize,
-                status: order.status || 'NEW',
+                status: this.futures_deriveOrderStatus(
+                  order.status || 'NEW',
+                  order.filledSize,
+                  origQty,
+                ),
                 type: order.orderType || 'lmt',
                 side: order.side || 'buy',
               }),

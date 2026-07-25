@@ -2469,7 +2469,9 @@ class KucoinExchange extends AbstractExchange implements Exchange {
               .filter(
                 (r) => r.fundingTime >= fromTime && r.fundingTime <= toTime,
               )
-              .slice(0, limit),
+              // See the Hyperliquid note: an omitted `limit` reaches here as
+              // `null`, and `slice(0, null)` empties the result.
+              .slice(0, limit ?? undefined),
           )
         }
         return this.handleKucoinErrors(

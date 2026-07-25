@@ -3275,7 +3275,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               fundingRate: parseFloat(r.fundingRate),
               fundingTime: +r.time,
             }))
-            .slice(0, limit),
+            // `limit` arrives as `null` (not `undefined`) when the caller omits
+            // it — the controller defaults it to null — and `slice(0, null)`
+            // coerces to `slice(0, 0)` and throws away every row. Every other
+            // exchange happens to be safe because it uses `limit ?? <default>`.
+            .slice(0, limit ?? undefined),
         )
       })
       .catch(

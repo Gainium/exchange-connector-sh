@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.4] - 2026-07-25
+
+### Fixed
+
+- **`getFundingRateHistory` now accepts our normalized pair on Hyperliquid and Kraken Futures instead of failing on it forever.** The funding registry can hold either the exchange's own symbol or our pair form, but both connectors assumed the exchange form: Hyperliquid passed the symbol straight in as `coin` (every other info call converts via `getCoinNameByPair`), so `BTC-USDC` got an HTTP 500 from the info API and surfaced as `NOTOK`; Kraken Futures passed it straight through as `symbol`, so `BTC-USD` got `[400] Argument invalid: symbol`. Both now normalize first — Hyperliquid via the existing (idempotent) coin lookup, Kraken only for dash-bearing symbols, since futures codes never contain one — so an already-correct symbol is untouched. Verified against the live public endpoints: HL `BTC-USDC` 500 vs `BTC` 267 rows; Kraken `BTC-USD` 400 vs `PF_XBTUSD` success.
+
 ## [1.16.3] - 2026-07-18
 
 ### Fixed

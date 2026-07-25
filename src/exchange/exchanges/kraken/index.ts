@@ -2617,14 +2617,23 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         ? this.errorClient(timeProfile)
         : this.returnGood<FundingRateResponse[]>(timeProfile)([])
     }
-    // Caller passes the Kraken futures code (e.g. PF_XBTUSD) directly.
+    // Callers normally pass the Kraken futures code (e.g. PF_XBTUSD), but the
+    // funding registry can also hold our normalized pair (BTC-USD), which the
+    // API rejects with "Argument invalid: symbol". Our pairs always contain a
+    // dash and futures codes never do, so convert only that form.
+    const krakenSymbol = symbol.includes('-')
+      ? await this.toKrakenSymbol(symbol)
+      : symbol
     timeProfile =
-      (await this.checkLimits('getFundingRateHistory', symbol, timeProfile)) ||
-      timeProfile
+      (await this.checkLimits(
+        'getFundingRateHistory',
+        krakenSymbol,
+        timeProfile,
+      )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     // Kraken returns the full history (no time filter), ascending by timestamp.
     return this.derivativesClient
-      .getHistoricalFundingRates({ symbol })
+      .getHistoricalFundingRates({ symbol: krakenSymbol })
       .then((result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (!result.rates) {

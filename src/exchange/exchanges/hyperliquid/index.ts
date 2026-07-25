@@ -3258,7 +3258,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.infoClient
       .fundingHistory({
-        coin: symbol,
+        // `fundingHistory` takes the coin, not the pair — every other info call
+        // converts (see getCandles); this one didn't, so a pair-form symbol
+        // (BTC-USDC) was sent verbatim and rejected. The conversion is a no-op
+        // for an already-coin symbol, so it is safe for both forms.
+        coin: await this.getCoinNameByPair(symbol),
         startTime,
         endTime,
       })

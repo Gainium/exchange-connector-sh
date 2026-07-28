@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.7] - 2026-07-28
+
+### Fixed
+
+- **Kraken: retries no longer re-invoke the method with garbled arguments.** `handleKrakenErrors` retries with `cb.call(this, ...args)`, but 19 call sites passed only the timeProfile — so any retryable Kraken error re-called the method with the TimeProfile object in the first parameter slot (`symbol`/`order`), surfacing as unhandled `TypeError: ourSymbol.replace is not a function` 500s (prod: `latestPrice` since June, `getCandles` on 2026-07-28 via WLFI-USD@krakenUsdm). Every call site now forwards the wrapped method's full argument list, matching the already-correct `getFundingRateHistory`/`futures_changeMarginType` sites.
+
 ## [1.16.6] - 2026-07-28
 
 ### Added

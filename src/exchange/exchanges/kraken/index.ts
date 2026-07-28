@@ -465,6 +465,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
   /**
    * Handle Kraken API errors with retry logic
+   *
+   * Call sites MUST pass the wrapped method's full argument list (ending with
+   * the timeProfile) — the retry re-invokes `cb.call(this, ...args)` verbatim.
+   * Passing only the timeProfile makes the retry call the method with the
+   * TimeProfile object in the first parameter slot (e.g. as `symbol`), which
+   * surfaced as "ourSymbol.replace is not a function" 500s.
    */
   private handleKrakenErrors<T>(
     cb: (...args: any[]) => Promise<T>,
@@ -1122,6 +1128,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .catch(
           this.handleKrakenErrors(
             this.openOrder,
+            order,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )
@@ -1200,6 +1207,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.openOrder,
+          order,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -1435,6 +1443,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               // If both methods fail, return original error
               return this.handleKrakenErrors(
                 this.getOrder,
+                { symbol, newClientOrderId },
                 this.endProfilerTime(timeProfile, 'exchange'),
               )(historyError)
             }
@@ -1443,6 +1452,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           // For other errors, use standard error handling
           return this.handleKrakenErrors(
             this.getOrder,
+            { symbol, newClientOrderId },
             this.endProfilerTime(timeProfile, 'exchange'),
           )(error)
         })
@@ -1570,6 +1580,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             // If both methods fail, return original error
             return this.handleKrakenErrors(
               this.getOrder,
+              { symbol, newClientOrderId },
               this.endProfilerTime(timeProfile, 'exchange'),
             )(error)
           }
@@ -1578,6 +1589,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         // For other errors, use standard error handling
         return this.handleKrakenErrors(
           this.getOrder,
+          { symbol, newClientOrderId },
           this.endProfilerTime(timeProfile, 'exchange'),
         )(error)
       })
@@ -1661,6 +1673,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .catch(
           this.handleKrakenErrors(
             this.cancelOrderByOrderIdAndSymbol,
+            order,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )
@@ -1703,6 +1716,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.cancelOrderByOrderIdAndSymbol,
+          order,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -1793,6 +1807,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .catch(
           this.handleKrakenErrors(
             this.getAllOpenOrders,
+            symbol,
+            returnOrders,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )
@@ -1855,6 +1871,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.getAllOpenOrders,
+          symbol,
+          returnOrders,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -1895,6 +1913,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .catch(
           this.handleKrakenErrors(
             this.latestPrice,
+            symbol,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )
@@ -1929,6 +1948,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.latestPrice,
+          symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -2371,6 +2391,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.getUserFees,
+          symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -2529,6 +2550,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .catch(
           this.handleKrakenErrors(
             this.getCandles,
+            symbol,
+            interval,
+            from,
+            to,
+            count,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )
@@ -2599,6 +2625,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.getCandles,
+          symbol,
+          interval,
+          from,
+          to,
+          count,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -2714,6 +2745,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .catch(
           this.handleKrakenErrors(
             this.getTrades,
+            symbol,
+            _fromId,
+            _startTime,
+            _endTime,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),
         )
@@ -2762,6 +2797,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.getTrades,
+          symbol,
+          _fromId,
+          _startTime,
+          _endTime,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -2851,6 +2890,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.futures_changeLeverage,
+          symbol,
+          leverage,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -3032,6 +3073,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.futures_getPositions,
+          symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

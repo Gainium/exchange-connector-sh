@@ -1072,8 +1072,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       }
       return { ok: true, reason: '' }
     } catch (e: any) {
-      const msg =
-        e?.body?.error?.join?.(',') || e?.message || `${e}`
+      const msg = e?.body?.error?.join?.(',') || e?.message || `${e}`
       if (isPermissionDenied(msg)) {
         return { ok: false, reason: msg }
       }

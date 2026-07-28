@@ -504,6 +504,25 @@ class HyperliquidAssets {
     return this.pairsSpot.get(+coin.replace('@', '')) ?? coin
   }
 
+  /**
+   * Wire coin for a futures pair (`BTC-USDC`) or an already-resolved code
+   * (`BTC`) — or `null` when Hyperliquid lists neither, e.g. the compact
+   * `BTCUSDC` form some callers send. Callers must not forward an unlisted
+   * coin: HL answers `500` with a `null` body, which reads as a transient
+   * server error and gets retried (see `handleHyperliquidErrors`).
+   *
+   * While the asset map is unavailable (a failed refresh) we return the input
+   * unchanged, so a transient outage degrades to the old pass-through
+   * behaviour instead of rejecting every request.
+   */
+  public async resolveFuturesCoin(pair: string): Promise<string | null> {
+    const info = await this.getFuturesInfo(pair)
+    if (info) return info.code
+    if (this.futuresByCode.size === 0) return pair
+    const code = pair.split('-')[0]
+    return this.futuresByCode.has(code) ? code : null
+  }
+
   public async getFuturesInfo(
     pair: string,
   ): Promise<FuturesAssetInfo | undefined> {
@@ -2245,9 +2264,27 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
+    // Resolve the wire coin BEFORE the request. `getCoinNameByPair` falls back
+    // to the symbol itself when the pair is not in the asset map (so a bare
+    // code like 'BTC' keeps working), which means a symbol that is neither a
+    // listed pair nor a listed code — the compact 'BTCUSDC' instead of the
+    // 'BTC-USDC' pair form — reaches Hyperliquid as an unlisted coin. HL
+    // answers `500 / null`, `handleHyperliquidErrors` matches "server error"
+    // and retries 10x with a 10s sleep: ~93s and 10x the info weight burnt on
+    // a call that can never succeed, ending in an opaque reason. Every other
+    // dash-form exchange (okx/coinbase/kucoin) rejects an unknown symbol in
+    // one attempt with a readable reason — match that.
+    const coin = this.futures
+      ? await HyperliquidAssets.getInstance().resolveFuturesCoin(symbol)
+      : await this.getCoinNameByPair(symbol)
+    if (coin === null) {
+      return this.returnBad(timeProfile)(
+        new Error(`Unknown Hyperliquid pair ${symbol}`),
+      )
+    }
     return this.infoClient
       .candleSnapshot({
-        coin: await this.getCoinNameByPair(symbol),
+        coin,
         interval,
         startTime: +from,
         endTime: +to,

@@ -290,10 +290,27 @@ const verifyKraken = async (
   )
   return await client
     .getBalance()
-    .then((res) => ({
-      status: res.status === StatusEnum.ok,
-      reason: JSON.stringify(res),
-    }))
+    .then(async (res) => {
+      if (res.status !== StatusEnum.ok) {
+        return { status: false, reason: JSON.stringify(res) }
+      }
+      // REST works — but a key without the "WebSocket interface" permission
+      // still can't feed the realtime user stream (fills degrade to delayed
+      // reconcile sweeps with no error anywhere). Reject it here with the
+      // exact toggle to flip, like the Hyperliquid agent-address guard above.
+      const ws = await client.verifyWebsocketPermission()
+      if (!ws.ok) {
+        return {
+          status: false,
+          reason:
+            `Your Kraken API key is missing the "WebSocket interface" ` +
+            `permission, which Gainium needs for realtime order updates. ` +
+            `On Kraken go to Settings → API, edit this key, enable ` +
+            `"WebSocket interface" and save — then verify again.`,
+        }
+      }
+      return { status: true, reason: JSON.stringify(res) }
+    })
     .catch((e) => ({ status: false, reason: `Kraken catch ${e}` }))
 }
 

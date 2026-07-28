@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.16.7] - 2026-07-28
+## [1.16.8] - 2026-07-29
+
+### Added
+
+- **Kraken spot verify now rejects keys missing the "WebSocket interface" permission (issue #167 / ClickUp 86eyep5au).** Such a key passes the REST balance probe, so the connection looked healthy while the user-stream connector's `GetWebSocketsToken` call was rejected with `EGeneral:Permission denied` forever (16 users on 07-28) — the user was never told and their bots silently fell back to delayed reconcile-sweep-only fill delivery. `verifyKraken` now calls the new `Kraken.verifyWebsocketPermission()` (a `GetWebSocketsToken` probe) after the balance check and fails with a user-facing reason naming the exact Kraken setting to enable, following the Hyperliquid agent-address guard precedent. Only a definite `EGeneral:Permission denied` rejects; transient errors (rate limit, 5xx) never block verification. Spot-only — Kraken Futures WS auth signs a challenge with the key itself and has no separate permission.
 
 ### Fixed
 

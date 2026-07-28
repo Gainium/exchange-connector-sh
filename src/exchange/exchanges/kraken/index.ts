@@ -1045,6 +1045,42 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       )
   }
 
+  /**
+   * Check the key can mint a WS auth token (spot "WebSocket interface"
+   * permission). A REST-only key passes every other verify probe but leaves
+   * the user-stream connector unable to subscribe (`EGeneral:Permission
+   * denied` on `GetWebSocketsToken`), so the user silently loses realtime
+   * order updates and falls back to delayed reconcile-sweep fills — surface
+   * it at verify time instead. Spot-only: Kraken Futures WS auth signs a
+   * challenge with the key itself and has no separate permission. Only a
+   * definite permission rejection reports `ok:false`; transient failures
+   * (rate limit, 5xx) never block verification.
+   */
+  async verifyWebsocketPermission(): Promise<{ ok: boolean; reason: string }> {
+    if (!this.spotClient) {
+      return { ok: true, reason: '' }
+    }
+    const isPermissionDenied = (s: string) =>
+      /EGeneral\s*:?\s*Permission denied/i.test(s)
+    try {
+      const res = await this.spotClient.getWebSocketsToken()
+      const errors: string[] = Array.isArray((res as any)?.error)
+        ? (res as any).error
+        : []
+      if (errors.some(isPermissionDenied)) {
+        return { ok: false, reason: errors.join(',') }
+      }
+      return { ok: true, reason: '' }
+    } catch (e: any) {
+      const msg =
+        e?.body?.error?.join?.(',') || e?.message || `${e}`
+      if (isPermissionDenied(msg)) {
+        return { ok: false, reason: msg }
+      }
+      return { ok: true, reason: '' }
+    }
+  }
+
   // ===========================
   // Orders
   // ===========================

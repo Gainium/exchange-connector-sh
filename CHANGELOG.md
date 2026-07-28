@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.6] - 2026-07-28
+
+### Added
+
+- **`src/exchange/helpers/symbolCodec.ts` — the single home for pair-symbol format knowledge** (Phase 1 of the symbol-format cleanup behind bug #153). Defines the canonical dashed `BASE-QUOTE` form and the adapter contract: resolve wire symbols through the asset map in one place per adapter, never fabricate a wire symbol on a lookup miss (return `null` → one-attempt `NOTOK Unknown pair`), and pass already-wire symbols through unchanged. Fallback-on-miss is only permitted while the asset map itself is unavailable, so a transient refresh outage degrades instead of hard-failing.
+
+### Fixed
+
+- **Hyperliquid: the two remaining fabrication holes now reject unknown symbols in one attempt instead of retrying HL's `500/null` for ~93s.** The 1.16.5 fix covered futures `getCandles` only; spot `getCandles` still passed an unknown pair through unchanged, and `getFundingRateHistory`'s coin lookup fell back to `split('-')[0]` — both forwarded fabricated coins to Hyperliquid. Both now resolve strictly (`resolveSpotCoin` / `resolveFuturesCoin`) and return `NOTOK Unknown Hyperliquid pair <symbol>` immediately. Verified against the live public API: pair, wire-coin and code forms all still return data (candles futures+spot, funding); compact forms reject in ≤1ms.
+
 ## [1.16.4] - 2026-07-25
 
 ### Fixed

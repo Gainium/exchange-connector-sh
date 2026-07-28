@@ -985,6 +985,12 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
       const html = '<html>'
       const goSg = 'go/sg'
       const unknown = 'UNKNOWN_FAILURE_REASON'
+      // Coinbase occasionally answers /candles with a 2xx body that has no
+      // `candles` array (empty object, or an error payload sent with 200). The
+      // SDK spreads it unguarded (coinbase-advanced-node ProductAPI.getCandles,
+      // start+end branch) and throws a TypeError instead of an API error, so
+      // without this entry the failure is unclassified and never retried.
+      const malformedCandles = 'candles is not iterable'
       const reasons = [
         internalSystemError,
         serverTimeout,
@@ -1009,6 +1015,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
         html,
         goSg,
         unknown,
+        malformedCandles,
       ]
       const isError = (text: string, reason: string) =>
         !!reason && text.toLowerCase().indexOf(reason.toLowerCase()) !== -1
@@ -1059,6 +1066,13 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
             const time = 10000 + (timeProfile.attempts - 1) * 1000
             Logger.log(
               `Coinbase Firewall error wait ${time}s ${timeProfile.attempts}`,
+            )
+            await sleep(time)
+          }
+          if (isError(message, malformedCandles)) {
+            const time = 2000 + (timeProfile.attempts - 1) * 1000
+            Logger.log(
+              `Coinbase malformed candles response wait ${time}s ${timeProfile.attempts}`,
             )
             await sleep(time)
           }

@@ -418,6 +418,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       'EService:Unavailable',
       'EService:Busy',
       'EGeneral:Temporary lockout',
+      // Kraken's *public* (per-IP) rate limit. Unlike the private counter it is
+      // delivered as HTTP **200** with the code in the body
+      // (`{"error":["EGeneral:Too many requests"],"httpStatus":200}`), so neither
+      // the spot/futures strings above nor the numeric httpStatus entries below
+      // ever matched it — public `/public/OHLC` rejections were thrown straight
+      // through with no backoff at all, and the archive backfiller simply
+      // re-requested, so the egress fleet hammered Kraken continuously
+      // (2026-07-28: 142 of 145 error lines on a single node, 0 retries logged).
+      'EGeneral:Too many requests',
       // Nonce collisions (spot `EAPI:Invalid nonce`; futures lowercase
       // `invalid nonce` / `duplicate nonce`) are pre-execution rejections — the
       // order/cancel never reached the matching engine — so re-signing with a
@@ -563,13 +572,27 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       // them retry attempts). Give these fewer, slower attempts sized to the
       // counter decay; each retry still re-enters checkLimits, so the local
       // budget accounting is preserved.
-      const isRateLimit = ['EAPI:Rate limit exceeded', 'apiLimitExceeded'].some(
-        (code) => actualError.includes(code) || e.message.includes(code),
-      )
-      // Adaptive tier: a real rate-limit rejection means this account's true
-      // Kraken budget is tighter than we assumed — drop it to Starter for a
-      // cooldown window (no-op unless per-account limits are enabled).
-      if (isRateLimit) {
+      const matches = (codes: string[]) =>
+        codes.some(
+          (code) => actualError.includes(code) || e.message.includes(code),
+        )
+      // Per-account (private REST) rate limits — spot and futures spellings.
+      const isAccountRateLimit = matches([
+        'EAPI:Rate limit exceeded',
+        'apiLimitExceeded',
+      ])
+      // Kraken's public endpoints are limited **per egress IP**, not per account
+      // (see exchange-balancer's `publicUrl` routing note). It saturates the same
+      // way, so it gets the same slow-retry pacing…
+      const isRateLimit =
+        isAccountRateLimit || matches(['EGeneral:Too many requests'])
+      // …but NOT the adaptive tier drop: a real *account* rate-limit rejection
+      // means that account's true Kraken budget is tighter than we assumed, so we
+      // drop it to Starter for a cooldown window (no-op unless per-account limits
+      // are enabled). An IP-level public rejection says nothing about any
+      // account's private budget — attributing it to one would throttle an
+      // unrelated account's private throughput for congestion it did not cause.
+      if (isAccountRateLimit) {
         limitHelper.noteRateLimited(hashKrakenKey(this.key))
       }
       const maxAttempts = isRateLimit ? 3 : this.retry

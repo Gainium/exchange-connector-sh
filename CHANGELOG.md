@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.9] - 2026-07-29
+
+### Fixed
+
+- **Kraken: the public (per-IP) rate limit is now retried with backoff instead of failing instantly (bug #181).** Kraken returns its public-endpoint limit as HTTP **200** with `{"error":["EGeneral:Too many requests"]}` in the body, so it matched neither the spot/futures strings in `retryErrors` nor the numeric `httpStatus` entries — `shouldRetry` was always false. Every rejected `/public/OHLC` call returned `NOTOK` immediately and the market-archive backfiller simply re-requested, so the six-node egress fleet hammered Kraken continuously instead of riding the limit out: prod node 40 logged 142 of 145 error lines with this signature and **zero** `Retrying after` lines, leaving candle backfill gapped and burying every other error on those nodes. The code is now in `retryErrors` and gets the same slow rate-limit pacing (3 attempts, 30s apart) as `EAPI:Rate limit exceeded`. It deliberately does **not** trigger `noteRateLimited()`: that downgrades an *account's* private REST tier, and a per-IP public rejection says nothing about any account's private budget. Covered by `src/exchange/exchanges/kraken/rate-limit.spec.ts`.
+
 ## [1.16.8] - 2026-07-29
 
 ### Added

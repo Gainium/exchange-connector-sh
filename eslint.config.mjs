@@ -70,4 +70,13 @@ export default defineConfig([
       'unused-imports/no-unused-imports': 'error',
     },
   },
+  {
+    // Specs legitimately need the CommonJS module object to stub a module
+    // export (an ESM import binding cannot be reassigned) — e.g. stubbing
+    // `sleep` in src/exchange/exchanges/kraken/rate-limit.spec.ts.
+    files: ['**/*.spec.ts'],
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
 ])

@@ -60,8 +60,16 @@ export class ExchangeService {
 
   async getAllExchangeInfo(
     exchange: ExchangeEnum,
+    okxSource?: OKXSource,
   ): Promise<BaseReturn<(ExchangeInfo & { pair: string })[]>> {
-    return this.getExchange(exchange).getAllExchangeInfo()
+    return this.getExchange(
+      exchange,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      okxSource,
+    ).getAllExchangeInfo()
   }
 
   /**
@@ -84,6 +92,28 @@ export class ExchangeService {
       auth.bybithost,
       auth.subaccount,
     ).getAccountSpotExchangeInfo()
+  }
+
+  /**
+   * Authenticated, account-scoped FUTURES instrument list — for OKX Europe accounts
+   * (`okxsource=my`) whose X-Perps universe is only visible via the private endpoint.
+   * `auth.exchange` must be a futures market (okxLinear). Non-OKX exchanges fall
+   * through to the abstract default ("not supported").
+   */
+  async getAccountFuturesExchangeInfo(
+    auth: AuthData,
+  ): Promise<BaseReturn<(ExchangeInfo & { pair: string })[]>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getAccountFuturesExchangeInfo()
   }
 
   getCandles(

@@ -79,6 +79,14 @@ class OKXExchange extends AbstractExchange implements Exchange {
 
   private positionMode?: PositionMode
 
+  /**
+   * OKX Europe X-Perp (instType=FUTURES, ruleType=xperp) instFamily -> live instId
+   * map, e.g. `BTC-USD_UM_XPERP` -> `BTC-USD_UM_XPERP-310404`. Populated from the
+   * instruments feed; the expiry suffix rolls rarely so we cache it (1h).
+   */
+  private xperpMap = new Map<string, string>()
+  private xperpMapLoaded = 0
+
   constructor(
     futures: Futures,
     key: string,
@@ -262,6 +270,13 @@ class OKXExchange extends AbstractExchange implements Exchange {
     if (!this.futures) {
       return this.errorFutures(timeProfile)
     }
+    // Unlike futures_getPositions/getAllOpenOrders, this method never calls
+    // getAllExchangeInfo first, so nothing would have populated xperpMap. On a
+    // cold client whose first futures action is setting leverage — which is
+    // exactly what a bot does when opening its first deal — updateSymbol would
+    // otherwise hand OKX the bare instFamily (BTC-USD_UM_XPERP) instead of the
+    // live instId with its expiry suffix, and the call is rejected.
+    await this.ensureXperpMap(false, symbol)
     const positionMode = await this.getPositionMode()
     let posMode: PositionMode = 'long_short_mode'
     if (positionMode.status === StatusEnum.ok && positionMode.data) {
@@ -385,7 +400,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
       .getPositions({
-        instType: 'SWAP',
+        instType: this.isEuPerp ? 'FUTURES' : 'SWAP',
         instId: symbol ? this.updateSymbol(symbol) : undefined,
       })
       .then(async (result) => {
@@ -562,6 +577,79 @@ class OKXExchange extends AbstractExchange implements Exchange {
     })
   }
 
+  /**
+   * OKX Europe X-Perps ("Expiry Perps"): EU-regulated, perpetual-style contracts
+   * that live under instType=FUTURES (ruleType=xperp), NOT SWAP. They are linear,
+   * USD-denominated (EUR/USDC-eligible margin) and their instId carries an expiry
+   * suffix (BTC-USD_UM_XPERP-310404). Active only for an OKX Europe futures
+   * instance (okxSource=my + a futures market). Everything else keeps the global
+   * SWAP rail untouched.
+   */
+  private get isEuPerp() {
+    return this.okxSource === OKXSource.my && !!this.futures
+  }
+
+  /**
+   * Detects the Gainium X-Perp pair naming convention (`BTC-USD_UM_XPERP`,
+   * and the live OKX instId form `BTC-USD_UM_XPERP-310404`) by symbol shape
+   * alone, independent of `okxSource`. The public candle/ticker endpoints
+   * (used by every terminal chart) build an anonymous, keyless exchange
+   * instance with no account context — `okxSource` is never set there — so
+   * `isEuPerp` alone can't detect an X-Perp request. Since this suffix is
+   * exclusive to EU X-Perp instruments, matching on it is safe: no global
+   * SWAP pair is ever named this way.
+   */
+  private isXperpPair(s: string): boolean {
+    return /_UM_XPERP/i.test(s)
+  }
+
+  /** OKX instType for this instance's market (EU perps ride the FUTURES rail). */
+  private instTypeParam(): InstrumentType {
+    return (
+      this.futures ? (this.isEuPerp ? 'FUTURES' : 'SWAP') : 'SPOT'
+    ) as InstrumentType
+  }
+
+  /**
+   * Index xperp rows from an instruments response into {@link OKXExchange#xperpMap}
+   * (instFamily -> live instId). No-op for rows that aren't live xperp.
+   */
+  private setXperpMap(
+    res:
+      | Awaited<ReturnType<OKXRestClient['getInstruments']>>
+      | Awaited<ReturnType<OKXRestClient['getAccountInstruments']>>,
+  ) {
+    for (const s of res) {
+      if (s.ruleType === 'xperp' && s.state === 'live') {
+        this.xperpMap.set(s.instFamily, s.instId)
+      }
+    }
+    if (this.xperpMap.size) {
+      this.xperpMapLoaded = +new Date()
+    }
+  }
+
+  /**
+   * Ensure {@link OKXExchange#xperpMap} is populated before a symbol translation.
+   * Cached 1h. No-op for non-EU-perp instances (they use a simple `-SWAP` suffix).
+   */
+  private async ensureXperpMap(force = false, symbolHint?: string) {
+    if (!this.futures) {
+      return
+    }
+    if (!this.isEuPerp && !(symbolHint && this.isXperpPair(symbolHint))) {
+      return
+    }
+    const fresh = +new Date() - this.xperpMapLoaded < 60 * 60 * 1000
+    if (this.xperpMap.size && fresh && !force) {
+      return
+    }
+    const res = await this.client
+      .getInstruments({ instType: 'FUTURES' })
+      .catch(() => [] as Awaited<ReturnType<OKXRestClient['getInstruments']>>)
+    this.setXperpMap(res)
+  }
+
   private getCategory() {
     return this.futures ? (this.usdm ? 'linear' : 'inverse') : null
   }
@@ -583,6 +671,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('cancelOrder', 3000, 25, timeProfile)) ||
       timeProfile
+    await this.ensureXperpMap()
     const { newClientOrderId, symbol: _symbol } = order
     const symbol = this.updateSymbol(_symbol)
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
@@ -644,6 +733,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('cancelOrder', 3000, 25, timeProfile)) ||
       timeProfile
+    await this.ensureXperpMap()
     const { orderId, symbol } = order
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
@@ -716,10 +806,11 @@ class OKXExchange extends AbstractExchange implements Exchange {
     const category = this.getCategory()
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .getInstruments({ instType: this.futures ? 'SWAP' : 'SPOT' })
+      .getInstruments({ instType: this.instTypeParam() })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res?.length) {
+          this.setXperpMap(res)
           return this.returnGood<
             (ExchangeInfo & { pair: string; maxLeverage?: string })[]
           >(timeProfile)(this.mapInstrumentsToInfo(res, category))
@@ -747,7 +838,12 @@ class OKXExchange extends AbstractExchange implements Exchange {
   ) {
     return res
       .filter(
-        (d) => d.state === 'live' && (category ? d.ctType === category : true),
+        (d) =>
+          d.state === 'live' &&
+          (category ? d.ctType === category : true) &&
+          // EU perps ride instType=FUTURES, which also carries normal calendar
+          // futures — keep only the xperp rows for an OKX Europe futures account.
+          (this.isEuPerp ? d.ruleType === 'xperp' : true),
       )
       .map((s) => {
         let minAmount = this.futures
@@ -836,6 +932,43 @@ class OKXExchange extends AbstractExchange implements Exchange {
       )
   }
 
+  /**
+   * Authoritative FUTURES (X-Perp) instrument universe for an OKX Europe account
+   * (`okxSource=my` → eea.okx.com). Mirrors {@link getAccountSpotExchangeInfo} but
+   * hits the account-scoped `/api/v5/account/instruments?instType=FUTURES` and keeps
+   * only `ruleType=xperp` rows (the EU X-Perps). Must be called on a futures
+   * instance (okxLinear → Futures.usdm) with API keys set.
+   */
+  async getAccountFuturesExchangeInfo(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<
+    BaseReturn<(ExchangeInfo & { pair: string; maxLeverage?: string })[]>
+  > {
+    timeProfile =
+      (await this.checkLimits('getInstruments', 3000, 10, timeProfile)) ||
+      timeProfile
+    const category = this.getCategory()
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getAccountInstruments({ instType: 'FUTURES' })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res?.length) {
+          this.setXperpMap(res)
+          return this.returnGood<
+            (ExchangeInfo & { pair: string; maxLeverage?: string })[]
+          >(timeProfile)(this.mapInstrumentsToInfo(res, category))
+        }
+        return this.returnBad(timeProfile)(new OKXError('No data', 0))
+      })
+      .catch(
+        this.handleOkxErrors(
+          this.getAccountFuturesExchangeInfo,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
   /** Get all open orders for given pair
    * @param {string} symbol symbol to look for
    * @param {boolean} [returnOrders] return orders or orders count. Default = false
@@ -861,7 +994,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       timeProfile
     const input: { instId?: string; instType: InstrumentType } = {
       instId: this.updateSymbol(symbol),
-      instType: this.futures ? 'SWAP' : 'SPOT',
+      instType: this.instTypeParam(),
     }
     if (!symbol) {
       delete input.instId
@@ -909,7 +1042,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     await this.client
-      .getFeeRates({ instType: this.futures ? 'SWAP' : 'SPOT' })
+      .getFeeRates({ instType: this.instTypeParam() })
       .then(async (fees) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (fees.length) {
@@ -999,6 +1132,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getOrderDetails', 3000, 25, timeProfile)) ||
       timeProfile
 
+    await this.ensureXperpMap()
     const { newClientOrderId, symbol: _symbol } = data
     const symbol = this.updateSymbol(_symbol)
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
@@ -1061,10 +1195,18 @@ class OKXExchange extends AbstractExchange implements Exchange {
   }
 
   private updateSymbol(s: string) {
+    if (this.isEuPerp || this.isXperpPair(s)) {
+      // gainium pair == instFamily (BTC-USD_UM_XPERP) -> live instId with expiry
+      return this.xperpMap.get(s) ?? s
+    }
     return `${s}${this.futures ? '-SWAP' : ''}`
   }
 
   private clearSymbol(s: string) {
+    if (this.isEuPerp || this.isXperpPair(s)) {
+      // BTC-USD_UM_XPERP-310404 -> BTC-USD_UM_XPERP
+      return s.replace(/-\d{6,}$/, '')
+    }
     return s.replace(/-SWAP$/, '')
   }
 
@@ -1107,6 +1249,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       positionSide,
       marginType,
     } = order
+    await this.ensureXperpMap()
     const symbol = this.updateSymbol(_symbol)
     const request: OrderRequest = {
       instId: symbol,
@@ -1224,6 +1367,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     countData?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
+    await this.ensureXperpMap(false, symbol)
     timeProfile =
       (await this.checkLimits('getCandles', 3000, 30, timeProfile)) ||
       timeProfile
@@ -1301,6 +1445,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )
     }
+    await this.ensureXperpMap(false, symbol)
     timeProfile =
       (await this.checkLimits('getHistoricCandles', 3000, 10, timeProfile)) ||
       timeProfile
@@ -1362,6 +1507,49 @@ class OKXExchange extends AbstractExchange implements Exchange {
   /**
    * Get all prices
    */
+  /**
+   * OKX Europe X-Perp tickers (instType=FUTURES, ruleType=xperp), cached.
+   *
+   * The aggregate price list is built by an ANONYMOUS client (no account, so no
+   * `okxSource`), which makes `isEuPerp` false and `instTypeParam()` resolve to
+   * SWAP — so X-Perps were simply absent from `/prices` and anything matching a
+   * live price by pair found nothing for them (bot-form TP/SO preview lines,
+   * quote-currency conversion). The candle path solves the same problem via
+   * symbol-shape detection, but a bulk ticker list has no symbol to key off, so
+   * the FUTURES rail has to be fetched separately and merged.
+   *
+   * That second request is why this was originally deferred, hence the cache:
+   * the X-Perp set is small and its prices feed list/preview use cases only —
+   * never order execution, which goes through the account-scoped client.
+   */
+  private static xperpTickerCache: {
+    at: number
+    data: AllPricesResponse[]
+  } | null = null
+  private static readonly XPERP_TICKER_TTL = 60 * 1000
+
+  private async getXperpTickers(): Promise<AllPricesResponse[]> {
+    const cached = OKXExchange.xperpTickerCache
+    if (cached && +new Date() - cached.at < OKXExchange.XPERP_TICKER_TTL) {
+      return cached.data
+    }
+    // Never let this degrade the main SWAP list: on any failure fall back to
+    // the (possibly stale) cache, else to nothing.
+    const res = await this.client
+      .getTickers({ instType: 'FUTURES' as InstrumentType })
+      .catch(() => null)
+    if (!res) {
+      return cached?.data ?? []
+    }
+    const data = res
+      .filter((t) => this.isXperpPair(t.instId))
+      .map((t) => ({ pair: this.clearSymbol(t.instId), price: +t.last }))
+    if (data.length) {
+      OKXExchange.xperpTickerCache = { at: +new Date(), data }
+    }
+    return data
+  }
+
   async getAllPrices(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
@@ -1370,16 +1558,26 @@ class OKXExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
-      .getTickers({ instType: this.futures ? 'SWAP' : 'SPOT' })
-      .then((res) => {
+      .getTickers({ instType: this.instTypeParam() })
+      .then(async (res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res.length) {
-          return this.returnGood<AllPricesResponse[]>(timeProfile)(
-            res.map((k) => ({
-              pair: this.clearSymbol(k.instId),
-              price: +k.last,
-            })),
-          )
+          const prices = res.map((k) => ({
+            pair: this.clearSymbol(k.instId),
+            price: +k.last,
+          }))
+          // A futures client that resolved to SWAP is the global rail and is
+          // missing the EU X-Perps; merge them in. An `isEuPerp` client already
+          // asked for FUTURES above, so it needs no second fetch.
+          if (this.futures && !this.isEuPerp) {
+            const seen = new Set(prices.map((p) => p.pair))
+            for (const xperp of await this.getXperpTickers()) {
+              if (!seen.has(xperp.pair)) {
+                prices.push(xperp)
+              }
+            }
+          }
+          return this.returnGood<AllPricesResponse[]>(timeProfile)(prices)
         }
         return this.handleOkxErrors(
           this.getAllPrices,
@@ -1629,6 +1827,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     limit?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FundingRateResponse[]>> {
+    await this.ensureXperpMap()
     timeProfile =
       (await this.checkLimits('getFundingRateHistory', 3000, 5, timeProfile)) ||
       timeProfile

@@ -360,6 +360,20 @@ abstract class AbsctractExchange implements Exchange {
     )(new Error('Method not supported'))
   }
 
+  /**
+   * Authoritative, account-scoped FUTURES instrument universe. Only OKX Europe
+   * (eea.okx.com) overrides this — its X-Perps (instType=FUTURES, ruleType=xperp)
+   * are only visible via the private account endpoint. Default: not supported.
+   */
+  async getAccountFuturesExchangeInfo(): Promise<
+    BaseReturn<(ExchangeInfo & { pair: string })[]>
+  > {
+    return this.returnBad(
+      this.getEmptyTimeProfile(),
+      [],
+    )(new Error('Method not supported'))
+  }
+
   /** Get all open orders for given pair
    * @param {string} symbol symbol to look for
    * @param {boolean} returnOrders return orders or orders count

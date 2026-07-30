@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-07-30
+
+### Added
+
+- OKX Europe X-Perp futures (instType=FUTURES, ruleType=xperp) on the okxLinear rail for okxSource=my: instFamily->instId symbol translation with expiry-roll cache, account-scoped `GET /exchange/account/futures` instrument endpoint, `okxsource` on `GET /exchange/all`, X-Perp candles/tickers/funding on keyless clients, and X-Perp tickers merged into the futures price list. Contributed by community member discord2020 (forum topic 4925).
+
 ## [1.16.9] - 2026-07-29
 
 ### Fixed

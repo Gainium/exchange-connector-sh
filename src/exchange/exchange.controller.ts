@@ -76,8 +76,14 @@ export class ExchangeController {
   }
 
   @Get('/exchange/all')
-  async getAllExchangeInfo(@Query('exchange') exchange: ExchangeEnum) {
-    return this.exchangeService.getAllExchangeInfo(exchange)
+  async getAllExchangeInfo(
+    @Query('exchange') exchange: ExchangeEnum,
+    // Optional OKX origin. `my` routes okxLinear to the OKX Europe X-Perp universe
+    // (eea.okx.com, instType=FUTURES/xperp) instead of the global SWAP feed. Public
+    // data, so no keys needed — used by the keyless EU-perp pairs refresh.
+    @Query('okxsource') okxsource?: OKXSource,
+  ) {
+    return this.exchangeService.getAllExchangeInfo(exchange, okxsource)
   }
 
   /**
@@ -87,6 +93,16 @@ export class ExchangeController {
   @Get('/exchange/account')
   async getAccountSpotExchangeInfo(@Headers() headers: AuthData) {
     return this.exchangeService.getAccountSpotExchangeInfo(headers)
+  }
+
+  /**
+   * Authenticated, account-scoped FUTURES instruments (OKX Europe X-Perps,
+   * `okxsource=my`). Keys + okxsource arrive as headers (AuthData); `exchange`
+   * must be a futures market (okxLinear).
+   */
+  @Get('/exchange/account/futures')
+  async getAccountFuturesExchangeInfo(@Headers() headers: AuthData) {
+    return this.exchangeService.getAccountFuturesExchangeInfo(headers)
   }
 
   @Get('/candles')

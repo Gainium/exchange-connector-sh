@@ -22,7 +22,12 @@ import {
   TimeProfile,
   RebateOverview,
   RebateRecord,
+  KeyPermissions,
 } from '../../types'
+import {
+  krakenWithdrawState,
+  unknownPermissions,
+} from '../../helpers/keyPermissions'
 import { SpotClient, DerivativesClient } from '../../../kraken-custom'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
@@ -1100,6 +1105,52 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         return { ok: false, reason: msg }
       }
       return { ok: true, reason: '' }
+    }
+  }
+
+  /**
+   * Kraken publishes nothing that describes a key's own permissions, so it is
+   * the only venue we have to probe. `POST /0/private/WithdrawMethods` requires
+   * BOTH "Funds permissions - Query" and "Funds permissions - Withdraw", and
+   * only lists methods — it moves no money.
+   *
+   * Because two permissions gate it, a bare denial is ambiguous: it could mean
+   * "no withdrawal" or "no funds-query at all". So we first confirm funds-query
+   * works via Balance; only then does a denial prove the key cannot withdraw.
+   * Anything else is `unknown`. Kraken exposes no IP-binding field.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    if (!this.spotClient) {
+      return unknownPermissions(
+        'Kraken Futures keys do not expose withdrawal permission',
+      )
+    }
+    const errorsOf = (res: unknown): string[] =>
+      Array.isArray((res as any)?.error) ? (res as any).error : []
+    let queryFundsOk = false
+    try {
+      const balance = await this.spotClient.getAccountBalance()
+      queryFundsOk = !errorsOf(balance).length
+    } catch {
+      queryFundsOk = false
+    }
+    try {
+      const res = await this.spotClient.getWithdrawalMethods()
+      const errors = errorsOf(res)
+      if (!errors.length) {
+        return krakenWithdrawState({ queryFundsOk, withdrawMethodsOk: true })
+      }
+      return krakenWithdrawState({
+        queryFundsOk,
+        withdrawMethodsOk: false,
+        error: errors.join(','),
+      })
+    } catch (e: any) {
+      return krakenWithdrawState({
+        queryFundsOk,
+        withdrawMethodsOk: false,
+        error: e?.body?.error?.join?.(',') || e?.message || `${e}`,
+      })
     }
   }
 

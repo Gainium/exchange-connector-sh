@@ -236,6 +236,16 @@ export class ExchangeController {
     return this.exchangeService.verifyUser(tradeType, headers)
   }
 
+  /**
+   * Read-only audit of what a key is allowed to do (withdrawal, transfer, IP
+   * binding). Used by main-app's periodic re-check — permissions can be
+   * widened after a key has already passed verification.
+   */
+  @Get('/keyPermissions')
+  async keyPermissions(@Headers() headers: AuthData) {
+    return this.exchangeService.keyPermissions(headers)
+  }
+
   @Get('datafeed/prices')
   async getDatafeedPrices(@Query('exchange') exchange: ExchangeEnum) {
     return this.exchangeService.getDatafeedPrices(exchange)

@@ -71,7 +71,48 @@ export enum TradeTypeEnum {
   futures = 'futures',
 }
 
-export type VerifyResponse = { status: boolean; reason: string }
+/** Tri-state so "we could not find out" is never confused with "no".
+ *  Every consumer must treat `unknown` as "do not act", not as a failure. */
+export type PermissionState = 'yes' | 'no' | 'unknown'
+
+/**
+ * What an exchange says a set of API credentials is *allowed* to do, as
+ * opposed to what Gainium needs it to do.
+ *
+ * Gainium only ever needs read + trade, and never withdrawal. Historically
+ * nothing verified that a stored key was actually limited that way, so the
+ * property was assumed rather than enforced. This type is how we enforce it.
+ */
+export type KeyPermissions = {
+  /** Can this key move funds off the exchange? Gainium never needs this. */
+  withdraw: PermissionState
+  /**
+   * Can this key move funds *between accounts on the same exchange*?
+   * Not withdrawal, but still a fund-movement capability Gainium never uses:
+   * Bybit's universal-transfer can move balances between a user's own
+   * sub-accounts with no withdrawal scope at all. Worth recording.
+   */
+  transfer: PermissionState
+  /** Whether the key is bound to an IP allowlist. Unrestricted = usable from
+   *  anywhere the key leaks to, which is its own risk signal. */
+  ipRestricted: PermissionState
+  /** The bound addresses, when the exchange discloses them. */
+  ips?: string[]
+  /** Human-readable provenance (the raw permission string, or why we could not
+   *  tell). Surfaced to admins for forensics — must never contain the key. */
+  detail?: string
+  /** ms epoch at which this was observed. A key's permissions can change after
+   *  it passes verification, so a reading is only as good as its timestamp. */
+  checkedAt: number
+}
+
+export type VerifyResponse = {
+  status: boolean
+  reason: string
+  /** Optional so every existing consumer of this cross-service contract keeps
+   *  working unchanged (see the Danger List in the root CLAUDE.md). */
+  permissions?: KeyPermissions
+}
 
 export enum MarginType {
   ISOLATED = 'ISOLATED',

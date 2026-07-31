@@ -40,6 +40,7 @@ import {
   TimeProfile,
   RebateRecord,
   RebateOverview,
+  KeyPermissions,
 } from '../../types'
 import {
   AllPricesResponse,
@@ -49,6 +50,10 @@ import {
   Futures,
 } from '../../types'
 import { getBinanceBase } from '../../helpers/exchaneUtils'
+import {
+  parseBinanceRestrictions,
+  unknownPermissions,
+} from '../../helpers/keyPermissions'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 
@@ -203,6 +208,34 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       usage,
       timeProfile: { ...timeProfile, outcomingTime: +new Date() },
     })
+  }
+
+  /**
+   * `getApiKeyPermissions()` is GET /sapi/v1/account/apiRestrictions, which
+   * states `enableWithdrawals` and `ipRestrict` outright. Binance.US does not
+   * implement the endpoint (the same reason verify() falls back to
+   * getAccountInformation there), so it stays `unknown`.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    if (!this.client || this.isUs) {
+      return unknownPermissions(
+        this.isUs
+          ? 'Binance.US does not expose /sapi/v1/account/apiRestrictions'
+          : 'Binance client unavailable',
+      )
+    }
+    return this.client
+      .getApiKeyPermissions()
+      .then(
+        (res) =>
+          parseBinanceRestrictions(res) ??
+          unknownPermissions('Unrecognised Binance apiRestrictions response'),
+      )
+      .catch((e) =>
+        unknownPermissions(
+          `Binance apiRestrictions failed: ${e?.message ?? e}`,
+        ),
+      )
   }
 
   async getUid(

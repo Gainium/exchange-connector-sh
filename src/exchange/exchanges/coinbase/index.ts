@@ -24,7 +24,12 @@ import {
   TimeProfile,
   RebateOverview,
   RebateRecord,
+  KeyPermissions,
 } from '../../types'
+import {
+  parseCoinbaseKeyPermissions,
+  unknownPermissions,
+} from '../../helpers/keyPermissions'
 import {
   Coinbase,
   Order,
@@ -44,6 +49,7 @@ import {
   CancelOrderResponse,
   CoinbaseFees,
   CreateOrderResponse,
+  CurrentApiKeyPermissions,
 } from 'coinbase-advanced-node'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
@@ -242,6 +248,27 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
       }, maxTime)
       fn().then(resolve).catch(reject)
     })
+  }
+
+  /**
+   * GET /api/v3/brokerage/key_permissions → { can_view, can_trade,
+   * can_transfer }. Only Cloud/CDP keys implement it; legacy keys error out and
+   * fall through to `unknown`.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    return this.callWithTimeout<CurrentApiKeyPermissions>(() =>
+      this.client.rest.user.getApiKeyPermissions(),
+    )
+      .then(
+        (res) =>
+          parseCoinbaseKeyPermissions(res) ??
+          unknownPermissions('Unrecognised Coinbase key_permissions response'),
+      )
+      .catch((e) =>
+        unknownPermissions(
+          `Coinbase key_permissions failed: ${e?.message ?? e}`,
+        ),
+      )
   }
 
   async getApiPermission(

@@ -22,7 +22,12 @@ import {
   TimeProfile,
   RebateOverview,
   RebateRecord,
+  KeyPermissions,
 } from '../../types'
+import {
+  parseBitgetAccountInfo,
+  unknownPermissions,
+} from '../../helpers/keyPermissions'
 import {
   RestClientV2 as BitgetClient,
   FuturesKlineInterval,
@@ -1125,6 +1130,28 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         min: a.minLeverage ? +a.minLeverage : 1,
       })),
     )
+  }
+
+  /**
+   * GET /api/v2/spot/account/info — the same call getApiPermission() makes,
+   * read for `authorities` (permission codes) and `ips` (allowlist, a
+   * comma-separated string here rather than an array).
+   *
+   * Bitget does not publish the authority-code vocabulary, so the parser
+   * answers `unknown` rather than `no` when it meets a code it does not
+   * recognise. See parseBitgetAccountInfo.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    return this.client
+      .getSpotAccount()
+      .then(
+        (result) =>
+          parseBitgetAccountInfo(result?.data) ??
+          unknownPermissions('Unrecognised Bitget account info response'),
+      )
+      .catch((e) =>
+        unknownPermissions(`Bitget account info failed: ${e?.message ?? e}`),
+      )
   }
 
   async getApiPermission(

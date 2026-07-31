@@ -25,7 +25,12 @@ import {
   TimeProfile,
   RebateOverview,
   RebateRecord,
+  KeyPermissions,
 } from '../../types'
+import {
+  parseKucoinApiKey,
+  unknownPermissions,
+} from '../../helpers/keyPermissions'
 import {
   AllPricesResponse,
   ExchangeIntervals,
@@ -181,6 +186,32 @@ class KucoinExchange extends AbstractExchange implements Exchange {
         ),
       )
   }
+  /**
+   * GET /api/v1/user/api-key — the same call getUid() makes, read for its
+   * `permission` list ("General, Spot, Futures[, Withdraw]").
+   *
+   * This is deliberately NOT the withdrawal-quota endpoint:
+   * `/api/v1/withdrawals/quotas` answers `isWithdrawEnabled: true` for keys
+   * that cannot withdraw, because it describes the currency and the account,
+   * not the key's permissions.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    return this.client
+      .getApiKey()
+      .then((res) => {
+        if (res.status !== StatusEnum.ok) {
+          return unknownPermissions(`KuCoin api-key returned ${res.reason}`)
+        }
+        return (
+          parseKucoinApiKey(res.data) ??
+          unknownPermissions('Unrecognised KuCoin api-key response')
+        )
+      })
+      .catch((e) =>
+        unknownPermissions(`KuCoin api-key failed: ${e?.message ?? e}`),
+      )
+  }
+
   async getUid(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {

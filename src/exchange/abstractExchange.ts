@@ -19,9 +19,11 @@ import type {
   TimeProfile,
   RebateRecord,
   RebateOverview,
+  KeyPermissions,
 } from './types'
 import { ExchangeIntervals, StatusEnum, PositionInfo } from './types'
 import { convertNumberToString } from '../utils/math'
+import { unknownPermissions } from './helpers/keyPermissions'
 
 export interface Exchange {
   returnGood<T>(
@@ -496,6 +498,21 @@ abstract class AbsctractExchange implements Exchange {
   abstract getRebateOverview(
     timestamp: number,
   ): Promise<BaseReturn<RebateOverview>>
+
+  /**
+   * What the exchange says these credentials are allowed to do — above all,
+   * whether they can withdraw. Gainium only ever needs read + trade, and until
+   * this existed we relied on users happening to create trade-only keys.
+   *
+   * Concrete (not abstract) on purpose: an exchange that cannot answer inherits
+   * `unknown` and nothing downstream breaks. Overriding is opt-in per venue,
+   * and `unknown` must never be read as a failure.
+   */
+  async getKeyPermissions(): Promise<KeyPermissions> {
+    return unknownPermissions(
+      'This exchange does not expose API-key permissions',
+    )
+  }
 }
 
 export default AbsctractExchange

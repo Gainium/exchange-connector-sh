@@ -24,7 +24,12 @@ import {
   RebateRecord,
   BybitHost,
   bybitHostMap,
+  KeyPermissions,
 } from '../../types'
+import {
+  parseBybitApiKey,
+  unknownPermissions,
+} from '../../helpers/keyPermissions'
 import {
   RestClientV5 as BybitClient,
   AccountOrderV5,
@@ -649,6 +654,30 @@ class BybitExchange extends AbstractExchange implements Exchange {
           this.getAccountMargin,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
+      )
+  }
+
+  /**
+   * Same GET /v5/user/query-api call getApiPermission() already makes, read for
+   * the question it never asked: can this key withdraw? It also carries `ips`,
+   * the key's IP allowlist. Both go to the caller as facts — no rejection here.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    return this.client
+      .getQueryApiKey()
+      .then((account) => {
+        if (account.retCode !== 0) {
+          return unknownPermissions(
+            `Bybit query-api returned ${account.retCode}: ${account.retMsg}`,
+          )
+        }
+        return (
+          parseBybitApiKey(account.result) ??
+          unknownPermissions('Unrecognised Bybit query-api response')
+        )
+      })
+      .catch((e) =>
+        unknownPermissions(`Bybit query-api failed: ${e?.message ?? e}`),
       )
   }
 

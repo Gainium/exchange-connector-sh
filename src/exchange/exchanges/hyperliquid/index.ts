@@ -22,8 +22,11 @@ import {
   TimeProfile,
   RebateOverview,
   RebateRecord,
+  KeyPermissions,
 } from '../../types'
 import * as hl from '@nktkas/hyperliquid'
+import { getWalletAddress } from '@nktkas/hyperliquid/signing'
+import { unknownPermissions } from '../../helpers/keyPermissions'
 import limitHelper from './limit'
 import { makeSharedNonce } from './nonce'
 import { Logger } from '@nestjs/common'
@@ -1292,6 +1295,50 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         }`,
       )
       return { role: 'unknown' }
+    }
+  }
+
+  /**
+   * Hyperliquid has no permissioned API key — it holds a raw wallet private
+   * key — so "does this credential allow withdrawal?" reduces to "whose key is
+   * it?".
+   *
+   * An **API (agent) wallet** may only trade: HL blocks it from withdrawing or
+   * transferring. The **master** key can do everything, withdrawal included.
+   * `getAccountRole()` guards the *address* field against agent/master
+   * confusion, but the `secret` was never validated at all — nothing stopped a
+   * user pasting their master private key, handing Gainium a credential with
+   * full withdrawal capability. That is the same exposure as a withdrawal-
+   * enabled API key elsewhere, so it is reported the same way.
+   *
+   * The derivation is the SDK's own `getWalletAddress` — the very function that
+   * derives the signer when placing orders — so this cannot drift from what
+   * actually signs. Derivation failures answer `unknown`, never `no`.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    let signer: string
+    try {
+      signer = await getWalletAddress(this.secret as `0x${string}`)
+    } catch (e) {
+      return unknownPermissions(
+        `Hyperliquid signer address underivable: ${(e as Error)?.message ?? e}`,
+      )
+    }
+    const account = `${this.key ?? ''}`.toLowerCase()
+    if (!account) {
+      return unknownPermissions('Hyperliquid account address missing')
+    }
+    const isMasterKey = signer.toLowerCase() === account
+    return {
+      // A master key can withdraw; an agent key provably cannot.
+      withdraw: isMasterKey ? 'yes' : 'no',
+      transfer: isMasterKey ? 'yes' : 'no',
+      // HL keys are bearer credentials with no IP binding whatsoever.
+      ipRestricted: 'no',
+      detail: isMasterKey
+        ? 'Secret is the master account private key (full withdrawal capability)'
+        : 'Secret is an API (agent) wallet key — trade only',
+      checkedAt: +new Date(),
     }
   }
 

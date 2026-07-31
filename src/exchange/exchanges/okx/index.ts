@@ -23,7 +23,12 @@ import {
   RebateOverview,
   RebateRecord,
   OKXSource,
+  KeyPermissions,
 } from '../../types'
+import {
+  parseOkxAccountConfig,
+  unknownPermissions,
+} from '../../helpers/keyPermissions'
 import {
   AccountPosition,
   InstrumentType,
@@ -509,6 +514,27 @@ class OKXExchange extends AbstractExchange implements Exchange {
         min: a.minLeverage ? +a.minLeverage : 1,
       })),
     )
+  }
+
+  /**
+   * GET /api/v5/account/config. `perm` is the key's own permission list
+   * ("read_only,trade[,withdraw]") and `ip` its allowlist. Note we read the
+   * *declared* permission rather than probing a withdrawal endpoint: OKX's
+   * max-withdrawal call returns `code: 0` for keys whose `perm` is only
+   * "read_only,trade", so a probe would lie.
+   */
+  override async getKeyPermissions(): Promise<KeyPermissions> {
+    return this.client
+      .getAccountConfiguration()
+      .then((account) =>
+        account?.length
+          ? (parseOkxAccountConfig(account[0]) ??
+            unknownPermissions('Unrecognised OKX account config response'))
+          : unknownPermissions('OKX account config returned no rows'),
+      )
+      .catch((e) =>
+        unknownPermissions(`OKX account config failed: ${e?.message ?? e}`),
+      )
   }
 
   async getApiPermission(

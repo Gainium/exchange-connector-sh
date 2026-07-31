@@ -21,7 +21,9 @@ import {
   RebateOverview,
   OKXSource,
   BybitHost,
+  KeyPermissions,
 } from './types'
+import { unknownPermissions } from './helpers/keyPermissions'
 import AbstractExchange from './abstractExchange'
 import ExchangeChooser from './helpers/exchangeChooser'
 import { isExchangeEnabled } from '../utils/adminConfig'
@@ -293,6 +295,39 @@ export class ExchangeService {
       auth.bybithost,
       auth.subaccount,
     )
+  }
+
+  /**
+   * What the exchange says these credentials may do — chiefly whether they can
+   * withdraw, plus any IP allowlist.
+   *
+   * Separate from `/verify` because a key's permissions can change *after* it
+   * passes verification: a user can enable withdrawal on a key that is already
+   * connected and trading. This endpoint is what the periodic re-check calls,
+   * so re-auditing the fleet does not mean re-running full verification (and
+   * cannot accidentally flip a healthy connection's `status`).
+   *
+   * Always resolves. An exchange that cannot answer yields `unknown`, which
+   * callers must treat as "no information", never as "no permission".
+   */
+  async keyPermissions(auth: AuthData): Promise<KeyPermissions> {
+    try {
+      return await this.getExchange(
+        auth.exchange,
+        auth.key,
+        auth.secret,
+        auth.passphrase,
+        auth.keystype,
+        auth.okxsource,
+        auth.code,
+        auth.bybithost,
+        auth.subaccount,
+      ).getKeyPermissions()
+    } catch (e) {
+      return unknownPermissions(
+        `Permission probe failed: ${(e as Error)?.message ?? e}`,
+      )
+    }
   }
 
   async accountType(auth: AuthData): Promise<{ type: number }> {

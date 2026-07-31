@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.1] - 2026-08-01
+
+### Fixed
+
+- Bitget: `wtow` is no longer treated as a withdrawal authority. The code was inferred rather than documented, and the authority sets returned by live keys contradict it — Bitget makes IP-binding mandatory on withdrawal-enabled keys, yet keys carrying `wtow` are markedly *less* likely to be IP-bound than keys without it, the opposite of what a real withdrawal permission would produce. Since main-app refuses a new connection whose key reports `withdraw: 'yes'`, this was wrongly turning away legitimate Bitget connections, citing a permission the key did not have. `chow`, the other plausible candidate, shows the same inverted pattern and is likewise not withdrawal; neither is added to the known-non-withdrawal list, since ruling a code out is not the same as knowing what it grants, so their keys still resolve to `unknown`.
+
+## [1.18.0] - 2026-07-31
+
+### Added
+
+- Withdrawal-permission detection for exchange API keys. `getKeyPermissions()` reports what a key is allowed to do — withdrawal, internal transfer, IP allowlist — per exchange (Binance `apiRestrictions`, Bybit `query-api`, KuCoin `user/api-key`, OKX `account/config`, Bitget `spot/account/info`, Coinbase `key_permissions`, Kraken via a `WithdrawMethods` probe). Gainium only ever needs read + trade, and withdrawal is never required by any feature; until now nothing verified that a stored key was actually limited that way.
+- `VerifyResponse.permissions` (optional, additive) and a new `GET /keyPermissions` endpoint for periodic re-auditing without running a full verification.
+- Hyperliquid: detect a pasted **master** private key. An API/agent wallet key can only trade, a master key can withdraw; the account address was validated but the secret never was. The signer address is now derived with the SDK's own `getWalletAddress` and compared against the account.
+
+### Notes
+
+- Every state is tri-state; `unknown` never means `no`. The probe runs concurrently with verification, cannot change a verify verdict, and rejects nothing — reject-vs-flag policy lives in main-app, which knows whether a connection is new.
+
 ## [1.17.0] - 2026-07-30
 
 ### Added

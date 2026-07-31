@@ -13,11 +13,13 @@ import {
   ExchangeEnum,
   Futures,
   OKXSource,
+  KeyPermissions,
   StatusEnum,
   TradeTypeEnum,
   VerifyResponse,
 } from '../types'
 import { getBinanceBase } from './exchaneUtils'
+import { parseBinanceRestrictions, unknownPermissions } from './keyPermissions'
 import fetch from 'isomorphic-unfetch'
 
 // The `binance` client throws an Error-like object whose useful payload
@@ -45,6 +47,35 @@ const errStr = (e: any): string => {
   } catch {
     return String(e)
   }
+}
+
+/**
+ * Run a verifier and its key-permission probe together, and staple the
+ * permissions onto the result.
+ *
+ * Concurrent on purpose: `addExchange` already fans out several serial exchange
+ * round trips per leg (bug #216 measured 18.9s worst case), so the probe must
+ * not add another one to the critical path.
+ *
+ * The probe can never change the verdict. `getKeyPermissions()` resolves to
+ * `unknown` rather than throwing, but the extra `.catch` is deliberate belt and
+ * braces: a credential that is fine must never fail verification because a
+ * permissions lookup broke. Deciding what to *do* about a withdrawal-enabled
+ * key belongs to main-app, which knows whether the connection is new.
+ */
+const withPermissions = async (
+  client: { getKeyPermissions: () => Promise<KeyPermissions> },
+  verify: () => Promise<VerifyResponse>,
+): Promise<VerifyResponse> => {
+  const [result, permissions] = await Promise.all([
+    verify(),
+    client
+      .getKeyPermissions()
+      .catch((e) =>
+        unknownPermissions(`Permission probe failed: ${e?.message ?? e}`),
+      ),
+  ])
+  return { ...result, permissions }
 }
 
 const verifyBinance = async (
@@ -88,6 +119,13 @@ const verifyBinance = async (
                     ? res.enableSpotAndMarginTrading
                     : false,
             reason: JSON.stringify(res),
+            // Same payload, no extra round trip: apiRestrictions already
+            // carries enableWithdrawals and ipRestrict, we simply never looked.
+            permissions:
+              parseBinanceRestrictions(res) ??
+              unknownPermissions(
+                'Unrecognised Binance apiRestrictions response',
+              ),
           }
         })
         .catch((e) => ({
@@ -116,13 +154,15 @@ const verifyKucoin = async (
     secret,
     pass,
   )
-  return await client
-    .getBalance()
-    .then((res) => ({
-      status: res.status === StatusEnum.ok,
-      reason: JSON.stringify(res),
-    }))
-    .catch((e) => ({ status: false, reason: `Kucoin catch ${e}` }))
+  return await withPermissions(client, () =>
+    client
+      .getBalance()
+      .then((res) => ({
+        status: res.status === StatusEnum.ok,
+        reason: JSON.stringify(res),
+      }))
+      .catch((e) => ({ status: false, reason: `Kucoin catch ${e}` })),
+  )
 }
 
 const verifyBitget = async (
@@ -141,13 +181,15 @@ const verifyBitget = async (
     secret,
     pass,
   )
-  return await client
-    .getApiPermission()
-    .then((res) => ({
-      status: res.status === StatusEnum.ok,
-      reason: JSON.stringify(res),
-    }))
-    .catch((e) => ({ status: false, reason: `Bitget catch ${e}` }))
+  return await withPermissions(client, () =>
+    client
+      .getApiPermission()
+      .then((res) => ({
+        status: res.status === StatusEnum.ok,
+        reason: JSON.stringify(res),
+      }))
+      .catch((e) => ({ status: false, reason: `Bitget catch ${e}` })),
+  )
 }
 
 const verifyBybit = async (
@@ -171,13 +213,15 @@ const verifyBybit = async (
     undefined,
     bybitHost,
   )
-  return await client
-    .getApiPermission()
-    .then((res) => ({
-      status: res.status === StatusEnum.ok,
-      reason: JSON.stringify(res),
-    }))
-    .catch((e) => ({ status: false, reason: `Bybit catch ${e}` }))
+  return await withPermissions(client, () =>
+    client
+      .getApiPermission()
+      .then((res) => ({
+        status: res.status === StatusEnum.ok,
+        reason: JSON.stringify(res),
+      }))
+      .catch((e) => ({ status: false, reason: `Bybit catch ${e}` })),
+  )
 }
 
 const verifyOKX = async (
@@ -200,13 +244,15 @@ const verifyOKX = async (
     undefined,
     okxSource,
   )
-  return await client
-    .getApiPermission()
-    .then((res) => ({
-      status: res.status === StatusEnum.ok,
-      reason: JSON.stringify(res),
-    }))
-    .catch((e) => ({ status: false, reason: `OKX catch ${e}` }))
+  return await withPermissions(client, () =>
+    client
+      .getApiPermission()
+      .then((res) => ({
+        status: res.status === StatusEnum.ok,
+        reason: JSON.stringify(res),
+      }))
+      .catch((e) => ({ status: false, reason: `OKX catch ${e}` })),
+  )
 }
 
 const verifyCoinbase = async (
@@ -227,13 +273,15 @@ const verifyCoinbase = async (
     undefined,
     keysType,
   )
-  return await client
-    .getApiPermission()
-    .then((res) => ({
-      status: res.status === StatusEnum.ok && res.data,
-      reason: JSON.stringify(res),
-    }))
-    .catch((e) => ({ status: false, reason: `Coinbase catch ${e}` }))
+  return await withPermissions(client, () =>
+    client
+      .getApiPermission()
+      .then((res) => ({
+        status: res.status === StatusEnum.ok && res.data,
+        reason: JSON.stringify(res),
+      }))
+      .catch((e) => ({ status: false, reason: `Coinbase catch ${e}` })),
+  )
 }
 
 const verifyHyperliquid = async (
@@ -269,13 +317,15 @@ const verifyHyperliquid = async (
         `${roleInfo.master ? ` (${roleInfo.master})` : ''} instead.`,
     }
   }
-  return await client
-    .getBalance()
-    .then((res) => ({
-      status: res.status === StatusEnum.ok && !!res.data,
-      reason: res.status === StatusEnum.ok ? '' : JSON.stringify(res),
-    }))
-    .catch((e) => ({ status: false, reason: `Hyperliquid catch ${e}` }))
+  return await withPermissions(client, () =>
+    client
+      .getBalance()
+      .then((res) => ({
+        status: res.status === StatusEnum.ok && !!res.data,
+        reason: res.status === StatusEnum.ok ? '' : JSON.stringify(res),
+      }))
+      .catch((e) => ({ status: false, reason: `Hyperliquid catch ${e}` })),
+  )
 }
 
 const verifyKraken = async (
@@ -288,30 +338,32 @@ const verifyKraken = async (
     key,
     secret,
   )
-  return await client
-    .getBalance()
-    .then(async (res) => {
-      if (res.status !== StatusEnum.ok) {
-        return { status: false, reason: JSON.stringify(res) }
-      }
-      // REST works — but a key without the "WebSocket interface" permission
-      // still can't feed the realtime user stream (fills degrade to delayed
-      // reconcile sweeps with no error anywhere). Reject it here with the
-      // exact toggle to flip, like the Hyperliquid agent-address guard above.
-      const ws = await client.verifyWebsocketPermission()
-      if (!ws.ok) {
-        return {
-          status: false,
-          reason:
-            `Your Kraken API key is missing the "WebSocket interface" ` +
-            `permission, which Gainium needs for realtime order updates. ` +
-            `On Kraken go to Settings → API, edit this key, enable ` +
-            `"WebSocket interface" and save — then verify again.`,
+  return await withPermissions(client, () =>
+    client
+      .getBalance()
+      .then(async (res) => {
+        if (res.status !== StatusEnum.ok) {
+          return { status: false, reason: JSON.stringify(res) }
         }
-      }
-      return { status: true, reason: JSON.stringify(res) }
-    })
-    .catch((e) => ({ status: false, reason: `Kraken catch ${e}` }))
+        // REST works — but a key without the "WebSocket interface" permission
+        // still can't feed the realtime user stream (fills degrade to delayed
+        // reconcile sweeps with no error anywhere). Reject it here with the
+        // exact toggle to flip, like the Hyperliquid agent-address guard above.
+        const ws = await client.verifyWebsocketPermission()
+        if (!ws.ok) {
+          return {
+            status: false,
+            reason:
+              `Your Kraken API key is missing the "WebSocket interface" ` +
+              `permission, which Gainium needs for realtime order updates. ` +
+              `On Kraken go to Settings → API, edit this key, enable ` +
+              `"WebSocket interface" and save — then verify again.`,
+          }
+        }
+        return { status: true, reason: JSON.stringify(res) }
+      })
+      .catch((e) => ({ status: false, reason: `Kraken catch ${e}` })),
+  )
 }
 
 const verifyPaper = async (

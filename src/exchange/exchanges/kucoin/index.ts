@@ -1043,7 +1043,12 @@ class KucoinExchange extends AbstractExchange implements Exchange {
         3,
         timeProfile,
       )) || timeProfile
-    if (countData) {
+    // `countData` means "the N most recent candles" and is only meaningful when
+    // the caller named no range. Applying it unconditionally overwrote an
+    // explicit from/to with a window ending now, so every ranged request came
+    // back as the newest N candles (bug #228: KuCoin futures backtests silently
+    // ran on the last day or two instead of the requested period).
+    if (countData && !from && !to) {
       options.to = Math.floor(new Date().getTime())
       options.from = options.to - intervalTimeMap[interval] * 1000 * countData
     }
@@ -2352,7 +2357,9 @@ class KucoinExchange extends AbstractExchange implements Exchange {
     if (to) {
       options.endAt = Math.floor(parseFloat(`${to}`) / 1000)
     }
-    if (countData) {
+    // Same count-vs-range precedence as `futures_getCandles` above — only fall
+    // back to "the N most recent candles" when the caller named no range.
+    if (countData && !from && !to) {
       options.endAt = Math.floor(new Date().getTime() / 1000)
       options.startAt = options.endAt - intervalTimeMap[interval] * countData
     }

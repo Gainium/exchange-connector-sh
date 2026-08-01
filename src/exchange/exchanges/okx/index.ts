@@ -70,6 +70,20 @@ export const timeIntervalMap = {
   [ExchangeIntervals.oneW]: 7 * 24 * 60 * 60 * 1000,
 }
 
+/**
+ * Page size for both candle endpoints. `/market/candles` and
+ * `/market/history-candles` each serve up to 300 per call, but OKX defaults to
+ * 100 when `limit` is omitted — which is what we used to send, so every chart,
+ * backtest and bot warm-up paged at a third of the available rate (bug #243).
+ *
+ * This is a page size, NOT a candle count: OKX still clamps the response to the
+ * requested `before`/`after` window, so a narrower range comes back short
+ * rather than reaching past it. That is why the count is constant here instead
+ * of the caller's `countData` — feeding a count in would re-create bug #228,
+ * where a limit replaced the requested range.
+ */
+const candleMaxSize = 300
+
 class OKXExchange extends AbstractExchange implements Exchange {
   /** OKX client */
   protected client: OKXRestClient
@@ -1425,6 +1439,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         bar: this.convertInterval(interval),
         before: data.before,
         after: data.after,
+        limit: `${candleMaxSize}`,
       })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -1503,6 +1518,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         bar: this.convertInterval(interval),
         before: data.before,
         after: data.after,
+        limit: `${candleMaxSize}`,
       })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')

@@ -1979,7 +1979,22 @@ class BitgetExchange extends AbstractExchange implements Exchange {
    * Bitget spot `getSpotCandles` (recent) supports a limited lookback per
    * granularity. Anything older must be fetched via `getSpotHistoricCandles`
    * which only accepts `endTime` + `limit` and walks backward.
-   * Source: Bitget API docs.
+   *
+   * These are MEASURED against the live API, not taken from the docs — the
+   * documented figures are too optimistic and asking `/spot/market/candles`
+   * for a window it cannot reach yields `code 00000` with an empty (or
+   * silently truncated) page, i.e. a hole in the series rather than an error
+   * (bug #245). Measured 2026-08-01 on BTCUSDT, as the oldest chunk start a
+   * recent page still fully covers; each is 1 day inside the real cliff so a
+   * boundary chunk cannot land on the wrong side of it:
+   *
+   *   1min/5min/15min/30min  31.00d  ->  30d
+   *   1h                     60.00d  ->  59d
+   *   4h                    240.00d  -> 239d
+   *   6Hutc                 360.17d  -> 355d   (1Dutc >1200d, 1Wutc 705d)
+   *
+   * Re-measure with a 200-candle window walked back per granularity. The
+   * numbers drift; `spot_getCandles` no longer depends on them being exact.
    */
   private getSpotIntervalLookbackMs(interval: ExchangeIntervals): number {
     const day = 24 * 60 * 60 * 1000
@@ -1987,20 +2002,20 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       case ExchangeIntervals.oneM:
       case ExchangeIntervals.threeM:
       case ExchangeIntervals.fiveM:
-        return 30 * day
       case ExchangeIntervals.fifteenM:
-        return 52 * day
       case ExchangeIntervals.thirtyM:
-        return 62 * day
+        // Every sub-hour granularity shares one 31-day floor.
+        return 30 * day
+      // `twoH` is served by requesting granularity `1h` (see convertInterval),
+      // so it inherits the 1h window rather than a wider one of its own.
       case ExchangeIntervals.oneH:
-        return 83 * day
       case ExchangeIntervals.twoH:
-        return 120 * day
+        return 59 * day
       case ExchangeIntervals.fourH:
-        return 240 * day
+        return 239 * day
       default:
-        // 6h / 8h / 1d / 1w — effectively no practical limit for our use
-        return 360 * day
+        // 6h / 8h / 1d / 1w — 6Hutc is the shallowest of these at 360d.
+        return 355 * day
     }
   }
 
@@ -2179,6 +2194,44 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         }
 
         const data = result.data as string[][]
+
+        // A recent chunk can fail to cover the head of its own window without
+        // ever saying so: past its (drifting) lookback, `/spot/market/candles`
+        // answers `code 00000` with either an empty page or one clamped to the
+        // floor, both of which read exactly like "no trades in this window".
+        // Skipping it punches a hole mid-series, and a hole ends a backtest —
+        // the dashboard loader reads an empty page as the end of history
+        // (bug #245). Re-ask the window from the historic endpoint, which has
+        // no such floor, before writing it off. It is `endTime`-only and
+        // 200-capped, so re-cut the chunk to that size and advance the cursor
+        // by what we actually re-read.
+        const coversStart = !!data?.length && +data[0][0] <= cursor + step
+        if (useRecent && !coversStart) {
+          const retryEnd = Math.min(cursor + historicMaxSize * step, chunkEnd)
+          timeProfile =
+            (await this.checkLimits(
+              'getSpotHistoricCandles',
+              20,
+              timeProfile,
+            )) || timeProfile
+          timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+          const retry = await this.client.getSpotHistoricCandles({
+            symbol,
+            endTime: `${retryEnd}`,
+            limit: `${historicMaxSize}`,
+            granularity,
+          })
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          const retryData = retry.data as string[][]
+          if (retry.code === '00000' && retryData?.length) {
+            allCandles.push(...retryData.map(mapRow))
+            cursor = retryEnd + step
+            continue
+          }
+          // History has nothing either — genuinely no data here. Fall through
+          // and keep whatever the recent page did return.
+        }
+
         if (!data || data.length === 0) {
           // nothing in this window — advance to avoid infinite loop
           cursor = chunkEnd + step

@@ -164,6 +164,27 @@ function main() {
     parseBybitApiKey({ ips: ['*'], permissions: { Wallet: [] } })?.ipRestricted,
     'no',
   )
+  // Bybit reports `ips: []` for keys bound through its third-party-app flow,
+  // where the addresses live on Bybit's side rather than in the key's own
+  // allowlist. Such a key reads empty here and still answers `10010 Unmatched
+  // IP` from an address outside its binding — so empty cannot mean unbound.
+  // A wrong 'no' here reports a protected key as exposed.
+  expect(
+    'bybit: an EMPTY allowlist is unknown, not "unrestricted"',
+    parseBybitApiKey({ ips: [], permissions: { Wallet: [] } })?.ipRestricted,
+    'unknown',
+  )
+  expect(
+    'bybit: a missing ips field is likewise unknown',
+    parseBybitApiKey({ permissions: { Wallet: [] } })?.ipRestricted,
+    'unknown',
+  )
+  expect(
+    'bybit: a populated allowlist is still a reliable positive',
+    parseBybitApiKey({ ips: ['1.2.3.4'], permissions: { Wallet: [] } })
+      ?.ipRestricted,
+    'yes',
+  )
   expect(
     'bybit: missing permissions block',
     parseBybitApiKey({ readOnly: 0 }),
@@ -304,6 +325,25 @@ function main() {
     'bitget: chow is not treated as an on-chain/withdrawal code',
     parseBitgetAccountInfo({ authorities: ['chow', 'coow', 'stow'], ips: '' })
       ?.withdraw,
+    'unknown',
+  )
+  // An ABSENT ips field is silence; a PRESENT but blank one is Bitget saying
+  // "no allowlist". Collapsing both to [] made every key with no reported
+  // allowlist look deliberately unrestricted.
+  expect(
+    'bitget: a MISSING ips field is unknown, not "unrestricted"',
+    parseBitgetAccountInfo({ authorities: ['coow', 'cpow'] })?.ipRestricted,
+    'unknown',
+  )
+  expect(
+    'bitget: a present-but-blank ips field really does mean no allowlist',
+    parseBitgetAccountInfo({ authorities: ['coow', 'cpow'], ips: '' })
+      ?.ipRestricted,
+    'no',
+  )
+  expect(
+    'okx: a MISSING ip field is unknown, not "unrestricted"',
+    parseOkxAccountConfig({ perm: 'read_only,trade' })?.ipRestricted,
     'unknown',
   )
   expect(

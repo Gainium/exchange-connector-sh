@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.2] - 2026-08-03
+
+### Fixed
+
+- An empty IP allowlist is no longer read as "this key is unrestricted". The parsers previously flattened three different situations into `[]` and answered `ipRestricted: 'no'` for all of them: an allowlist the exchange reported as empty, a field the exchange omitted entirely, and — on Bybit — an allowlist that is empty in the API response while the key is in fact bound, because bindings made through Bybit's third-party-app flow are held on Bybit's side rather than in the key's own allowlist. A key in that last state reads empty here and still answers `10010 Unmatched IP` when called from an address outside its binding. The three are now distinguished: a populated list is `'yes'`, an explicit `['*']` wildcard is `'no'`, a present-but-empty field is `'no'`, an absent field is `'unknown'`, and for Bybit an empty list is `'unknown'` as well. Bitget (`ips`) and OKX (`ip`) no longer synthesise `[]` for a missing field. This follows the rule the module is built on — a parser that cannot tell must answer `unknown`, never `no` — and removes a false negative that reported IP-bound keys as unprotected.
+
 ## [1.18.1] - 2026-08-01
 
 ### Fixed

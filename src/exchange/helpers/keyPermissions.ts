@@ -52,15 +52,50 @@ export const unknownPermissions = (detail?: string): KeyPermissions => ({
 const state = (value: boolean | undefined | null): PermissionState =>
   value === true ? 'yes' : value === false ? 'no' : 'unknown'
 
-/** `[]` and `['*']` both mean "any IP" — Bybit uses the latter. */
+/**
+ * Resolves the IP-binding state from an exchange's declared allowlist.
+ *
+ * Three cases, and the distinction between the last two is the whole point:
+ *
+ * - **Populated** list → `'yes'`. Reliable positive; those are the bound
+ *   addresses.
+ * - **Explicit wildcard** (`['*']`) → `'no'`. Reliable negative — the exchange
+ *   is stating "any IP".
+ * - **Empty** → depends on whether emptiness is a statement or a silence, which
+ *   only the caller knows, hence `emptyMeans`.
+ *
+ * A field that is *present and empty* is usually the exchange saying "no
+ * allowlist", which is a real `'no'`. A field that is *absent* says nothing at
+ * all, and must not be flattened into `[]` and then read as `'no'` — that
+ * manufactures a safety claim out of missing data.
+ *
+ * Bybit is the exception that forces the parameter: it returns `ips: []` even
+ * for keys that are genuinely bound, because bindings established through its
+ * third-party-app flow live on Bybit's side rather than in the key's own
+ * allowlist. Such a key reads `[]` here and still answers `10010 Unmatched IP`
+ * when called from an address outside its binding. So for Bybit, empty means
+ * `'unknown'`.
+ *
+ * This follows the rule the whole module is built on: a parser that cannot tell
+ * must answer `unknown`, never `no`.
+ */
 const ipState = (
   ips: string[] | undefined,
+  emptyMeans: PermissionState = 'no',
 ): { ipRestricted: PermissionState; ips?: string[] } => {
   if (!Array.isArray(ips)) {
     return { ipRestricted: 'unknown' }
   }
-  const bound = ips.map((i) => `${i}`.trim()).filter((i) => i && i !== '*')
-  return { ipRestricted: bound.length ? 'yes' : 'no', ips: bound }
+  const trimmed = ips.map((i) => `${i}`.trim()).filter(Boolean)
+  const bound = trimmed.filter((i) => i !== '*')
+  if (bound.length) {
+    return { ipRestricted: 'yes', ips: bound }
+  }
+  // An explicit wildcard is the exchange stating "any IP" — always authoritative.
+  if (trimmed.includes('*')) {
+    return { ipRestricted: 'no', ips: bound }
+  }
+  return { ipRestricted: emptyMeans, ips: bound }
 }
 
 /** Case-insensitive membership over a permission vocabulary. */
@@ -121,7 +156,8 @@ export const parseBybitApiKey = (result: unknown): KeyPermissions | null => {
   return {
     withdraw: has(allTokens, 'withdraw') ? 'yes' : 'no',
     transfer: has(wallet, 'transfer') ? 'yes' : 'no',
-    ...ipState(r.ips as string[]),
+    // Bybit only: an empty allowlist does NOT mean unbound — see ipState.
+    ...ipState(r.ips as string[], 'unknown'),
     detail: `Wallet=[${wallet.join(',')}] readOnly=${r.readOnly}`,
     checkedAt: +new Date(),
   }
@@ -181,13 +217,15 @@ export const parseOkxAccountConfig = (
   if (!tokens.length) {
     return null
   }
+  // Same distinction as Bitget: `ip: ''` is an empty allowlist, a missing `ip`
+  // field is no information at all.
   const ips =
-    typeof c.ip === 'string' && c.ip.trim()
+    typeof c.ip === 'string'
       ? c.ip
           .split(',')
           .map((i) => i.trim())
           .filter(Boolean)
-      : []
+      : undefined
   return {
     withdraw: has(tokens, 'withdraw') ? 'yes' : 'no',
     // OKX folds internal transfers into `trade`/`withdraw` rather than
@@ -270,13 +308,16 @@ export const parseBitgetAccountInfo = (
   if (!tokens.length) {
     return null
   }
+  // `ips` is a comma-separated string. Present-but-blank is Bitget saying "no
+  // allowlist"; absent says nothing. Keep those apart — collapsing both to `[]`
+  // turns missing data into a claim that the key is unbound.
   const ips =
-    typeof d.ips === 'string' && d.ips.trim()
+    typeof d.ips === 'string'
       ? d.ips
           .split(',')
           .map((i) => i.trim())
           .filter(Boolean)
-      : []
+      : undefined
   const isWithdraw = (t: string) =>
     BITGET_WITHDRAW_CODES.some((c) => t.includes(c))
   const isTransfer = (t: string) =>

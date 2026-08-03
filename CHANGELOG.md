@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.3] - 2026-08-03
+
+### Fixed
+
+- An empty IP allowlist now answers `unknown` on **every** exchange, not just Bybit. 1.18.2 kept `'no'` for a present-but-empty field on OKX and Bitget on the reasoning that an empty field is the exchange affirmatively reporting no allowlist. That reasoning was wrong: OKX ("Linking third-party apps") and Bitget offer the same connect-a-third-party-app flow as Bybit, which provisions the key and configures its IP binding on the exchange's side, where it does not appear in the key's own allowlist. A key created that way is genuinely bound, reports an empty allowlist, and still rejects calls from outside its binding. Gainium's own connection guides steer users into that flow, so these are the common case rather than an edge case. An empty allowlist therefore cannot distinguish "unrestricted" from "restricted somewhere not visible here", and is not evidence either way. A populated list remains a reliable positive and an explicit `['*']` wildcard remains a reliable negative.
+
 ## [1.18.2] - 2026-08-03
 
 ### Fixed

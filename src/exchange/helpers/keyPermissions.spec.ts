@@ -236,7 +236,7 @@ function main() {
   expect(
     'okx: the real perm string',
     shape(parseOkxAccountConfig({ perm: 'read_only,trade', ip: '' })),
-    { withdraw: 'no', transfer: 'unknown', ipRestricted: 'no', ips: [] },
+    { withdraw: 'no', transfer: 'unknown', ipRestricted: 'unknown', ips: [] },
   )
   expect(
     'okx: withdraw in perm is caught',
@@ -327,24 +327,36 @@ function main() {
       ?.withdraw,
     'unknown',
   )
-  // An ABSENT ips field is silence; a PRESENT but blank one is Bitget saying
-  // "no allowlist". Collapsing both to [] made every key with no reported
-  // allowlist look deliberately unrestricted.
+  // Bitget, like Bybit and OKX, provisions keys through a "connect a
+  // third-party app" flow that binds the IPs on its own side — so a genuinely
+  // bound key reports no allowlist here. Neither an absent nor a blank field is
+  // evidence the key is unrestricted.
   expect(
     'bitget: a MISSING ips field is unknown, not "unrestricted"',
     parseBitgetAccountInfo({ authorities: ['coow', 'cpow'] })?.ipRestricted,
     'unknown',
   )
   expect(
-    'bitget: a present-but-blank ips field really does mean no allowlist',
+    'bitget: a present-but-blank ips field is ALSO unknown, not "unrestricted"',
     parseBitgetAccountInfo({ authorities: ['coow', 'cpow'], ips: '' })
       ?.ipRestricted,
-    'no',
+    'unknown',
   )
   expect(
     'okx: a MISSING ip field is unknown, not "unrestricted"',
     parseOkxAccountConfig({ perm: 'read_only,trade' })?.ipRestricted,
     'unknown',
+  )
+  expect(
+    'okx: a present-but-blank ip is ALSO unknown (third-party-app binding)',
+    parseOkxAccountConfig({ perm: 'read_only,trade', ip: '' })?.ipRestricted,
+    'unknown',
+  )
+  expect(
+    'okx: a populated allowlist is still a reliable positive',
+    parseOkxAccountConfig({ perm: 'read_only,trade', ip: '1.2.3.4' })
+      ?.ipRestricted,
+    'yes',
   )
   expect(
     'bitget: empty authorities is not read as "no permissions"',

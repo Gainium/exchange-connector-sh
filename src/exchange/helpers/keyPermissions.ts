@@ -55,33 +55,30 @@ const state = (value: boolean | undefined | null): PermissionState =>
 /**
  * Resolves the IP-binding state from an exchange's declared allowlist.
  *
- * Three cases, and the distinction between the last two is the whole point:
- *
  * - **Populated** list → `'yes'`. Reliable positive; those are the bound
  *   addresses.
- * - **Explicit wildcard** (`['*']`) → `'no'`. Reliable negative — the exchange
- *   is stating "any IP".
- * - **Empty** → depends on whether emptiness is a statement or a silence, which
- *   only the caller knows, hence `emptyMeans`.
+ * - **Explicit wildcard** (`['*']`) → `'no'`. The exchange is affirmatively
+ *   stating "any IP", which is a claim rather than an absence.
+ * - **Empty or absent** → `'unknown'`. Never `'no'`.
  *
- * A field that is *present and empty* is usually the exchange saying "no
- * allowlist", which is a real `'no'`. A field that is *absent* says nothing at
- * all, and must not be flattened into `[]` and then read as `'no'` — that
- * manufactures a safety claim out of missing data.
+ * The empty case is the one worth explaining, because reading it as "unbound"
+ * is the obvious and wrong thing to do. **Bybit, OKX and Bitget all offer a
+ * "connect a third-party app" flow that provisions the key and configures its
+ * IP binding on the exchange's side.** A key created that way is genuinely
+ * bound, but the binding does not appear in the key's own allowlist, so the API
+ * reports it as empty. Such a key reads empty here and still answers
+ * `10003`/`10010 Unmatched IP` when called from an address outside its binding.
+ * Gainium's own connection guides steer users into exactly this flow, so these
+ * are common, not edge cases.
  *
- * Bybit is the exception that forces the parameter: it returns `ips: []` even
- * for keys that are genuinely bound, because bindings established through its
- * third-party-app flow live on Bybit's side rather than in the key's own
- * allowlist. Such a key reads `[]` here and still answers `10010 Unmatched IP`
- * when called from an address outside its binding. So for Bybit, empty means
- * `'unknown'`.
- *
- * This follows the rule the whole module is built on: a parser that cannot tell
- * must answer `unknown`, never `no`.
+ * That leaves no way to tell an empty allowlist apart from a key bound
+ * elsewhere — and since an empty field cannot distinguish "not restricted" from
+ * "restricted somewhere I cannot see", it is not evidence either way. The
+ * module's standing rule applies: a parser that cannot tell must answer
+ * `unknown`, never `no`. A false `'no'` reports a protected key as exposed.
  */
 const ipState = (
   ips: string[] | undefined,
-  emptyMeans: PermissionState = 'no',
 ): { ipRestricted: PermissionState; ips?: string[] } => {
   if (!Array.isArray(ips)) {
     return { ipRestricted: 'unknown' }
@@ -91,11 +88,9 @@ const ipState = (
   if (bound.length) {
     return { ipRestricted: 'yes', ips: bound }
   }
-  // An explicit wildcard is the exchange stating "any IP" — always authoritative.
-  if (trimmed.includes('*')) {
-    return { ipRestricted: 'no', ips: bound }
-  }
-  return { ipRestricted: emptyMeans, ips: bound }
+  // An explicit wildcard is the exchange stating "any IP" — a positive claim,
+  // unlike an empty list, which is merely the absence of one.
+  return { ipRestricted: trimmed.includes('*') ? 'no' : 'unknown', ips: bound }
 }
 
 /** Case-insensitive membership over a permission vocabulary. */
@@ -156,8 +151,7 @@ export const parseBybitApiKey = (result: unknown): KeyPermissions | null => {
   return {
     withdraw: has(allTokens, 'withdraw') ? 'yes' : 'no',
     transfer: has(wallet, 'transfer') ? 'yes' : 'no',
-    // Bybit only: an empty allowlist does NOT mean unbound — see ipState.
-    ...ipState(r.ips as string[], 'unknown'),
+    ...ipState(r.ips as string[]),
     detail: `Wallet=[${wallet.join(',')}] readOnly=${r.readOnly}`,
     checkedAt: +new Date(),
   }
@@ -217,8 +211,9 @@ export const parseOkxAccountConfig = (
   if (!tokens.length) {
     return null
   }
-  // Same distinction as Bitget: `ip: ''` is an empty allowlist, a missing `ip`
-  // field is no information at all.
+  // Same as Bitget: OKX's "Linking third-party apps" flow configures the IP
+  // binding on OKX's side, so a bound key reports an empty `ip`. Empty and
+  // absent both resolve to 'unknown'.
   const ips =
     typeof c.ip === 'string'
       ? c.ip
@@ -308,9 +303,9 @@ export const parseBitgetAccountInfo = (
   if (!tokens.length) {
     return null
   }
-  // `ips` is a comma-separated string. Present-but-blank is Bitget saying "no
-  // allowlist"; absent says nothing. Keep those apart — collapsing both to `[]`
-  // turns missing data into a claim that the key is unbound.
+  // `ips` is a comma-separated string when present. Neither absent nor blank is
+  // evidence the key is unbound — Bitget's third-party-app flow binds on its
+  // own side, so a bound key reports nothing here. Both resolve to 'unknown'.
   const ips =
     typeof d.ips === 'string'
       ? d.ips

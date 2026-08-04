@@ -130,7 +130,7 @@ function main() {
         },
       }),
     ),
-    { withdraw: 'no', transfer: 'yes', ipRestricted: 'no', ips: [] },
+    { withdraw: 'no', transfer: 'yes', ipRestricted: 'unknown', ips: [] },
   )
   expect(
     'bybit: Withdraw in the Wallet group is caught',
@@ -159,10 +159,22 @@ function main() {
     })?.withdraw,
     'yes',
   )
+  // A wildcard is NOT proof the key is unrestricted, and it is not one IP
+  // literally named "*" either. Bybit emits ["*"] for keys bound through its
+  // third-party-app flow, where the binding lives on Bybit's side and never
+  // appears in the key's own allowlist — such a key reports ["*"] here and
+  // still answers 10010 Unmatched IP from an unpublished address. Measured:
+  // when this returned 'no', 441 of 443 re-probed credentials were labelled
+  // unprotected while bound.
   expect(
-    'bybit: ["*"] means unrestricted, not one IP named "*"',
+    'bybit: ["*"] is unknown — it is absence of a local allowlist, not proof of none',
     parseBybitApiKey({ ips: ['*'], permissions: { Wallet: [] } })?.ipRestricted,
-    'no',
+    'unknown',
+  )
+  expect(
+    'okx: a "*" allowlist is likewise unknown',
+    parseOkxAccountConfig({ perm: 'read_only,trade', ip: '*' })?.ipRestricted,
+    'unknown',
   )
   // Bybit reports `ips: []` for keys bound through its third-party-app flow,
   // where the addresses live on Bybit's side rather than in the key's own

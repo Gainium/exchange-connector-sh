@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.18.4] - 2026-08-04
+
+### Fixed
+
+- A declared IP allowlist can now only ever prove the positive: a populated list answers `yes`, and empty, absent **or an explicit `*` wildcard** all answer `unknown`. 1.18.3 still treated `['*']` as the exchange affirmatively stating "any IP" and returned `no`. That was wrong, and measurably so — Bybit emits `['*']` rather than `[]`, so of 443 credentials re-probed after 1.18.3 shipped, **441 came back `no`**: the change accomplished nothing for the exchange that motivated it. A wildcard is not a claim that the key is unrestricted; it means the key's own allowlist is empty, which is equally true of a key bound through the connect-a-third-party-app flow where the binding lives on the exchange's side. Such keys report `['*']` and still reject calls from unpublished addresses. The cost is deliberate: `ipRestricted` is now effectively binary (`yes`/`unknown`) and no key can be declared unprotected from this field alone — establishing that requires the two-sided capability probe. Binance is unaffected and can still answer `no`, because it declares `ipRestrict` as an explicit boolean rather than an allowlist to be inferred from.
+
 ## [1.18.3] - 2026-08-03
 
 ### Fixed

@@ -961,6 +961,58 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     )
   }
 
+  /**
+   * Kraken Futures pools every collateral currency into one flex account, so a
+   * wallet holding only EUR can still margin a USD-quoted perpetual. Report the
+   * venue's own `availableMargin` (USD) so order sizing stops reading the
+   * absent USD *quantity* as "no funds". Spot and the non-flex account types
+   * keep the base behaviour (`null` = use the quote-asset balance).
+   */
+  async getMarginAvailableUsd(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<number | null>> {
+    if (!this.usdm || !this.derivativesClient) {
+      return this.returnGood<number | null>(timeProfile, [])(null)
+    }
+
+    timeProfile =
+      (await this.checkLimits('getAccountBalance', undefined, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+    return this.derivativesClient
+      .getAccounts()
+      .then((result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (result.result !== 'success' || !result.accounts) {
+          throw new Error(
+            `Failed to get margin. Result: ${result.result || 'undefined'}`,
+          )
+        }
+        const flex = result.accounts.flex
+        // Only the pooled account type has a cross-collateral figure worth
+        // reporting; anything else must fall back to the quote balance.
+        const available =
+          flex && typeof flex.availableMargin === 'number'
+            ? flex.availableMargin
+            : null
+        return this.returnGood<number | null>(
+          timeProfile,
+          [],
+        )(
+          available !== null && isFinite(available) && available >= 0
+            ? available
+            : null,
+        )
+      })
+      .catch(
+        this.handleKrakenErrors(
+          this.getMarginAvailableUsd,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
   async getBalance(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FreeAsset>> {

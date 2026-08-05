@@ -222,6 +222,16 @@ export class ExchangeController {
     return this.exchangeService.getUserBalance(headers)
   }
 
+  /**
+   * USD margin available on pooled-collateral futures accounts (Kraken Futures
+   * flex). `data: null` means the venue has no such pool and the caller should
+   * size off the quote-asset balance from `/balance`.
+   */
+  @Get('/marginAvailableUsd')
+  async getMarginAvailableUsd(@Headers() headers: AuthData) {
+    return this.exchangeService.getMarginAvailableUsd(headers)
+  }
+
   @Get('/accountType')
   async accountType(@Headers() headers: AuthData) {
     const result = await this.exchangeService.accountType(headers)

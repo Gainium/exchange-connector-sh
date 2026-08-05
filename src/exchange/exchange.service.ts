@@ -280,6 +280,20 @@ export class ExchangeService {
     ).getBalance()
   }
 
+  getMarginAvailableUsd(auth: AuthData): Promise<BaseReturn<number | null>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getMarginAvailableUsd()
+  }
+
   verifyUser(
     tradeType: TradeTypeEnum,
     auth: AuthData,

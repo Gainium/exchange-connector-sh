@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-08-05
+
+### Added
+
+- `GET /marginAvailableUsd` reports the USD margin available on pooled-collateral futures accounts, implemented for Kraken Futures' flex (`multiCollateralMarginAccount`) and defaulting to `null` — "no opinion" — on every other venue and account type. Kraken pools all collateral currencies into one cross-margin account, so a wallet funded only in EUR can still margin a USD-quoted perpetual; the per-currency balances from `/balance` show no USD at all in that case, which reads as an empty account to anything sizing off the quote asset. This is deliberately a separate endpoint rather than a synthetic entry in `/balance`: that list is also summed to value a user's portfolio, so publishing the pooled USD figure there next to the per-currency holdings would count the same money twice. Callers must treat `null` as "fall back to the quote-asset balance".
+
 ## [1.18.4] - 2026-08-04
 
 ### Fixed

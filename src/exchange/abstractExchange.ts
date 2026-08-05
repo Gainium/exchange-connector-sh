@@ -38,6 +38,8 @@ export interface Exchange {
 
   getBalance(): Promise<BaseReturn<FreeAsset>>
 
+  getMarginAvailableUsd(): Promise<BaseReturn<number | null>>
+
   openOrder(order: {
     symbol: string
     side: OrderTypes
@@ -283,6 +285,29 @@ abstract class AbsctractExchange implements Exchange {
    * @returns {Promise<BaseReturn>} {asset: string; free: number; locked: number }[] balances array
    */
   abstract getBalance(): Promise<BaseReturn<FreeAsset>>
+
+  /**
+   * Margin available to open new positions, in USD, for venues that pool every
+   * collateral currency into ONE cross-margin account (Kraken Futures' flex /
+   * `multiCollateralMarginAccount`). On such an account the tradeable resource
+   * is the pooled collateral value, not any single asset's quantity: a wallet
+   * funded only in EUR can still open a USD-quoted perpetual, because the venue
+   * margins it off the EUR collateral.
+   *
+   * This is deliberately NOT folded into {@link getBalance}. That list is also
+   * what the portfolio sums, so publishing the pooled USD figure there
+   * alongside the per-currency holdings would count the same money twice
+   * (EUR 1000 AND USD 1153). Keeping it on its own channel lets balances stay
+   * the account's composition while order sizing asks the separate question
+   * "how much can I actually commit right now".
+   *
+   * `null` means "not a pooled-collateral account" — the default for every
+   * venue where the quote-asset balance is already the right answer. Callers
+   * must treat `null` as "no opinion" and fall back to the quote balance.
+   */
+  async getMarginAvailableUsd(): Promise<BaseReturn<number | null>> {
+    return this.returnGood<number | null>(this.getEmptyTimeProfile(), [])(null)
+  }
 
   /** Open order abstract function
    * @param {OrderTypes} order.side BUY or SELL

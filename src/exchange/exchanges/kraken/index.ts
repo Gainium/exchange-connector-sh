@@ -611,12 +611,39 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       if (isAccountRateLimit) {
         limitHelper.noteRateLimited(hashKrakenKey(this.key))
       }
-      const maxAttempts = isRateLimit ? 3 : this.retry
+      // A provider-wide OUTAGE (HTTP 5xx, or Kraken spot's own
+      // `EService:Unavailable`/`EService:Busy`) is not an ordinary per-request
+      // transient: every caller on every egress node is getting it at the same
+      // instant, and it lasts MINUTES, not milliseconds. The generic ladder is
+      // sized for a blip — 10 attempts at `min(1000 * 2^n, 10000)` = 74s of
+      // retrying and TEN logged error lines per failing call — so it cannot
+      // outlast a real outage and buys nothing by trying. Worse, the ramp is
+      // per-request state (`timeProfile.attempts`) and resets to zero on every
+      // new call, so the poll loop keeps starting fresh 74s ladders and the
+      // fleet re-requests at near-full rate into a dead provider.
+      // 2026-08-06: Kraken was down 07:01:45Z→07:16:38Z and all six nodes
+      // logged ~2,850 `[503] Kraken API error: Service Unavailable` lines
+      // (peak 141/min on .111) with in-flight getOrder calls stalling 76–89s.
+      // Note the observed message is the HTTP reason phrase `Service
+      // Unavailable`, which does NOT substring-match the `EService:Unavailable`
+      // code above — it is retryable only via the numeric `'503'` entry — so
+      // this class is matched on httpStatus as well as by name.
+      // Same treatment as the rate-limit class (bug #181): fewer, paced
+      // attempts. Ride out a short blip, then fail fast and let the caller's
+      // own loop retry, instead of camping on a dead endpoint.
+      const isProviderOutage =
+        matches(['EService:Unavailable', 'EService:Busy']) ||
+        ['500', '502', '503', '504', '520', '521', '522'].includes(
+          String(httpStatus),
+        )
+      const maxAttempts = isRateLimit || isProviderOutage ? 3 : this.retry
 
       if (shouldRetry && timeProfile.attempts < maxAttempts) {
         const waitTime = isRateLimit
           ? 30000
-          : Math.min(1000 * Math.pow(2, timeProfile.attempts), 10000)
+          : isProviderOutage
+            ? 5000
+            : Math.min(1000 * Math.pow(2, timeProfile.attempts), 10000)
         Logger.warn(
           `Retrying after ${waitTime}ms (attempt ${timeProfile.attempts + 1}/${maxAttempts})`,
         )

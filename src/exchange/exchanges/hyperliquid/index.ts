@@ -970,8 +970,20 @@ const hlStateHasActivity = (state: unknown): boolean => {
   return false
 }
 
-/** Classify an HL info-endpoint error for retry decisions. */
-const hlInfoErrorKind = (err: unknown): 'rate' | 'transient' | 'fatal' => {
+/**
+ * Classify an HL info-endpoint error for retry decisions.
+ *
+ * 422 "Failed to deserialize the JSON body into the target type" is HL
+ * refusing to PARSE our request body — deterministic, and identical on every
+ * attempt. It was classified `transient` (d1adea7, generalized in 7fdd1ec) on
+ * the assumption it was an HL blip; it is not. In practice it means the
+ * configured account address is not a well-formed HL address, so retrying
+ * only multiplied a guaranteed failure by 3 and — because balance/positions
+ * fan out over HL native + every active builder dex — burned enough of the
+ * shared per-IP info budget to push OTHER accounts on the same egress node
+ * into 429. Treat it as `fatal`: fail the call once, loudly.
+ */
+const hlInfoErrorKind = (err: unknown): 'rate' | 'fatal' => {
   const e = err as {
     response?: { status?: number }
     status?: number
@@ -985,10 +997,25 @@ const hlInfoErrorKind = (err: unknown): 'rate' | 'transient' | 'fatal' => {
     msg.includes('429')
   )
     return 'rate'
-  if (status === 422 || msg.includes('failed to deserialize'))
-    return 'transient'
   return 'fatal'
 }
+
+/**
+ * Does `key` look like an address Hyperliquid's info endpoint will accept as
+ * `user`? Probed against api.hyperliquid.xyz (see `bad-address.spec.ts`): HL
+ * accepts `0x` + 40 hex OR a bare 40-hex string, and answers 422 "Failed to
+ * deserialize the JSON body into the target type" for everything else —
+ * wrong length, trailing whitespace, non-hex, uppercase `0X`, empty.
+ *
+ * Deliberately NOT stricter than HL itself: a bare 40-hex address works today,
+ * so rejecting it here would break an account that is currently fine.
+ */
+const HL_ADDRESS_RE = /^(0x)?[0-9a-fA-F]{40}$/
+const hlAddressLooksValid = (key: unknown): boolean =>
+  typeof key === 'string' && HL_ADDRESS_RE.test(key)
+
+/** Marker for "this connection can never talk to HL as configured". */
+const HL_BAD_ADDRESS_CODE = 4220
 
 /** Best-effort Retry-After (ms) from an HL 429, capped so we never stall long. */
 const hlRetryAfterMs = (err: unknown): number | undefined => {
@@ -1273,6 +1300,38 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * Fail before we ever call Hyperliquid with an address it cannot parse.
+   *
+   * `_key` is the user's configured account address, cast to `0x${string}`
+   * but never validated. A typo (a dropped character, a stray space) makes
+   * EVERY info request answer 422 "Failed to deserialize the JSON body into
+   * the target type" — once per dex, per poll, on whichever connector node
+   * the balancer routed the account to, which reads as a fleet-wide incident
+   * rather than one misconfigured account (bug #313).
+   *
+   * Worse, the per-dex catches in the balance/positions/open-orders loops
+   * swallow that failure into `null`, so the account came back as
+   * `status: OK` with an EMPTY balance and NO positions — a configuration
+   * error presenting as "you have no funds". Throwing here surfaces it as a
+   * real error instead. The message is deliberately free of any substring
+   * `handleHyperliquidErrors` retries on, so it fails once and stops.
+   */
+  private assertConfiguredAddress(): void {
+    if (hlAddressLooksValid(this._key)) return
+    throw new HyperliquidError(
+      `Hyperliquid: invalid wallet address configured (${JSON.stringify(
+        `${this._key ?? ''}`.slice(0, 12),
+      )}…) — expected a 40-character hex address`,
+      HL_BAD_ADDRESS_CODE,
+    )
+  }
+
+  /** Is this the "address is unusable" error raised by {@link assertConfiguredAddress}? */
+  private isBadAddressError(e: unknown): boolean {
+    return (e as { code?: number })?.code === HL_BAD_ADDRESS_CODE
+  }
+
+  /**
    * Hyperliquid account role for this connection's address, per HL's own
    * `userRole`. Used at verify time to catch the common onboarding mistake of
    * pasting an **API/agent wallet** address in place of the main account:
@@ -1457,6 +1516,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     dex: string | undefined,
     timeProfile: TimeProfile,
   ): Promise<{ state: unknown; timeProfile: TimeProfile; timedOut?: boolean }> {
+    this.assertConfiguredAddress()
     const cache = HyperliquidChStateCache.getInstance()
     const key = `${`${this._key}`.toLowerCase()}|${dex ?? 'native'}|${
       this.demo ? 't' : 'm'
@@ -1490,16 +1550,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           return await callOnce()
         } catch (err) {
           const kind = hlInfoErrorKind(err)
-          if (
-            (kind !== 'rate' && kind !== 'transient') ||
-            attempt >= maxRetries
-          ) {
+          if (kind !== 'rate' || attempt >= maxRetries) {
             throw err
           }
           const waitMs =
-            kind === 'rate'
-              ? (hlRetryAfterMs(err) ?? Math.min(2000, 500 * (attempt + 1)))
-              : 750
+            hlRetryAfterMs(err) ?? Math.min(2000, 500 * (attempt + 1))
           const userPrefix =
             typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
           Logger.warn(
@@ -1539,6 +1594,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     timeProfile: TimeProfile
     timedOut?: boolean
   }> {
+    this.assertConfiguredAddress()
     timeProfile =
       (await this.checkLimits('getFuturesOpenOrders', 20, timeProfile)) ||
       timeProfile
@@ -1560,16 +1616,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         return { orders, timeProfile }
       } catch (err) {
         const kind = hlInfoErrorKind(err)
-        if (
-          (kind !== 'rate' && kind !== 'transient') ||
-          attempt >= maxRetries
-        ) {
+        if (kind !== 'rate' || attempt >= maxRetries) {
           throw err
         }
         const waitMs =
-          kind === 'rate'
-            ? (hlRetryAfterMs(err) ?? Math.min(2000, 500 * (attempt + 1)))
-            : 750
+          hlRetryAfterMs(err) ?? Math.min(2000, 500 * (attempt + 1))
         const userPrefix =
           typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
         Logger.warn(
@@ -1640,6 +1691,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           states.push({ asset: t.asset, state: r.state as StateOrNull })
           if (t.dex && hlStateHasActivity(r.state)) seenActive.add(t.dex)
         } catch (e) {
+          // A bad address fails identically on every dex — surface it once
+          // instead of logging it N times and returning an empty balance.
+          if (this.isBadAddressError(e)) throw e
           const err = e as {
             message?: string
             response?: { status?: number; statusText?: string }
@@ -2129,6 +2183,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           results.push(...r.orders)
           if (dex && r.orders.length > 0) seenActive.add(dex)
         } catch (e) {
+          if (this.isBadAddressError(e)) throw e
           Logger.error(
             `Hyperliquid frontendOpenOrders failed for ${dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
           )
@@ -2281,6 +2336,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           states.push(r.state as StateOrNull)
           if (dex && hlStateHasActivity(r.state)) seenActive.add(dex)
         } catch (e) {
+          if (this.isBadAddressError(e)) throw e
           Logger.error(
             `Hyperliquid clearinghouseState failed for ${dex ?? 'HL native'}: ${(e as Error)?.message ?? e}`,
           )

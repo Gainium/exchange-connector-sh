@@ -498,7 +498,18 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       const httpStatus = errorObj.code || errorObj.response?.status || ''
       const errorBody = errorObj.body
       const errorResponse = errorObj.response
-      const requestParams = errorObj.requestParams || {}
+      // The arguments the wrapped method was actually called with, minus the
+      // trailing TimeProfile. NOT `errorObj.requestParams`: that is set only by
+      // @siebly/kraken-api's `parseException`, i.e. only when the SPOT client
+      // gets an HTTP-level failure. The futures path throws plain `Error`s
+      // raised by this file (e.g. `new Error(result.sendStatus.status)` ->
+      // "wouldNotReducePosition"), which carry no `requestParams`, so the log
+      // below rendered `openOrder called with params: {}` for every futures
+      // rejection — hiding the symbol/side/size needed to diagnose them.
+      // `args` is always present, is the caller-meaningful input, and (unlike
+      // the spot `requestParams`) never contains signed API-Key/API-Sign
+      // headers. See bug #310.
+      const calledWithArgs = args.slice(0, -1)
 
       // Kraken API errors are in body.error or body.errors array
       let actualError: string
@@ -556,7 +567,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         isJsError
           ? `[${httpStatus || 'NO_STATUS'}] Kraken connector error (${e.name}): ${actualError}`
           : `[${httpStatus || 'NO_STATUS'}] Kraken API error: ${actualError}`,
-        `Details: ${JSON.stringify(errorDetails)}, ${cb.name} called with params: ${JSON.stringify(requestParams)}${
+        `Details: ${JSON.stringify(errorDetails)}, ${cb.name} called with params: ${JSON.stringify(calledWithArgs)}${
           isJsError ? `, stack: ${e.stack}` : ''
         }`,
       )

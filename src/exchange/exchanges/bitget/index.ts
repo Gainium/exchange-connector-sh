@@ -610,9 +610,16 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     if (res.status === StatusEnum.notok) {
       return res
     }
-    return this.returnGood<number>(res.timeProfile)(
-      res.data.find((p) => p.pair === symbol)?.price ?? 0,
-    )
+    const found = res.data.find((p) => p.pair === symbol)
+    // A pair Bitget does not carry (never listed, or delisted while bots/positions
+    // still reference it) must surface as NOTOK. Defaulting to 0 returned a
+    // fabricated price under status OK, which callers treat as a real quote.
+    if (!found) {
+      return this.returnBad(res.timeProfile)(
+        new Error(`Symbol not found on exchange: ${symbol}`),
+      )
+    }
+    return this.returnGood<number>(res.timeProfile)(found.price)
   }
 
   async futures_getExchangeInfo(symbol: string) {
@@ -1872,9 +1879,14 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     if (res.status === StatusEnum.notok) {
       return res
     }
-    return this.returnGood<number>(res.timeProfile)(
-      res.data.find((p) => p.pair === symbol)?.price ?? 0,
-    )
+    const found = res.data.find((p) => p.pair === symbol)
+    // See futures_latestPrice — an unlisted/delisted pair is an error, not a 0 quote.
+    if (!found) {
+      return this.returnBad(res.timeProfile)(
+        new Error(`Symbol not found on exchange: ${symbol}`),
+      )
+    }
+    return this.returnGood<number>(res.timeProfile)(found.price)
   }
 
   async openOrder(order: {

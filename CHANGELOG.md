@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.19.1] - 2026-08-07
+
+### Fixed
+
+- Kraken signed REST requests now draw their nonce from a per-API-key counter shared across the whole process, instead of the SDK's per-client-instance one. Kraken requires the nonce for a key to strictly increase, and `@siebly/kraken-api` seeds `apiRequestNonce` as a field initialiser on each client — a guard that only covers requests sharing one instance. The connector builds a fresh exchange, and therefore a fresh `SpotClient`/`DerivativesClient`, for every request, so two concurrent calls on one key each read the same millisecond and emitted an identical nonce: Kraken accepted one and rejected the other with `EAPI:Invalid nonce`. This is the same defect Hyperliquid had (fixed 2026-07-14 with `hyperliquid/nonce.ts`); Kraken was given only the matching `retryErrors` entries at the time, which masked the collisions instead of preventing them, at the cost of a retry ladder on the affected calls. Note this closes the same-process window only — instances are separate processes and do not share the counter.
+
 ## [1.19.0] - 2026-08-05
 
 ### Added

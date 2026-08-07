@@ -1,5 +1,6 @@
 import { SpotClient as SpotClientBase } from '@siebly/kraken-api'
 import { Method } from 'axios'
+import { nextKrakenNonce } from './nonce'
 
 export function neverGuard(x: any, msg: string): Error {
   return new Error(`Unhandled value exception "${x}", ${msg}`)
@@ -136,12 +137,16 @@ export class SpotClient extends SpotClientBase {
 
       switch (clientType) {
         case 'main': {
-          // Set default nonce, if not set yet
+          // Set default nonce, if not set yet.
+          // `nextKrakenNonce` replaces the SDK's `getNextRequestNonce()`: that
+          // counter lives on the client instance, and the connector builds a
+          // fresh client per request, so concurrent calls on one key used to
+          // mint identical nonces. See `./nonce.ts`.
           if (!Array.isArray(res.requestData)) {
             if (!(res.requestData as any)?.nonce) {
               res.requestData = {
-                //@ts-expect-error overriding protected method
-                nonce: this.getNextRequestNonce(),
+                //@ts-expect-error reading private base field
+                nonce: nextKrakenNonce(this.apiKey),
                 ...res.requestData,
               }
             }
@@ -150,8 +155,9 @@ export class SpotClient extends SpotClientBase {
           // Allow nonce override in reuqest
           // Should never fallback to new nonce, since it's pre-set above with default val
           const nonce =
-            //@ts-expect-error overriding protected method
-            (res.requestData as any)?.nonce || this.getNextRequestNonce()
+            (res.requestData as any)?.nonce ||
+            //@ts-expect-error reading private base field
+            nextKrakenNonce(this.apiKey)
 
           const serialisedParams = serializeParams(
             method === 'GET' ? res.requestQuery : res.requestData,

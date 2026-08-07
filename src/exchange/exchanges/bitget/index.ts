@@ -442,6 +442,51 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     }
     return this.orderClient
       .futuresSubmitOrder(options)
+      .catch(async (e) => {
+        // The position-mode form of every order is decided by main-app from
+        // the `hedge` flag it read when the BOT loaded. A mode change on the
+        // account — or a bot that never read the flag at all — leaves every
+        // later order in the wrong form, and Bitget rejects all of them with
+        // 40774 "the order type for unilateral position must also be the
+        // unilateral position type" until the bot happens to reload. Bybit
+        // reports the same class of mismatch as "position idx not match
+        // position mode" and `bybit/index.ts` openOrder already self-heals by
+        // re-sending in the other mode; do the same here. 40774 means the
+        // order was never accepted and `clientOid` is unchanged, so the retry
+        // cannot double-fill.
+        const msg = `${
+          (e as { body?: { msg?: string } })?.body?.msg ||
+          (e as Error)?.message ||
+          ''
+        }`.toLowerCase()
+        if (msg.indexOf('unilateral position') === -1) {
+          throw e
+        }
+        // Rebuild the payload exactly as the opposite `positionSide` branch
+        // above would have: a hedge order carries the position direction in
+        // `side` plus `tradeSide` open/close, a one-way order carries the raw
+        // order direction in `side` and neither of the hedge fields.
+        if (options.tradeSide === undefined) {
+          const long =
+            order.side === 'BUY' ? !order.reduceOnly : !!order.reduceOnly
+          options.side = long ? 'buy' : 'sell'
+          options.tradeSide = order.reduceOnly ? 'close' : 'open'
+          options.reduceOnly = order.reduceOnly ? 'YES' : 'NO'
+        } else {
+          options.side = order.side === 'BUY' ? 'buy' : 'sell'
+          delete options.tradeSide
+          delete options.reduceOnly
+        }
+        Logger.warn(
+          `Bitget position mode mismatch on ${order.newClientOrderId}, retry as ${
+            options.tradeSide ? 'hedge' : 'one-way'
+          }`,
+        )
+        timeProfile =
+          (await this.checkLimits('futuresSubmitOrder', 0, timeProfile)) ||
+          timeProfile
+        return await this.orderClient.futuresSubmitOrder(options)
+      })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code === '00000') {

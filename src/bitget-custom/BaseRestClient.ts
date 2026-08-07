@@ -216,7 +216,10 @@ export default abstract class BaseRestClient {
       headers: response.headers,
       requestOptions: {
         ...this.options,
-        // Prevent credentials from leaking into error messages
+        // Prevent credentials from leaking into error messages. `apiKey` was
+        // missing here: it is read from `this.options` exactly like the other
+        // two, so it was the one credential this redaction let through.
+        apiKey: 'omittedFromError',
         apiPass: 'omittedFromError',
         apiSecret: 'omittedFromError',
       },

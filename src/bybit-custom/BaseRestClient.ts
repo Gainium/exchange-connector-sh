@@ -363,7 +363,13 @@ export default abstract class BaseRestClient {
       message: response.statusText,
       body: response.data,
       headers: response.headers,
-      requestOptions: this.options,
+      requestOptions: {
+        ...this.options,
+        // `this.options` is where `this.key`/`this.secret` are read from, so a
+        // raw spread hands live credentials to whatever logs this error.
+        key: 'omittedFromError',
+        secret: 'omittedFromError',
+      },
     }
   }
 

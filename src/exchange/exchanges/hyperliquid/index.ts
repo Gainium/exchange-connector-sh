@@ -32,6 +32,7 @@ import { makeSharedNonce } from './nonce'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { IdMute, IdMutex } from '../../../utils/mutex'
+import { safeStringify } from '../../../utils/redact'
 import { splitDashedPair } from '../../helpers/symbolCodec'
 
 type OrderResponseMissing = {
@@ -1707,7 +1708,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               t.dex ?? 'HL native'
             } (status=${status ?? '?'}, user=${userPrefix}…): ${
               err.message ?? e
-            } body=${typeof err.body === 'string' ? err.body : JSON.stringify(err.body)}`,
+            } body=${typeof err.body === 'string' ? err.body : safeStringify(err.body)}`,
           )
           states.push({ asset: t.asset, state: null })
         }

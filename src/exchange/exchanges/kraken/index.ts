@@ -32,6 +32,7 @@ import { SpotClient, DerivativesClient } from '../../../kraken-custom'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
+import { safeStringify } from '../../../utils/redact'
 import { FuturesGetCandlesParams } from '@siebly/kraken-api'
 
 class KrakenError extends Error {
@@ -509,6 +510,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       // `args` is always present, is the caller-meaningful input, and (unlike
       // the spot `requestParams`) never contains signed API-Key/API-Sign
       // headers. See bug #310.
+      //
+      // Both this and `errorDetails` still go through `safeStringify`: the
+      // thrown object DOES carry live credentials (`requestParams.options
+      // .headers['API-Key'|'API-Sign']`, stapled on by @siebly/kraken-api's
+      // `parseException`), so any future edit that widens what gets logged
+      // here must not be able to put them in a pm2 log line.
       const calledWithArgs = args.slice(0, -1)
 
       // Kraken API errors are in body.error or body.errors array
@@ -567,7 +574,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         isJsError
           ? `[${httpStatus || 'NO_STATUS'}] Kraken connector error (${e.name}): ${actualError}`
           : `[${httpStatus || 'NO_STATUS'}] Kraken API error: ${actualError}`,
-        `Details: ${JSON.stringify(errorDetails)}, ${cb.name} called with params: ${JSON.stringify(calledWithArgs)}${
+        `Details: ${safeStringify(errorDetails)}, ${cb.name} called with params: ${safeStringify(calledWithArgs)}${
           isJsError ? `, stack: ${e.stack}` : ''
         }`,
       )
@@ -1076,7 +1083,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               fullResponse: result,
             }
             throw new Error(
-              `Failed to get balance. Details: ${JSON.stringify(errorDetails)}`,
+              `Failed to get balance. Details: ${safeStringify(errorDetails)}`,
             )
           }
 
@@ -1959,7 +1966,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               fullResponse: result,
             }
             throw new Error(
-              `Failed to get open orders. Details: ${JSON.stringify(errorDetails)}`,
+              `Failed to get open orders. Details: ${safeStringify(errorDetails)}`,
             )
           }
 

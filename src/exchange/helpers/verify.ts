@@ -20,6 +20,7 @@ import {
 } from '../types'
 import { getBinanceBase } from './exchaneUtils'
 import { parseBinanceRestrictions, unknownPermissions } from './keyPermissions'
+import { safeStringify } from '../../utils/redact'
 import fetch from 'isomorphic-unfetch'
 
 // The `binance` client throws an Error-like object whose useful payload
@@ -27,6 +28,12 @@ import fetch from 'isomorphic-unfetch'
 // Interpolating it directly (`${e}`) renders "[object Object]" and discards the
 // real rejection reason, so verify failures were unreadable in the logs. Extract
 // the meaningful fields defensively.
+//
+// This runs on the one path that is *always* holding live credentials — key
+// verification — and the fallback serializes the whole thrown object, which for
+// several SDKs includes the signed request. Everything goes through
+// `safeStringify`; the returned string becomes `VerifyResponse.reason`, which is
+// logged here and stored/surfaced by main-app.
 const errStr = (e: any): string => {
   if (e == null) return String(e)
   const body = e.body ?? e.response?.data
@@ -34,19 +41,11 @@ const errStr = (e: any): string => {
   const bits: string[] = []
   if (e.code !== undefined) bits.push(`code=${e.code}`)
   if (body !== undefined) {
-    try {
-      bits.push(typeof body === 'string' ? body : JSON.stringify(body))
-    } catch {
-      /* non-serializable body — skip */
-    }
+    bits.push(typeof body === 'string' ? body : safeStringify(body))
   }
   if (msg) bits.push(String(msg))
   if (bits.length) return bits.join(' ')
-  try {
-    return JSON.stringify(e)
-  } catch {
-    return String(e)
-  }
+  return safeStringify(e)
 }
 
 /**

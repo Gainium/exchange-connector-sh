@@ -378,6 +378,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   /** Retry count. Default 10 */
   private retry: number
   /** Array of error codes, after which retry attempt is executed */
+  /**
+   * One-shot guard so the executions-history shape is logged once per process
+   * rather than once per call. The SDK types that payload `any`; this is how we
+   * check the mapping against what Kraken actually sends.
+   */
+  private static loggedExecutionShape = false
   private retryErrors: string[]
   protected futures?: Futures
   /** Symbol mapper for converting between our format and Kraken's format */
@@ -1210,12 +1216,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
-    return this.derivativesClient
+    // Preferred source. Kraken rejects this endpoint with `authenticationError`
+    // on keys that serve `/accounts` perfectly well (observed on two unrelated
+    // accounts, same egress IP, same signing), so it cannot be relied on alone.
+    const viaFills = await this.derivativesClient
       .getFills(
         sinceMs ? { lastFillTime: new Date(sinceMs).toISOString() } : undefined,
       )
       .then(async (result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.result !== 'success' || !result.fills) {
           throw new Error(
             `Failed to get fills. Result: ${result.result || 'undefined'}`,
@@ -1233,6 +1241,76 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             quantity: `${f.size}`,
             timestamp: +new Date(f.fillTime),
             fillType: f.fillType,
+          })
+        }
+        return fills
+      })
+      .catch((e: Error) => {
+        Logger.warn(
+          `Kraken getFills unavailable (${e.message}); falling back to executions history`,
+        )
+        return null
+      })
+
+    if (viaFills) {
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      return this.returnGood<AccountFill[]>(timeProfile)(viaFills)
+    }
+
+    // Fallback: the history API family (`api/history/v3/*`), which this
+    // connector already reaches successfully for order lookups. Same content,
+    // different auth surface.
+    timeProfile =
+      (await this.checkLimits('getTradesHistory', undefined, timeProfile)) ||
+      timeProfile
+
+    return this.derivativesClient
+      .getExecutionEvents({
+        ...(sinceMs ? { since: sinceMs } : {}),
+        sort: 'desc',
+        count: 100,
+      })
+      .then(async (result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const elements = result?.elements ?? []
+        // The SDK types this payload `any`. Log one element verbatim the first
+        // time we see it so the mapping below can be checked against what
+        // Kraken actually sends rather than what we assumed it sends — reading
+        // an unverified field through `as any` is what caused the defect this
+        // endpoint exists to measure. safeStringify: Kraken error objects can
+        // carry live credentials, and this must never be the thing that logs one.
+        if (elements.length && !KrakenExchange.loggedExecutionShape) {
+          KrakenExchange.loggedExecutionShape = true
+          Logger.log(
+            `Kraken executions-history element shape: ${safeStringify(
+              elements[0],
+            ).slice(0, 2000)}`,
+          )
+        }
+
+        const fills: AccountFill[] = []
+        for (const el of elements) {
+          const ex = (el as any)?.event?.execution?.execution
+          if (!ex) continue
+          // Our client id lives on whichever side of the trade was ours; only
+          // one of the two orders carries a clientId we issued.
+          const taker = ex.takerOrder
+          const maker = ex.makerOrder
+          const ours = maker?.clientId ? maker : taker?.clientId ? taker : null
+          const dir = `${ours?.direction ?? ''}`.toLowerCase()
+          const symbolRaw =
+            ours?.tradeable ?? taker?.tradeable ?? maker?.tradeable
+          if (!symbolRaw) continue
+          fills.push({
+            fillId: `${ex.uid ?? (el as any).uid ?? ''}`,
+            orderId: `${ours?.uid ?? ''}`,
+            clientOrderId: `${ours?.clientId ?? ''}`,
+            symbol: await this.normalizeSymbol(`${symbolRaw}`),
+            side: dir.startsWith('sell') ? 'SELL' : 'BUY',
+            price: `${ex.price ?? ''}`,
+            quantity: `${ex.quantity ?? ''}`,
+            timestamp: +(ex.timestamp ?? (el as any).timestamp ?? 0),
+            fillType: 'history',
           })
         }
         return this.returnGood<AccountFill[]>(timeProfile)(fills)

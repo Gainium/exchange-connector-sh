@@ -36,6 +36,7 @@ import {
 } from '../../../kraken-custom'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
+import { createHash } from 'crypto'
 import { sleep } from '../../../utils/sleepUtils'
 import { safeStringify } from '../../../utils/redact'
 import {
@@ -367,6 +368,38 @@ function krakenLeveragePrefMatches(
     !!cached &&
     cached.pref === pref &&
     Date.now() - cached.ts < KRAKEN_LEVERAGE_PREF_TTL
+  )
+}
+
+/**
+ * Last time an avg-fill-price lookup failure was logged, per
+ * `<key fingerprint>:<class>`. A key that lacks the permission fails on EVERY
+ * filled order, so logging each one would bury the signal it is meant to raise;
+ * a key that hits a 429 recovers by itself and does not deserve a line at all
+ * beyond the first. Process-local and unbounded only in the number of API keys
+ * this instance serves, which is already bounded by the connection pool.
+ */
+const krakenAvgPriceFailureLog = new Map<string, number>()
+const KRAKEN_AVG_PRICE_LOG_TTL = 60 * 60 * 1000
+
+/**
+ * Does this failure mean "this key will never be allowed to read fills", as
+ * opposed to "try again later"?
+ *
+ * Kraken Futures answers a key that lacks the query-trades/history permission
+ * with `{result:'error', error:'authenticationError'}` at HTTP 200 — an
+ * application-layer refusal that looks nothing like a transport error — and the
+ * history API family refuses with a transport 401. Neither ever recovers on
+ * retry, so both must be visible; rate limits and 5xx must not be.
+ */
+export function isKrakenPermanentAuthFailure(reason: string): boolean {
+  const r = reason.toLowerCase()
+  return (
+    r.includes('authenticationerror') ||
+    r.includes('status code 401') ||
+    r.includes('status code 403') ||
+    r.includes('unauthorized') ||
+    r.includes('insufficient permission')
   )
 }
 
@@ -822,6 +855,42 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * Size-weighted average execution price from a batch of Kraken order events.
+   *
+   * Kraken attaches `EXECUTION` events — each carrying an exact `price` and
+   * `amount` — to the responses for submitting, editing and cancelling an
+   * order. That is the venue stating what it actually filled, in the same
+   * round trip, for free. It is the ONLY execution-price source here that
+   * needs no second call and no extra permission, which matters because the
+   * `/fills` endpoint needs both.
+   *
+   * Returns `executedQty: 0` and no price when the batch carries no execution
+   * (e.g. a limit order that only rested), so callers can tell "nothing filled
+   * in this batch" from "filled at price X". Pure — no network.
+   */
+  futures_readExecutionPrice(events?: FuturesOrderEvent[]): {
+    executedQty: number
+    avgPrice?: number
+  } {
+    const executions = (events ?? []).filter(
+      (e): e is Extract<FuturesOrderEvent, { type: 'EXECUTION' }> =>
+        e.type === 'EXECUTION' && 'amount' in e,
+    )
+    const executedQty = executions.reduce((acc, e) => acc + (e.amount || 0), 0)
+    if (executedQty <= 0) {
+      return { executedQty: 0 }
+    }
+    return {
+      executedQty,
+      avgPrice:
+        executions.reduce(
+          (acc, e) => acc + (e.price || 0) * (e.amount || 0),
+          0,
+        ) / executedQty,
+    }
+  }
+
+  /**
    * Read what Kraken says actually happened to a cancelled order.
    *
    * Kraken answers a cancel with `cancelStatus.status`:
@@ -881,27 +950,13 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     )
     // EXECUTION events are the fills the cancel raced. Prefer them over the
     // snapshot's `filled`, which predates the executions in this same batch.
-    const executions = events.filter(
-      (e): e is Extract<FuturesOrderEvent, { type: 'EXECUTION' }> =>
-        e.type === 'EXECUTION' && 'amount' in e,
-    )
-    const executedFromEvents = executions.reduce(
-      (acc, e) => acc + (e.amount || 0),
-      0,
-    )
+    const { executedQty: executedFromEvents, avgPrice } =
+      this.futures_readExecutionPrice(events)
     const executedQty = executedFromEvents || snapshot?.filled || 0
 
     if (cancelStatus.status === 'filled' && executedQty <= 0) {
       return unknownOutcome
     }
-
-    const avgPrice =
-      executedFromEvents > 0
-        ? executions.reduce(
-            (acc, e) => acc + (e.price || 0) * (e.amount || 0),
-            0,
-          ) / executedFromEvents
-        : undefined
 
     return {
       unknown: false,
@@ -1038,12 +1093,24 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     if (!this.derivativesClient || (!orderId && !clientOrderId)) return null
     try {
       const result = await this.derivativesClient.getFills()
-      if (result.result !== 'success' || !result.fills?.length) return null
+      if (result.result !== 'success') {
+        // An application-layer refusal at HTTP 200. This is where a key that
+        // lacks the query-trades permission lands, and where the old bare
+        // `catch` made a permanent failure indistinguishable from a blip.
+        this.logAvgFillPriceFailure(
+          `${(result as { error?: string }).error || result.result || 'unknown'}`,
+        )
+        return null
+      }
+      if (!result.fills?.length) return null
       const matches = result.fills.filter(
         (f) =>
           (clientOrderId && f.cliOrdId === clientOrderId) ||
           (orderId && f.order_id === orderId),
       )
+      // Not an error: `getFills()` returns Kraken's most recent page, so an
+      // order that filled outside it simply is not here. Callers fall back to
+      // the limit price, which for a resting limit order IS the fill price.
       if (!matches.length) return null
       let notional = 0
       let size = 0
@@ -1053,10 +1120,49 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       }
       if (size <= 0) return null
       return notional / size
-    } catch {
-      // getFills failed (e.g. transient 429) — fall back to the limit price rather
-      // than break order recording.
+    } catch (e) {
+      this.logAvgFillPriceFailure(e instanceof Error ? e.message : `${e}`)
+      // Never break order recording over a price refinement — the caller still
+      // records the order, at its limit price.
       return null
+    }
+  }
+
+  /**
+   * Surface an avg-fill-price lookup failure without either spamming the log or
+   * swallowing it.
+   *
+   * A permission failure is permanent: it recurs on every filled order for that
+   * key, forever, and silently downgrades the recorded price to the order's
+   * limit price. That is worth an error line. A 429 or a 5xx fixes itself and is
+   * worth at most a warning. Both are logged at most once an hour per key so a
+   * busy account cannot drown the signal.
+   *
+   * The key itself is NEVER logged — only a short non-reversible fingerprint,
+   * enough to tell two accounts apart. `reason` goes through `safeStringify`
+   * and is truncated because Kraken SDK error objects can carry live
+   * credentials, and a log line must never be the thing that leaks one.
+   */
+  private logAvgFillPriceFailure(reason: string) {
+    const permanent = isKrakenPermanentAuthFailure(reason)
+    const fingerprint = createHash('sha256')
+      .update(this.key ?? '')
+      .digest('hex')
+      .slice(0, 8)
+    const bucket = `${fingerprint}:${permanent ? 'auth' : 'transient'}`
+    const now = Date.now()
+    const last = krakenAvgPriceFailureLog.get(bucket)
+    if (last && now - last < KRAKEN_AVG_PRICE_LOG_TTL) return
+    krakenAvgPriceFailureLog.set(bucket, now)
+
+    const detail = safeStringify(reason).slice(0, 300)
+    const message =
+      `Kraken avg fill price unavailable for key ${fingerprint} ` +
+      `(${permanent ? 'PERMANENT — orders for this key are being recorded at their LIMIT price' : 'transient'}): ${detail}`
+    if (permanent) {
+      Logger.error(message)
+    } else {
+      Logger.warn(message)
     }
   }
 
@@ -1194,20 +1300,26 @@ class KrakenExchange extends AbstractExchange implements Exchange {
    * for the account's budget. Futures only: Kraken's spot fills live behind a
    * different endpoint and are not needed here.
    *
-   * ⚠️ KNOWN TO BE REFUSED BY KRAKEN FOR THE KEYS OUR USERS GRANT US.
-   * Measured 2026-08-08 on two unrelated production accounts:
-   *   `/derivatives/api/v3/fills`      → `{result:'error', error:'authenticationError'}` (HTTP 200)
-   *   `api/history/v3/executions`      → HTTP 401 Unauthorized
-   * while `/derivatives/api/v3/accounts` authenticated fine on the SAME keys,
-   * the same egress IP and the same signing path. Kraken Futures permissions are
-   * granular and ours appear not to include reading trade history. An
-   * executions-history fallback was written and removed again: it never once
-   * executed, so it was unverified code implying a working path that does not
-   * exist. Do not re-add one without first proving that endpoint authenticates.
+   * ⚠️ This endpoint is refused for SOME accounts, not all — do not read a
+   * failure here as "Kraken never lets us read fills".
    *
-   * The method is kept because it is correct and typed against the SDK's own
-   * `FuturesFill`, and starts working the moment a key carries the permission.
-   * Callers must expect a NOTOK for most accounts today.
+   * A 2026-08-08 measurement saw `/derivatives/api/v3/fills` answer
+   * `{result:'error', error:'authenticationError'}` (HTTP 200) on two unrelated
+   * production accounts, and concluded the keys our users grant simply lack the
+   * query-trades permission. **That conclusion was too strong and is wrong as a
+   * generalisation.** `futures_getAvgFillPrice` calls the same endpoint on the
+   * same credentials from inside this connector, and recorded order history from
+   * before that measurement carries — on many accounts, over a long window — an
+   * average fill price that ONLY that call can produce. So the endpoint does
+   * authenticate, routinely, for the large majority of accounts. The two
+   * failures were a sample, not the population.
+   *
+   * What remains unexplained is why those two refused; a granular per-key
+   * permission is still the most likely reason, it just is not universal. An
+   * executions-history (`api/history/v3/executions`) fallback was written and
+   * removed again: it never once executed, so it was unverified code implying a
+   * working path nobody had proven. Do not re-add one without first proving that
+   * endpoint authenticates.
    */
   async getAccountFills(
     sinceMs?: number,
@@ -1528,11 +1640,37 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 'Failed to create order, no order events returned',
             )
           }
+          // Kraken states what this order actually executed at, right here, in
+          // the submit response — and this used to be thrown away in favour of
+          // a re-fetch whose only price source is `getOrderStatus` (limit price
+          // only) plus `futures_getAvgFillPrice`. When that lookup came back
+          // empty the fill was recorded at the order's LIMIT price, which for a
+          // MARKET order means "the price we asked for", erasing all slippage.
+          // These events cost nothing, need no extra permission, and are exact.
+          const placed = this.futures_readExecutionPrice(
+            result.sendStatus.orderEvents,
+          )
           await sleep(500)
-          return await this.getOrder(
+          const fetched = await this.getOrder(
             { symbol, newClientOrderId: orderParams.cliOrdId || '' },
             timeProfile,
           )
+          // Only fill a gap — never overwrite a price the fills endpoint
+          // resolved, and never invent a quantity: if the re-fetch says nothing
+          // executed, believe it and leave the order alone.
+          if (
+            placed.avgPrice &&
+            fetched.status === StatusEnum.ok &&
+            fetched.data &&
+            +fetched.data.executedQty > 0 &&
+            !+(fetched.data.avgPrice || 0)
+          ) {
+            const executedQty = +fetched.data.executedQty
+            fetched.data.avgPrice = `${placed.avgPrice}`
+            fetched.data.price = `${placed.avgPrice}`
+            fetched.data.cummulativeQuoteQty = `${placed.avgPrice * executedQty}`
+          }
+          return fetched
         })
         .catch(
           this.handleKrakenErrors(

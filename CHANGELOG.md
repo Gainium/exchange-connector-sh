@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A Kraken Futures cancel that raced a fill reported the order as cancelled, and the filled position was lost.** `cancelOrderByOrderIdAndSymbol` checked only that the request succeeded and then returned a hand-built order with `status: 'CANCELED'`, `side: 'BUY'` and no executed quantity — none of it read from the response. Kraken answers a cancel with what actually happened to the order (`cancelStatus.status` is `'cancelled' | 'filled' | 'notFound'`), so an order that filled in the moment before the cancel arrived was reported to the caller as dead. The position stayed on the venue while the engine dropped it from the deal: an untracked position carrying no take-profit and no stop-loss, and a deal short by the filled size. The same fabricated fields also overwrote the order's real side and price wherever the caller merges the response, and silently discarded PARTIAL fills on genuine cancels. The verdict is now read: `filled` returns FILLED with the executed quantity and size-weighted execution price taken from the response's `EXECUTION` events (falling back to the account fills), `cancelled` preserves any partial fill, and `notFound` — or a `filled` the response gives no quantities for — is surfaced as an unknown order so the caller re-fetches and reconciles rather than trusting a cancel that was never observed. Side, price, quantity and client order id now come from the order snapshot Kraken returns instead of being assumed. Kraken **spot** is unchanged: its cancel response carries no fill information, so the same class of defect there needs a separate lookup.
+
 ## [1.19.1] - 2026-08-07
 
 ### Fixed

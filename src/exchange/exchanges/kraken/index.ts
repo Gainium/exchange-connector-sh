@@ -37,7 +37,12 @@ import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { safeStringify } from '../../../utils/redact'
-import { FuturesGetCandlesParams } from '@siebly/kraken-api'
+import {
+  FuturesCancelOrderStatus,
+  FuturesGetCandlesParams,
+  FuturesOrderEvent,
+  FuturesOrderJson,
+} from '@siebly/kraken-api'
 
 class KrakenError extends Error {
   code: string
@@ -813,6 +818,105 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         : 'PARTIALLY_FILLED'
     }
     return mapped
+  }
+
+  /**
+   * Read what Kraken says actually happened to a cancelled order.
+   *
+   * Kraken answers a cancel with `cancelStatus.status`:
+   * `'cancelled' | 'filled' | 'notFound'`. This used to be ignored in favour of
+   * a hardcoded `CANCELED` with no executed quantity — so a cancel that raced a
+   * fill reported the order as dead while the position stayed on the venue,
+   * leaving an untracked position with no TP and no SL and a deal short by the
+   * filled size. It also discarded PARTIAL fills on genuine cancels, and
+   * asserted a side/price it had never read.
+   *
+   * `unknown` means "do not claim to know": either Kraken could not find the
+   * order, or it says the order executed but gave us nothing to size the fill
+   * with. Both must reach the caller's unknown-order path so the real order is
+   * re-fetched, because inventing a quantity here would book a phantom fill.
+   *
+   * Pure — no network. Exercised by `cancel-verdict.spec.ts`.
+   */
+  futures_readCancelOutcome(cancelStatus?: FuturesCancelOrderStatus): {
+    unknown: boolean
+    rawStatus: string
+    executedQty: number
+    origQty: number
+    avgPrice?: number
+    limitPrice?: number
+    symbol?: string
+    clientOrderId: string
+    side: string
+    type: string
+  } {
+    const unknownOutcome = {
+      unknown: true,
+      rawStatus: 'cancelled',
+      executedQty: 0,
+      origQty: 0,
+      clientOrderId: '',
+      side: 'buy',
+      type: 'LIMIT',
+    }
+    if (!cancelStatus || cancelStatus.status === 'notFound') {
+      return unknownOutcome
+    }
+
+    const events = cancelStatus.orderEvents ?? []
+    // Every event carries a snapshot of the order it happened to, so side,
+    // quantity and limit price come from Kraken rather than being assumed.
+    const snapshot = events.reduce<FuturesOrderJson | undefined>(
+      (acc, e) =>
+        acc ??
+        ('order' in e
+          ? e.order
+          : 'orderPriorExecution' in e
+            ? e.orderPriorExecution
+            : 'old' in e
+              ? e.old
+              : undefined),
+      undefined,
+    )
+    // EXECUTION events are the fills the cancel raced. Prefer them over the
+    // snapshot's `filled`, which predates the executions in this same batch.
+    const executions = events.filter(
+      (e): e is Extract<FuturesOrderEvent, { type: 'EXECUTION' }> =>
+        e.type === 'EXECUTION' && 'amount' in e,
+    )
+    const executedFromEvents = executions.reduce(
+      (acc, e) => acc + (e.amount || 0),
+      0,
+    )
+    const executedQty = executedFromEvents || snapshot?.filled || 0
+
+    if (cancelStatus.status === 'filled' && executedQty <= 0) {
+      return unknownOutcome
+    }
+
+    const avgPrice =
+      executedFromEvents > 0
+        ? executions.reduce(
+            (acc, e) => acc + (e.price || 0) * (e.amount || 0),
+            0,
+          ) / executedFromEvents
+        : undefined
+
+    return {
+      unknown: false,
+      // `filled` is Kraken's own word for "already fully executed". For
+      // `cancelled`, `futures_deriveOrderStatus` keeps CANCELED while the
+      // executed quantity above still carries any partial fill.
+      rawStatus: cancelStatus.status === 'filled' ? 'filled' : 'cancelled',
+      executedQty,
+      origQty: snapshot?.quantity || 0,
+      avgPrice,
+      limitPrice: snapshot?.limitPrice,
+      symbol: snapshot?.symbol,
+      clientOrderId: cancelStatus.cliOrdId ?? snapshot?.cliOrdId ?? '',
+      side: snapshot?.side || 'buy',
+      type: snapshot?.type || 'LIMIT',
+    }
   }
 
   /**
@@ -1873,7 +1977,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         .cancelOrder({
           order_id: orderId,
         })
-        .then((result) => {
+        .then(async (result) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
           if (result.result !== 'success') {
@@ -1882,14 +1986,42 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             )
           }
 
+          const outcome = this.futures_readCancelOutcome(result.cancelStatus)
+
+          if (outcome.unknown) {
+            // Hand the caller its unknown-order path, which re-fetches and
+            // reconciles, rather than asserting a cancel we did not observe.
+            throw new Error(`Unknown order ${orderId}`)
+          }
+
+          // Only reach for the account fills when the events carried no price.
+          const avgPrice =
+            outcome.avgPrice ||
+            (outcome.executedQty > 0
+              ? ((await this.futures_getAvgFillPrice(
+                  orderId,
+                  outcome.clientOrderId || undefined,
+                )) ?? undefined)
+              : undefined)
+
           return this.returnGood<CommonOrder>(timeProfile)(
             this.futures_convertOrder({
               orderId,
-              symbol,
-              clientOrderId: '',
-              status: 'CANCELED',
-              type: 'LIMIT',
-              side: 'BUY',
+              symbol: outcome.symbol
+                ? await this.normalizeSymbol(outcome.symbol)
+                : symbol,
+              clientOrderId: outcome.clientOrderId,
+              price: outcome.limitPrice,
+              avgPrice,
+              origQty: outcome.origQty,
+              executedQty: outcome.executedQty,
+              status: this.futures_deriveOrderStatus(
+                outcome.rawStatus,
+                outcome.executedQty,
+                outcome.origQty,
+              ),
+              type: outcome.type,
+              side: outcome.side,
             }),
           )
         })
@@ -2795,15 +2927,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .getCandles({
         pair: await this.toKrakenSymbol(symbol),
         interval: intervalMinutes as
-          | 1
-          | 5
-          | 15
-          | 30
-          | 60
-          | 240
-          | 1440
-          | 10080
-          | 21600,
+          1 | 5 | 15 | 30 | 60 | 240 | 1440 | 10080 | 21600,
         since: from ? Math.floor(from / 1000) : undefined,
         ...this.xstockParams(symbol),
       })

@@ -28,7 +28,11 @@ import {
   krakenWithdrawState,
   unknownPermissions,
 } from '../../helpers/keyPermissions'
-import { SpotClient, DerivativesClient } from '../../../kraken-custom'
+import {
+  SpotClient,
+  DerivativesClient,
+  krakenNonceFromError,
+} from '../../../kraken-custom'
 import limitHelper from './limit'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
@@ -555,6 +559,19 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         // Fallback to basic error message
         actualError = e.message
         errorDetails = { message: e.message, httpStatus }
+      }
+
+      // The nonce the rejected request carried. Kraken scopes nonces per API
+      // key, so `EAPI:Invalid nonce` is the one error class you cannot diagnose
+      // from the message alone — a duplicate nonce and an out-of-order arrival
+      // log identically. Logging the value makes `pid + nonce` across the
+      // fleet's logs decide which it was. Spread rather than mutate:
+      // `errorDetails` may be a reference to the live response body above.
+      // Only the nonce is taken — `requestParams` also carries live API-Key /
+      // API-Sign headers (see the note on `calledWithArgs`).
+      const nonce = krakenNonceFromError(errorObj)
+      if (nonce) {
+        errorDetails = { ...errorDetails, nonce }
       }
 
       // Distinguish genuine Kraken API rejections from our own JS bugs. A bare

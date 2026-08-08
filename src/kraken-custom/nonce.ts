@@ -57,3 +57,43 @@ export function nextKrakenNonce(apiKey: string | undefined): string {
   lastNonceByApiKey.set(key, next)
   return String(next)
 }
+
+/**
+ * The nonce the *rejected* request actually carried, for the error log.
+ *
+ * Without it an `EAPI:Invalid nonce` line is undiagnosable: the two mechanisms
+ * that produce one — a duplicate nonce, and a strictly-increasing nonce that
+ * simply reaches Kraken out of order — are indistinguishable from the outside,
+ * so you cannot tell a regression of the counter from ordinary concurrency.
+ * With it, `pid + nonce` across the fleet's logs answers both directly.
+ *
+ * Read from the *signed* request, not from the caller's params: the nonce is
+ * injected inside `signRequest` (`res.requestData = { nonce, ...body }` — a NEW
+ * object), so `requestParams.params.body` never sees it. `buildRequest` puts
+ * that signed body on the axios options as `data`, and `parseException` staples
+ * the whole options object onto the thrown error.
+ *
+ * ⚠️ That same `requestParams.options` is where the live `API-Key` / `API-Sign`
+ * headers ride (see `utils/redact.ts`). This function must only ever return the
+ * nonce itself — never the object it came from, and never a widened slice of
+ * it. The `\d+` guard is part of that: whatever it returns is digits or nothing.
+ *
+ * Returns undefined for requests that carry no nonce — the futures/derivatives
+ * path signs with `nonce = ''`, and errors this connector raises itself (e.g.
+ * `new Error('wouldNotReducePosition')`) have no `requestParams` at all.
+ */
+export function krakenNonceFromError(error: unknown): string | undefined {
+  const data = (error as any)?.requestParams?.options?.data
+
+  const raw =
+    typeof data === 'string'
+      ? // urlencoded or pre-serialized body
+        /(?:^|[&{,"\s])"?nonce"?\s*[:=]\s*"?(\d+)/.exec(data)?.[1]
+      : data?.nonce
+
+  return typeof raw === 'string' || typeof raw === 'number'
+    ? /^\d+$/.test(String(raw))
+      ? String(raw)
+      : undefined
+    : undefined
+}

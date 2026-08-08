@@ -1,4 +1,5 @@
 import {
+  AccountFill,
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
@@ -292,6 +293,23 @@ export class ExchangeService {
       auth.bybithost,
       auth.subaccount,
     ).getMarginAvailableUsd()
+  }
+
+  getAccountFills(
+    auth: AuthData,
+    sinceMs?: number,
+  ): Promise<BaseReturn<AccountFill[]>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getAccountFills(sinceMs)
   }
 
   verifyUser(

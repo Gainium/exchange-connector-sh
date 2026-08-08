@@ -1,4 +1,5 @@
 import type {
+  AccountFill,
   AllPricesResponse,
   BaseReturn,
   CandleResponse,
@@ -39,6 +40,8 @@ export interface Exchange {
   getBalance(): Promise<BaseReturn<FreeAsset>>
 
   getMarginAvailableUsd(): Promise<BaseReturn<number | null>>
+
+  getAccountFills(sinceMs?: number): Promise<BaseReturn<AccountFill[]>>
 
   openOrder(order: {
     symbol: string
@@ -307,6 +310,23 @@ abstract class AbsctractExchange implements Exchange {
    */
   async getMarginAvailableUsd(): Promise<BaseReturn<number | null>> {
     return this.returnGood<number | null>(this.getEmptyTimeProfile(), [])(null)
+  }
+
+  /**
+   * Executions on the ACCOUNT, newest first, for reconciling what the venue
+   * actually did against what we recorded. Distinct from {@link getTrades},
+   * which is the public tape for a symbol.
+   *
+   * `sinceMs` pages backwards through history; callers walk it until they have
+   * covered the window they care about. An empty array means "no more" — the
+   * default here, for every venue that publishes no such history, so a caller
+   * that asks gets a clean empty answer rather than an error.
+   *
+   * Read-only, and heavier than an ordinary REST call on most venues: it must
+   * go through the same rate-limit accounting as any other history endpoint.
+   */
+  async getAccountFills(_sinceMs?: number): Promise<BaseReturn<AccountFill[]>> {
+    return this.returnGood<AccountFill[]>(this.getEmptyTimeProfile(), [])([])
   }
 
   /** Open order abstract function

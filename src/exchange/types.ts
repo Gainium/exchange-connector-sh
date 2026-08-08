@@ -138,6 +138,29 @@ export type TradeResponse = {
   timestamp: number
 }
 
+/**
+ * One execution on the ACCOUNT — not a public market trade (`TradeResponse`).
+ *
+ * `clientOrderId` is the id WE supplied when placing the order, which is what
+ * makes this reconcilable: a fill the venue reports against one of our client
+ * order ids, for an order we recorded as cancelled-and-unfilled, is a fill we
+ * lost — provable per fill, with no inference about margin or position size.
+ * A trade the user placed by hand carries no client order id of ours and is
+ * therefore excluded by construction rather than having to be reasoned away.
+ */
+export type AccountFill = {
+  fillId: string
+  orderId: string
+  clientOrderId: string
+  symbol: string
+  side: 'BUY' | 'SELL'
+  price: string
+  quantity: string
+  timestamp: number
+  /** Venue's own classification, passed through unmapped for diagnostics. */
+  fillType?: string
+}
+
 export type FundingRateResponse = {
   /** Universal symbol, e.g. BTCUSDT */
   symbol: string

@@ -232,6 +232,22 @@ export class ExchangeController {
     return this.exchangeService.getMarginAvailableUsd(headers)
   }
 
+  /**
+   * Executions on the account, newest first — NOT the public tape (`/trades`).
+   * Read-only, for reconciling what the venue did against what we recorded.
+   * `since` (ms) pages backwards through history.
+   */
+  @Get('/accountFills')
+  async getAccountFills(
+    @Headers() headers: AuthData,
+    @Query('since') since: string = null,
+  ) {
+    return this.exchangeService.getAccountFills(
+      headers,
+      since ? +since : undefined,
+    )
+  }
+
   @Get('/accountType')
   async accountType(@Headers() headers: AuthData) {
     const result = await this.exchangeService.accountType(headers)

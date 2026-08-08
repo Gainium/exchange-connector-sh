@@ -7,6 +7,7 @@ import {
   CommonOrder,
   ExchangeInfo,
   ExchangeIntervals,
+  AccountFill,
   FreeAsset,
   LeverageBracket,
   OrderStatusType,
@@ -1174,6 +1175,72 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.getMarginAvailableUsd,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /**
+   * Executions on this account, newest first. Read-only.
+   *
+   * The point of this endpoint is reconciliation: every fill carries the client
+   * order id WE supplied, so a fill reported against one of our ids for an order
+   * we recorded as cancelled-and-unfilled is a fill we lost — provable per fill,
+   * with no inference about margin or position size. Trades the user placed by
+   * hand carry no client order id of ours and drop out on their own.
+   *
+   * Rate-limited as a history call (`getTradesHistory`), which is the heavy
+   * bucket — this walks account history and must not compete with trading calls
+   * for the account's budget. Futures only: Kraken's spot fills live behind a
+   * different endpoint and are not needed here.
+   */
+  async getAccountFills(
+    sinceMs?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<AccountFill[]>> {
+    if (!this.usdm) {
+      return this.returnGood<AccountFill[]>(timeProfile)([])
+    }
+    if (!this.derivativesClient) {
+      return this.errorClient(timeProfile)
+    }
+
+    timeProfile =
+      (await this.checkLimits('getTradesHistory', undefined, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+    return this.derivativesClient
+      .getFills(
+        sinceMs ? { lastFillTime: new Date(sinceMs).toISOString() } : undefined,
+      )
+      .then(async (result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (result.result !== 'success' || !result.fills) {
+          throw new Error(
+            `Failed to get fills. Result: ${result.result || 'undefined'}`,
+          )
+        }
+        const fills: AccountFill[] = []
+        for (const f of result.fills) {
+          fills.push({
+            fillId: `${f.fill_id}`,
+            orderId: `${f.order_id}`,
+            clientOrderId: f.cliOrdId ?? '',
+            symbol: await this.normalizeSymbol(f.symbol),
+            side: f.side === 'sell' ? 'SELL' : 'BUY',
+            price: `${f.price}`,
+            quantity: `${f.size}`,
+            timestamp: +new Date(f.fillTime),
+            fillType: f.fillType,
+          })
+        }
+        return this.returnGood<AccountFill[]>(timeProfile)(fills)
+      })
+      .catch(
+        this.handleKrakenErrors(
+          this.getAccountFills,
+          sinceMs,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

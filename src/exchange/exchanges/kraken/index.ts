@@ -855,6 +855,49 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * Does this `/orders/status` element actually describe an order Kraken has?
+   *
+   * `getOrderStatus` answers about orders that are open, or were filled or
+   * cancelled in the last 5 seconds — and it returns an ELEMENT even for an id
+   * outside that window, carrying no usable `status` (absent, or a not-found
+   * marker) and often an `error`. That element is "we do not know this order",
+   * not a snapshot of it.
+   *
+   * The caller used to feed it through as `orderInfo.status || 'NEW'`, which
+   * turns "we do not know" into the one answer that means the opposite: NEW =
+   * resting on the book. Bug #366 is what that costs. A Kraken Futures grid
+   * order (`GRID-RO-1w23…` / `a26e32f1-…`) was gone from the venue, so every
+   * cancel came back `notFound` -> `Unknown order`, and main-app's
+   * `_handleUnknownOrder` then re-read it here and was told NEW. Because that
+   * is a SUCCESSFUL read, main-app cleared its `canceledMap` retry counter on
+   * each pass, so the 5-attempt force-cancel that exists for exactly this case
+   * could never be reached — the order sat at NEW in Mongo from 2026-08-05
+   * while the bot re-attempted the cancel ~4x/day indefinitely, holding a dead
+   * grid level.
+   *
+   * So: only a status Kraken documents for a real order is evidence about that
+   * order. Anything else falls through to the getOrderEvents lookup, which
+   * either resolves the true outcome or fails and lets the caller reconcile —
+   * the path already proven in production on `CMB-GR-…` orders, which reach
+   * "Order not found in history" and then main-app's force-cancel.
+   *
+   * Deliberately NOT relaxed into `mapOrderStatus`'s unknown -> NEW default:
+   * that default is shared with the spot paths and is not in evidence here.
+   *
+   * Pure — no network.
+   */
+  futures_isKnownOrderStatus(status?: string): boolean {
+    return [
+      'ENTERED_BOOK',
+      'FULLY_EXECUTED',
+      'REJECTED',
+      'CANCELLED',
+      'TRIGGER_PLACED',
+      'TRIGGER_ACTIVATION_FAILURE',
+    ].includes(`${status ?? ''}`.toUpperCase())
+  }
+
+  /**
    * Size-weighted average execution price from a batch of Kraken order events.
    *
    * Kraken attaches `EXECUTION` events — each carrying an exact `price` and
@@ -1879,6 +1922,18 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
 
           const orderInfo = result.orders[0]
+
+          // An element without a status Kraken documents for a real order is
+          // "we do not know this id", not "it is resting". Treat it exactly
+          // like an empty `orders` array and fall through to the history
+          // lookup below. See `futures_isKnownOrderStatus` (bug #366).
+          if (
+            !orderInfo?.order ||
+            !this.futures_isKnownOrderStatus(orderInfo.status)
+          ) {
+            throw new Error('Order not found in active orders')
+          }
+
           const order = orderInfo.order
           const avgFillPrice =
             (order.filled || 0) > 0

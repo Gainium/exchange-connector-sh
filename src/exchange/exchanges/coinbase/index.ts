@@ -1130,6 +1130,19 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
             await sleep(time)
           }
           if (isError(message, unauthorized)) {
+            // A 401 is the venue's VERDICT ON THE CREDENTIALS, not a blip:
+            // revoked / expired / wrong-key-type keys cannot become valid by
+            // asking again, which is why `retrunBad()` above already reports
+            // Unauthorized as the user's problem rather than ours. Running the
+            // full `this.retry = 10` ladder at a flat 2s therefore bought
+            // nothing and cost ~18s of pure sleep per call — that is the whole
+            // of the `updateBalance` portfolio-refresh resolver's 19.4s band on
+            // prod (issue #385): one dead Coinbase connection, one ladder.
+            // Keep a SINGLE re-try to absorb a genuine auth-service blip (same
+            // shape as `internalTimeout` above), then report.
+            if (timeProfile.attempts >= 2) {
+              return retrunBad()
+            }
             const time = 2000
             Logger.log(
               `Coinbase Unauthorized wait ${time}s ${timeProfile.attempts}`,

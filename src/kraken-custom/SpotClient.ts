@@ -19,11 +19,25 @@ export function serializeParams<T extends Record<string, any> | undefined>(
 
   const queryString = Object.keys(params)
     .sort()
-    .map((key) => {
-      const value = params[key]
-      if (strict_validation === true && typeof value === 'undefined') {
+    .filter((key) => {
+      // An absent optional param must not reach Kraken at all. Callers build
+      // request objects with fixed shapes, so an unused option is still a
+      // present key holding `undefined` (e.g. `reduceOnly` on an entry order,
+      // `limitPrice` on a MARKET order). Without this filter it was encoded as
+      // the literal text `reduceOnly=undefined`, and the derivatives path
+      // signs AND sends that exact string as the form body — so Kraken read a
+      // non-`false` value and treated a plain BUY base order as reduce-only,
+      // rejecting it with `wouldNotReducePosition`. See bug #383.
+      // `strict_validation` below is deliberately still evaluated first: when a
+      // caller opts into strict signing, an undefined param stays an error
+      // rather than being silently dropped.
+      if (strict_validation === true && typeof params[key] === 'undefined') {
         throw new Error('Failed to sign API request due to undefined parameter')
       }
+      return typeof params[key] !== 'undefined'
+    })
+    .map((key) => {
+      const value = params[key]
 
       if (repeatArrayValuesAsKVPairs && Array.isArray(value)) {
         const values = value.map((subValue) => {

@@ -383,6 +383,22 @@ const krakenAvgPriceFailureLog = new Map<string, number>()
 const KRAKEN_AVG_PRICE_LOG_TTL = 60 * 60 * 1000
 
 /**
+ * How long after Kraken Futures logs an `OrderPlaced` we still accept that
+ * event as evidence the order is resting, when `getOrderStatus` has not caught
+ * up and reports the id as unknown.
+ *
+ * Beyond this the two answers stop being a race and start being a
+ * contradiction, and `getOrderStatus` — the live open-orders view — is the one
+ * that is actually about *now*. Erring the same way as main-app's
+ * `noteOrderNotFound` age floor: a venue that says "unknown id" about an order
+ * placed moments ago is describing its own propagation lag, and calling that a
+ * phantom would force-cancel an order about to appear on the book. 60s is far
+ * beyond any propagation delay observed on this venue and far short of the
+ * hours a real phantom persists.
+ */
+const KRAKEN_ORDER_PLACED_PROPAGATION_MS = 60 * 1000
+
+/**
  * Does this failure mean "this key will never be allowed to read fills", as
  * opposed to "try again later"?
  *
@@ -1906,6 +1922,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
+      // Did the live open-orders view actually ANSWER about this id, as
+      // opposed to the call itself failing? Only the former is evidence the
+      // order is absent, and the staleness check in the history fallback below
+      // is allowed to act on evidence only — a request that did not come back
+      // `success` says nothing about the order and must not be rendered as a
+      // definitive negative (the mistake `isDefinitiveOrderNotFound` exists to
+      // prevent, with money attached).
+      let statusViewAnswered = false
+
       return this.derivativesClient
         .getOrderStatus({
           cliOrdIds: [newClientOrderId],
@@ -1918,8 +1943,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             !result.orders ||
             result.orders.length === 0
           ) {
+            statusViewAnswered =
+              result.result === 'success' && Array.isArray(result.orders)
             throw new Error('Order not found in active orders')
           }
+
+          statusViewAnswered = true
 
           const orderInfo = result.orders[0]
 
@@ -2017,6 +2046,30 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
                 if (filled > 0) {
                   status = filled >= quantity ? 'FILLED' : 'PARTIALLY_FILLED'
+                } else if (
+                  statusViewAnswered &&
+                  +new Date() - (orderEvent.timestamp || 0) >
+                    KRAKEN_ORDER_PLACED_PROPAGATION_MS
+                ) {
+                  // Bug #408. `OrderPlaced` records that Kraken once accepted
+                  // this order — it is not a snapshot of it. We only get here
+                  // because `getOrderStatus`, the authoritative live view, has
+                  // already said it does not know the id, so an old placement
+                  // with nothing filled is the record of how the phantom was
+                  // born, not evidence it is resting. Reporting NEW is what
+                  // survived the #375 fix: main-app's `_handleUnknownOrder`
+                  // treats a successful read as a resolution and clears its
+                  // `canceledMap` counter, so the 5-attempt force-cancel that
+                  // exists for exactly this case is never reached and the row
+                  // sits at NEW forever (7 cancels/18h on `GRID-RO-9BQqa08…`).
+                  //
+                  // Surfaced as a definitive not-found so `main-app`'s
+                  // `isDefinitiveOrderNotFound` matches and the counter can
+                  // finally saturate. Deliberately narrow: fills above are real
+                  // evidence at any age, a terminal cancel/reject is handled
+                  // above, and only a placement younger than the propagation
+                  // floor is still trusted — see that constant.
+                  throw new Error('Order not found in history')
                 }
               }
 

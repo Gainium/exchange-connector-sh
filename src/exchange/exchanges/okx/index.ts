@@ -981,8 +981,16 @@ class OKXExchange extends AbstractExchange implements Exchange {
               : +s.lotSz,
             name: this.futures
               ? category === 'linear'
-                ? //@ts-ignore
-                  s.settleCcy
+                ? // OKX Europe X-Perps report settleCcy as the unified-margin
+                  // pool label "USD" (quoteCcy is empty) — an asset no EU
+                  // account actually holds, so a USD-quoted pair can never
+                  // pass the engine's balance check and a deal never starts.
+                  // EU accounts fund and settle these in USDC; quote them as
+                  // such so balances, order sizing and the bot form line up.
+                  s.ruleType === 'xperp'
+                  ? 'USDC'
+                  : //@ts-ignore
+                    s.settleCcy
                 : s.ctValCcy
               : s.quoteCcy,
           },

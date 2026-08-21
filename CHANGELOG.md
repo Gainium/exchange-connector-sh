@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.13] - 2026-08-21
+
+### Fixed
+
+- OKX Europe X-Perps are now USDC-quoted. OKX reports their settlement currency as the unified-margin label "USD", which no EU account holds, so every X-Perp pair failed the balance check and bots could never open a deal (reported by discord2020 in the Phase-2 beta, forum topic 4925).
+
 ## [Unreleased]
 
 ### Fixed

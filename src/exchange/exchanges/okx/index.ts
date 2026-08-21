@@ -84,6 +84,36 @@ export const timeIntervalMap = {
  */
 const candleMaxSize = 300
 
+/**
+ * Backoff for OKX `50011 Too many requests`.
+ *
+ * This used to be `(attempts + 1) * 10000` — a **20 second** first retry. Two
+ * things were wrong with that.
+ *
+ * 1. OKX's rate-limit windows on these endpoints are measured in *seconds*, so
+ *    waiting 20s to clear a ~2s window overshoots by an order of magnitude.
+ * 2. It was longer than the entire budget of the caller that trips it most
+ *    often. `addExchange` gives verification 30s end to end (main-app
+ *    `core/src/exchange/verify.ts` `VERIFY_TIMEOUT_MS`), and the balancer
+ *    `sendtoall`s that probe to EVERY connector instance and awaits them all —
+ *    so ONE instance sleeping 20s killed the whole add. Users saw "The exchange
+ *    did not respond in time" and could not connect OKX at all.
+ *
+ * Jitter is the other half of the fix and is NOT decorative. The fan-out legs
+ * are issued in the same millisecond and are throttled in the same millisecond;
+ * a deterministic ladder made them back off in lockstep and collide again on
+ * every round — the same pathology as the Kraken nonce collision (bug #329).
+ * Spreading the wake-ups is what actually breaks the cycle.
+ *
+ * Grows 1s → 2s → 4s → 8s (capped), each randomised over [0.5x, 1.5x], so a
+ * typical recovery costs ~1-3s and four retries still fit inside the 30s
+ * budget with room for the calls themselves.
+ */
+const tooManyRequestsBackoff = (attempts: number) => {
+  const base = Math.min(1000 * 2 ** Math.max(0, attempts - 1), 8000)
+  return Math.round(base * (0.5 + Math.random()))
+}
+
 class OKXExchange extends AbstractExchange implements Exchange {
   /** OKX client */
   protected client: OKXRestClient
@@ -105,6 +135,39 @@ class OKXExchange extends AbstractExchange implements Exchange {
    */
   private xperpMap = new Map<string, string>()
   private xperpMapLoaded = 0
+
+  /**
+   * In-flight de-duplication for `GET /api/v5/account/config`.
+   *
+   * Four reads on this client resolve to that ONE endpoint — {@link getUid},
+   * {@link getPositionMode}, {@link getKeyPermissions} and
+   * {@link getApiPermission} — and key verification fires two of them
+   * CONCURRENTLY (`helpers/verify.ts` `withPermissions` races the verifier
+   * against the permission probe). OKX rate-limits the endpoint per **UserID**,
+   * not per IP, so those duplicates spend a budget that is already scarce: one
+   * `addExchange` fans out over every connector instance via `sendtoall`, and
+   * each instance was asking twice. Asking once halves the pressure at source.
+   *
+   * Only the IN-FLIGHT promise is shared, never a settled one. Account config
+   * is mutable (position mode, account level) and long-lived bot clients must
+   * keep reading it fresh — this collapses concurrent callers and nothing else.
+   * A retry driven by {@link handleOkxErrors} therefore always re-requests: by
+   * the time it runs the previous promise has settled and cleared itself.
+   */
+  private accountConfigInFlight?: ReturnType<
+    OKXRestClient['getAccountConfiguration']
+  >
+
+  private accountConfig() {
+    if (!this.accountConfigInFlight) {
+      this.accountConfigInFlight = this.client
+        .getAccountConfiguration()
+        .finally(() => {
+          this.accountConfigInFlight = undefined
+        })
+    }
+    return this.accountConfigInFlight
+  }
 
   constructor(
     futures: Futures,
@@ -197,8 +260,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return await this.client
-      .getAccountConfiguration()
+    return await this.accountConfig()
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res[0]) {
@@ -260,8 +322,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return await this.client
-      .getAccountConfiguration()
+    return await this.accountConfig()
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res[0]) {
@@ -538,8 +599,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
    * "read_only,trade", so a probe would lie.
    */
   override async getKeyPermissions(): Promise<KeyPermissions> {
-    return this.client
-      .getAccountConfiguration()
+    return this.accountConfig()
       .then((account) =>
         account?.length
           ? (parseOkxAccountConfig(account[0]) ??
@@ -562,8 +622,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         timeProfile,
       )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .getAccountConfiguration()
+    return this.accountConfig()
       .then((account) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (account.length) {
@@ -1781,10 +1840,8 @@ class OKXExchange extends AbstractExchange implements Exchange {
             await sleep(time)
           }
           if (`${e.code}` === '50011') {
-            const sleepTime = (timeProfile.attempts + 1) * 10000
-            Logger.log(
-              `OKX Too many requests sleep ${sleepTime / 1000}s, ${cb.name}`,
-            )
+            const sleepTime = tooManyRequestsBackoff(timeProfile.attempts)
+            Logger.log(`OKX Too many requests sleep ${sleepTime}ms, ${cb.name}`)
             await sleep(sleepTime)
           }
           if (

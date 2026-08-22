@@ -1234,7 +1234,21 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     size: number
     price: number
     unrealizedFunding: number | null
+    /**
+     * The account's leverage preference for this contract: an isolated
+     * maxLeverage, `'cross'` when no isolated preference is set, or
+     * `undefined` when the preference could not be read.
+     */
+    leveragePref?: KrakenLeveragePref
   }): PositionInfo {
+    // Kraken's position payload carries no leverage — it is a per-contract
+    // account preference. This used to be hardcoded `'1'`, and the bot
+    // engine's pre-start check compared it with the bot's own leverage, so
+    // every Kraken futures bot above 1x refused to start into an existing
+    // position ("Leverage in active position is 1, but in settings 2"). Report
+    // the real isolated preference; `'0'` means "not an isolated leverage"
+    // (cross / dynamic, or unknown), which the consumer must not compare.
+    const isolated = typeof pos.leveragePref === 'number'
     return {
       symbol: pos.symbol,
       initialMargin: '0',
@@ -1242,8 +1256,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       unrealizedProfit: pos.unrealizedFunding?.toString() || '0',
       positionInitialMargin: '0',
       openOrderInitialMargin: '0',
-      leverage: '1',
-      isolated: false,
+      leverage: isolated ? `${pos.leveragePref}` : '0',
+      isolated,
       entryPrice: pos.price.toString(),
       maxNotional: '0',
       positionSide: pos.side === 'long' ? 'LONG' : 'SHORT',
@@ -3695,6 +3709,54 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     return this.returnGood<LeverageBracket[]>(timeProfile)(brackets)
   }
 
+  /**
+   * The account's leverage preferences, keyed by upper-cased Kraken symbol.
+   *
+   * `GET /derivatives/api/v3/leveragepreferences` lists only contracts with an
+   * isolated preference set (`maxLeverage`); anything absent is cross. A
+   * failure returns `null` so callers can tell "unknown" from "cross" — the
+   * two are not the same thing and only one of them is safe to assert.
+   * Read-only; never written into `krakenLeveragePrefCache`, whose contract is
+   * "last state WE confirmed by writing".
+   */
+  private async futures_readLeveragePrefs(timeProfile: TimeProfile): Promise<{
+    prefs: Map<string, KrakenLeveragePref> | null
+    timeProfile: TimeProfile
+  }> {
+    if (!this.derivativesClient) {
+      return { prefs: null, timeProfile }
+    }
+    timeProfile =
+      (await this.checkLimits(
+        'getLeveragePreferences',
+        undefined,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    try {
+      const result = await this.derivativesClient.getLeverageSettings()
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (result.result !== 'success') {
+        return { prefs: null, timeProfile }
+      }
+      const prefs = new Map<string, KrakenLeveragePref>()
+      for (const p of result.leveragePreferences ?? []) {
+        const max = +(p.maxLeverage ?? 0)
+        prefs.set(
+          `${p.symbol ?? ''}`.toUpperCase(),
+          Number.isFinite(max) && max > 0 ? max : 'cross',
+        )
+      }
+      return { prefs, timeProfile }
+    } catch (e) {
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      Logger.warn(
+        `Kraken leverage preferences unavailable, positions will not carry a leverage: ${safeStringify(e).slice(0, 200)}`,
+      )
+      return { prefs: null, timeProfile }
+    }
+  }
+
   async futures_getPositions(
     symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
@@ -3731,6 +3793,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           positions = positions.filter((p) => p.symbol === krakenSymbol)
         }
 
+        // One read covers every contract on the account; skip it when there
+        // is nothing to label.
+        let prefs: Map<string, KrakenLeveragePref> | null = null
+        if (positions.length > 0) {
+          const read = await this.futures_readLeveragePrefs(timeProfile)
+          prefs = read.prefs
+          timeProfile = read.timeProfile
+        }
+
         const positionInfos: PositionInfo[] = []
         for (const pos of positions) {
           positionInfos.push(
@@ -3740,6 +3811,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               size: pos.size,
               price: pos.price,
               unrealizedFunding: pos.unrealizedFunding,
+              // No entry in the preference list = no isolated preference =
+              // cross. A failed read is `undefined` — unknown, not cross.
+              leveragePref:
+                prefs === null
+                  ? undefined
+                  : (prefs.get(`${pos.symbol ?? ''}`.toUpperCase()) ?? 'cross'),
             }),
           )
         }

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.14] - 2026-08-22
+
+### Fixed
+
+- **Kraken Futures positions reported a hardcoded leverage of 1.** Kraken's position payload carries no leverage — it is a per-contract account preference — and `futures_convertPosition` filled in `leverage: '1', isolated: false`. The bot engine's pre-start check compares that with the bot's own leverage, so every Kraken futures bot above 1x refused to start into an existing position with "Leverage in active position is 1, but in settings 2" (119 live bots across 54 users at the time of the fix; users worked around it by dropping their bots to 1x). `futures_getPositions` now reads the account's leverage preferences once (`GET /derivatives/api/v3/leveragepreferences`) and labels each position with its isolated `maxLeverage`; a contract with no preference is cross (`leverage: '0', isolated: false`), and a failed read leaves leverage `'0'` as well — "not an isolated leverage", which consumers must not compare (main-app core 1.52.8 treats 0 as unknown).
+
 ## [1.19.13] - 2026-08-21
 
 ### Fixed

@@ -1934,7 +1934,27 @@ class OKXExchange extends AbstractExchange implements Exchange {
     limit?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FundingRateResponse[]>> {
-    await this.ensureXperpMap()
+    // The SYMBOL HINT is load-bearing here, exactly as in getNewCandles /
+    // getHistoricCandles / futures_changeLeverage. `ensureXperpMap` bails out
+    // early unless the instance is an EU-perp one OR the hint says the symbol
+    // is an X-Perp — and main-app's hourly funding cron builds this exchange
+    // with `choose('', '')`, a KEYLESS instance whose `okxSource` is never set,
+    // so `isEuPerp` is false. Without the hint the map stayed empty, and
+    // `updateSymbol` fell through to `xperpMap.get(s) ?? s` and handed OKX the
+    // bare instFamily.
+    //
+    // Measured on prod, hourly and identically since 2026-08-21 (72 failures):
+    //   instId=SOL-USD_UM_XPERP      → 51001 "Instrument ID … doesn't exist"
+    //   instId=SOL-USD_UM_XPERP-310404 → code 0, real funding rates
+    // Same shape hit XRP-USD_UM_XPERP on 08-08. It is not one poisoned registry
+    // entry — it is every X-Perp symbol that ever holds a position, and while it
+    // fails NO funding events are published for that symbol at all.
+    //
+    // The global (keyless) okx.com host does serve these: verified 2026-08-24,
+    // `instType=FUTURES` returns 146 live `ruleType=xperp` rows including
+    // SOL-USD_UM_XPERP → SOL-USD_UM_XPERP-310404. That is the same rail
+    // getXperpTickers already relies on for anonymous price lists.
+    await this.ensureXperpMap(false, symbol)
     timeProfile =
       (await this.checkLimits('getFundingRateHistory', 3000, 5, timeProfile)) ||
       timeProfile

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.15] - 2026-08-24
+
+### Fixed
+
+- **Funding history for OKX Europe X-Perps asked OKX for an instrument that doesn't exist.** `getFundingRateHistory` called `ensureXperpMap()` without the symbol hint, and that guard bails out unless the instance is EU-perp (`okxSource=my` + futures) *or* the hint says the symbol is an X-Perp. main-app's hourly funding cron builds the exchange with `choose('', '')` — a keyless instance, so `okxSource` is never set and `isEuPerp` is false — so the map stayed empty and `updateSymbol` handed OKX the bare instFamily (`SOL-USD_UM_XPERP`) instead of the live instId (`SOL-USD_UM_XPERP-310404`). OKX answered `51001 Instrument ID … doesn't exist` every hour, and no funding event was published for that symbol at all. Measured on prod: 72 identical hourly failures for `SOL-USD_UM_XPERP` since 2026-08-21, and the same shape on `XRP-USD_UM_XPERP` on 08-08 — it is every X-Perp symbol that holds a position, not one poisoned registry entry. Passing the hint (as `getNewCandles`, `getHistoricCandles` and `futures_changeLeverage` already do) populates the map from the global keyless rail, which does serve these instruments — the same rail `getXperpTickers` relies on for anonymous price lists.
+
 ## [1.19.14] - 2026-08-22
 
 ### Fixed

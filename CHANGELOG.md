@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.1] - 2026-08-25
+
+### Fixed
+
+- **Binance's constructor was two slots short of the positional tail the factory passes**, so every argument after `_environment` landed one place too early: `_code` was receiving `keysType` (always undefined) and `_subaccount` was receiving the broker code. Harmless until something actually read `_code` — `getReferralStatus` did, and answered `supported: false` for every account because the agent code was empty. The unused `_keysType` / `_okxSource` parameters are now declared so the slots line up, matching bybit and kraken.
+
 ## [1.20.0] - 2026-08-25
 
 ### Added

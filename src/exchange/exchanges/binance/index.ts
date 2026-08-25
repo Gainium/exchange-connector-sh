@@ -140,8 +140,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     secret: string,
     _passphrase?: string,
     _environment?: string,
+    // `_keysType` and `_okxSource` are not used here, but they MUST occupy
+    // their slots: the factory always passes the full positional tail
+    // (key, secret, passphrase, environment, keysType, okxSource, code,
+    // bybitHost, subaccount), so omitting them shifts everything after by two
+    // — `_code` was silently receiving `keysType` and `_subaccount` was
+    // receiving the broker code. Same order as bybit and kraken; do not
+    // "tidy up" the unused ones away.
+    _keysType?: unknown,
+    _okxSource?: string,
     _code?: string,
-    _bybitHost?: string,
+    _bybitHost?: unknown,
     _subaccount?: boolean,
   ) {
     super({ key, secret })

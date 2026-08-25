@@ -441,6 +441,44 @@ export type RebateOverview = {
   time: number
 }
 
+/**
+ * Per-trader rebate, as the BROKER sees it. `customerId` is whatever identifies
+ * the trader to the referral program: the id we registered for them via
+ * {@link Exchange.setReferralCustomerId}, or — when nothing was ever registered
+ * — a MASKED email (`el***87@***.com`), which is useless as a join key. Callers
+ * that need per-user attribution must register ids first.
+ */
+export type TraderSummary = {
+  customerId: string
+  unit: string
+  tradeVol: string
+  rebateVol: string
+  time: number
+}
+
+/**
+ * Whether a set of user credentials actually earns us broker commission.
+ *
+ * Binance pays only when BOTH flags hold, so neither one alone is an answer:
+ *  - `isNewUser`  — the account signed up AFTER we joined the broker program.
+ *                   Fixed forever at that account's signup; no way to change it.
+ *  - `rebateWorking` — the account is not bound to some other referral and is
+ *                   below VIP 3. Unlike `isNewUser` this can flip either way
+ *                   over the account's life, so it has to be re-checked.
+ *
+ * `supported: false` means the venue has no such API at all — read it as "no
+ * opinion", never as "not earning".
+ */
+export type ReferralStatus = {
+  /** Bare agent/broker code the check ran against (no `x-` clientOrderId prefix). */
+  code: string
+  isNewUser: boolean
+  rebateWorking: boolean
+  /** `isNewUser && rebateWorking` — the only field that answers "are we paid?". */
+  earning: boolean
+  supported: boolean
+}
+
 export enum BybitHost {
   eu = 'eu',
   com = 'com',

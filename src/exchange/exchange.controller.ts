@@ -383,6 +383,39 @@ export class ExchangeController {
     return this.exchangeService.getRebateOverview(headers, body.timestamp)
   }
 
+  /**
+   * Does the caller's user earn us broker commission? Signed with the USER's
+   * credentials (the headers), never ours — see `ReferralStatus`.
+   */
+  @Get('/referralStatus')
+  async getReferralStatus(@Headers() headers: AuthData) {
+    return this.exchangeService.getReferralStatus(headers)
+  }
+
+  /** Label the caller's credentials with `customerId` inside the referral program. */
+  @Post('/referralCustomerId')
+  async setReferralCustomerId(
+    @Body() body: { customerId: string },
+    @Headers() headers: AuthData,
+  ) {
+    return this.exchangeService.setReferralCustomerId(headers, body.customerId)
+  }
+
+  /** Per-trader rebate breakdown. Signed with OUR broker key, not a user's. */
+  @Get('/traderSummary')
+  async getTraderSummary(
+    @Body()
+    body: { startTime?: number; endTime?: number; customerId?: string },
+    @Headers() headers: AuthData,
+  ) {
+    return this.exchangeService.getTraderSummary(
+      headers,
+      body.startTime,
+      body.endTime,
+      body.customerId,
+    )
+  }
+
   @Delete('/orders/byId')
   async cancelOrderByOrderId(
     @Body() body: { symbol: string; orderId: string },

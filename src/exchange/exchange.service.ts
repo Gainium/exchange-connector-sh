@@ -20,6 +20,8 @@ import {
   VerifyResponse,
   RebateRecord,
   RebateOverview,
+  ReferralStatus,
+  TraderSummary,
   OKXSource,
   BybitHost,
   KeyPermissions,
@@ -597,6 +599,56 @@ export class ExchangeService {
       auth.bybithost,
       auth.subaccount,
     ).getRebateOverview(timestamp)
+  }
+
+  async getReferralStatus(auth: AuthData): Promise<BaseReturn<ReferralStatus>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getReferralStatus()
+  }
+
+  async setReferralCustomerId(
+    auth: AuthData,
+    customerId: string,
+  ): Promise<BaseReturn<boolean>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).setReferralCustomerId(customerId)
+  }
+
+  async getTraderSummary(
+    auth: AuthData,
+    startTime?: number,
+    endTime?: number,
+    customerId?: string,
+  ): Promise<BaseReturn<TraderSummary[]>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getTraderSummary(startTime, endTime, customerId)
   }
 
   async cancelOrderByOrderId(

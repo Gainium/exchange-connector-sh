@@ -20,6 +20,8 @@ import type {
   TimeProfile,
   RebateRecord,
   RebateOverview,
+  ReferralStatus,
+  TraderSummary,
   KeyPermissions,
 } from './types'
 import { ExchangeIntervals, StatusEnum, PositionInfo } from './types'
@@ -151,6 +153,16 @@ export interface Exchange {
   ): Promise<BaseReturn<RebateRecord[]>>
 
   getRebateOverview(timestamp: number): Promise<BaseReturn<RebateOverview>>
+
+  getReferralStatus(): Promise<BaseReturn<ReferralStatus>>
+
+  setReferralCustomerId(customerId: string): Promise<BaseReturn<boolean>>
+
+  getTraderSummary(
+    startTime?: number,
+    endTime?: number,
+    customerId?: string,
+  ): Promise<BaseReturn<TraderSummary[]>>
 }
 
 /** Abstract class for exchange. Every supported exchange must extends this class */
@@ -557,6 +569,57 @@ abstract class AbsctractExchange implements Exchange {
     return unknownPermissions(
       'This exchange does not expose API-key permissions',
     )
+  }
+
+  /**
+   * Does THIS set of user credentials earn us broker commission?
+   *
+   * Signed with the *user's* key, not ours — the referral program answers about
+   * whichever account signs the request, which is the only reason a per-user
+   * answer is possible at all. Our own broker key would just describe us.
+   *
+   * Concrete (not abstract) on purpose, same as {@link getKeyPermissions}: a
+   * venue with no referral API inherits `supported: false`, and callers must
+   * read that as "no opinion", never as "not earning" — writing it down as
+   * `earning: false` would quietly mark every non-Binance user as dead weight.
+   */
+  async getReferralStatus(): Promise<BaseReturn<ReferralStatus>> {
+    return this.returnGood<ReferralStatus>(
+      this.getEmptyTimeProfile(),
+      [],
+    )({
+      code: '',
+      isNewUser: false,
+      rebateWorking: false,
+      earning: false,
+      supported: false,
+    })
+  }
+
+  /**
+   * Label these credentials with `customerId` inside the referral program, so
+   * the broker-side per-trader report can be joined back to a real user.
+   *
+   * Without this the venue reports a MASKED email and per-user attribution is
+   * impossible. Signed with the user's key — it writes nothing but a label and
+   * moves no money. Returns `false` where unsupported.
+   */
+  async setReferralCustomerId(
+    _customerId: string,
+  ): Promise<BaseReturn<boolean>> {
+    return this.returnGood<boolean>(this.getEmptyTimeProfile(), [])(false)
+  }
+
+  /**
+   * Per-trader volume + rebate, signed with OUR broker key (not a user's).
+   * Empty where the venue publishes no such breakdown.
+   */
+  async getTraderSummary(
+    _startTime?: number,
+    _endTime?: number,
+    _customerId?: string,
+  ): Promise<BaseReturn<TraderSummary[]>> {
+    return this.returnGood<TraderSummary[]>(this.getEmptyTimeProfile(), [])([])
   }
 }
 

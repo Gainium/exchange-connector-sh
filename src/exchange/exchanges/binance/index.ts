@@ -40,6 +40,8 @@ import {
   TimeProfile,
   RebateRecord,
   RebateOverview,
+  ReferralStatus,
+  TraderSummary,
   KeyPermissions,
 } from '../../types'
 import {
@@ -115,6 +117,14 @@ class BinanceExchange extends AbstractExchange implements Exchange {
 
   protected futures?: Futures
 
+  /**
+   * Broker/agent code for this venue, as stored in `brokercodes` — i.e. WITH the
+   * `x-` prefix (`x-<code>`). That prefix belongs to `newClientOrderId` only;
+   * the apiReferral endpoints want the bare code and answer `AgentCode is not
+   * exist` if you hand them the prefixed one. Use {@link referralCode}.
+   */
+  protected brokerCode?: string
+
   /** Constructor method
    * @param {string} domain us or com
    * @param {string} key api key
@@ -135,6 +145,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     _subaccount?: boolean,
   ) {
     super({ key, secret })
+    this.brokerCode = _code
     this.secret = (this.secret ?? '')
       .replace(/-----BEGIN PRIVATE KEY----- /g, '-----BEGIN PRIVATE KEY-----\n')
       .replace(/ -----END PRIVATE KEY-----/g, '\n-----END PRIVATE KEY-----')
@@ -158,7 +169,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         beautifyResponses: false,
       })
 
-      if (this.usdm) {
+      // Also on COIN-M: every apiReferral read lives on fapi and selects the
+      // market with `type` (1 = USD-M, 2 = COIN-M) — there is no working dapi
+      // equivalent. Without this a coin-m instance had no usdmClient and
+      // getRebateOverview threw on `undefined.getPrivate`.
+      if (this.usdm || this.coinm) {
         this.usdmClient = new USDMClient({
           api_key: this.key ?? '',
           api_secret: this.secret ?? '',
@@ -347,24 +362,210 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     if (!params.endTime) {
       delete params.endTime
     }
-    return this.usdmClient
-      .getPrivate('/fapi/v1/apiReferral/rebateVol', params)
-      .then((data: RebateOverview) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        return this.returnGood<RebateOverview>(timeProfile)(
-          data as RebateOverview,
+    return (
+      this.usdmClient
+        // NO leading slash. The client joins base + endpoint with '/', so a
+        // leading one yields `https://fapi.binance.com//fapi/v1/...`, which the
+        // CDN in front of Binance rejects with a 403 HTML page rather than a
+        // Binance error code — so it does not look like an API failure at all.
+        .getPrivate('fapi/v1/apiReferral/rebateVol', params)
+        .then((data: RebateOverview) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          return this.returnGood<RebateOverview>(timeProfile)(
+            data as RebateOverview,
+          )
+        })
+        .catch(
+          this.handleBinanceErrors(
+            this.getRebateOverview,
+            timestamp,
+            startTime,
+            endTime,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
         )
+    )
+  }
+  /**
+   * The bare agent/broker code for the apiReferral endpoints.
+   *
+   * `brokercodes` stores the `newClientOrderId` form (`x-<code>`), but the
+   * referral API rejects that with `-9000 AgentCode is not exist` and only
+   * accepts the code without the prefix. Verified against the live API.
+   */
+  private get referralCode(): string {
+    return (this.brokerCode ?? '').replace(/^x-/, '')
+  }
+
+  /**
+   * Whether THESE user credentials earn us commission — see {@link ReferralStatus}.
+   *
+   * Signed with the user's own key: the endpoint reports on whichever account
+   * signs it. Spot and futures are separate programs with separate codes, so a
+   * spot connection and a futures connection of the same person can disagree.
+   */
+  override async getReferralStatus(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<ReferralStatus>> {
+    const code = this.referralCode
+    if (!code) {
+      return this.returnGood<ReferralStatus>(timeProfile)({
+        code: '',
+        isNewUser: false,
+        rebateWorking: false,
+        earning: false,
+        supported: false,
+      })
+    }
+    const client = this.futures ? this.usdmClient : this.client
+    if (!client) {
+      return this.errorClient(timeProfile)
+    }
+    timeProfile =
+      (await this.checkLimits(
+        'getReferralStatus',
+        'request',
+        100,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const params = this.futures
+      ? {
+          brokerId: code,
+          type: this.coinm ? 2 : 1,
+          recvWindow: this.recvWindow,
+        }
+      : { apiAgentCode: code, recvWindow: this.recvWindow }
+    const path = this.futures
+      ? 'fapi/v1/apiReferral/ifNewUser'
+      : 'sapi/v1/apiReferral/ifNewUser'
+    return client
+      .getPrivate(path, params)
+      .then((data: unknown) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        // A account outside the program answers `null` rather than an error.
+        const raw = (data ?? {}) as {
+          ifNewUser?: boolean
+          rebateWorking?: boolean
+        }
+        const isNewUser = raw.ifNewUser === true
+        const rebateWorking = raw.rebateWorking === true
+        return this.returnGood<ReferralStatus>(timeProfile)({
+          code,
+          isNewUser,
+          rebateWorking,
+          earning: isNewUser && rebateWorking,
+          supported: true,
+        })
       })
       .catch(
         this.handleBinanceErrors(
-          this.getRebateOverview,
-          timestamp,
-          startTime,
-          endTime,
+          this.getReferralStatus,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
   }
+
+  /**
+   * Register `customerId` for these credentials so {@link getTraderSummary}
+   * reports them under an id we can join on instead of a masked email.
+   * Signed with the user's key; writes a label only.
+   */
+  override async setReferralCustomerId(
+    customerId: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<boolean>> {
+    const code = this.referralCode
+    const client = this.futures ? this.usdmClient : this.client
+    if (!code || !client) {
+      return this.returnGood<boolean>(timeProfile)(false)
+    }
+    timeProfile =
+      (await this.checkLimits(
+        'setReferralCustomerId',
+        'request',
+        100,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const params = this.futures
+      ? { customerId, brokerId: code, recvWindow: this.recvWindow }
+      : { customerId, apiAgentCode: code, recvWindow: this.recvWindow }
+    const path = this.futures
+      ? 'fapi/v1/apiReferral/userCustomization'
+      : 'sapi/v1/apiReferral/userCustomization'
+    return client
+      .postPrivate(path, params)
+      .then(() => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<boolean>(timeProfile)(true)
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.setReferralCustomerId,
+          customerId,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /**
+   * Per-trader volume + rebate for the window, signed with OUR broker key.
+   *
+   * `customerId` is whatever the trader is registered as; unregistered traders
+   * come back as a MASKED email (`el***87@***.com`) which cannot be joined to a
+   * user — see {@link setReferralCustomerId}.
+   */
+  override async getTraderSummary(
+    startTime?: number,
+    endTime?: number,
+    customerId?: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<TraderSummary[]>> {
+    if (!this.usdmClient) {
+      return this.errorClient(timeProfile)
+    }
+    timeProfile =
+      (await this.checkLimits(
+        'getTraderSummary',
+        'request',
+        100,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const params: Record<string, unknown> = {
+      recvWindow: this.recvWindow,
+      type: this.coinm ? 2 : 1,
+      limit: 1000,
+    }
+    if (startTime) {
+      params.startTime = startTime
+    }
+    if (endTime) {
+      params.endTime = endTime
+    }
+    if (customerId) {
+      params.customerId = customerId
+    }
+    return this.usdmClient
+      .getPrivate('fapi/v1/apiReferral/traderSummary', params)
+      .then((data: unknown) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<TraderSummary[]>(timeProfile)(
+          (data ?? []) as TraderSummary[],
+        )
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.getTraderSummary,
+          startTime,
+          endTime,
+          customerId,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
   async getAffiliate(_uid: string | number): Promise<BaseReturn<boolean>> {
     return this.returnGood<boolean>(this.getEmptyTimeProfile())(false)
   }

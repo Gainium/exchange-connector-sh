@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] - 2026-08-25
+
+### Added
+
+- `getReferralStatus()`, `setReferralCustomerId()` and `getTraderSummary()` on the exchange interface, implemented for Binance and defaulting to "not supported" everywhere else. `getReferralStatus` is signed with the **user's** credentials and answers whether that account earns broker commission: it needs BOTH `isNewUser` (the account registered after we joined the program — fixed at their signup) and `rebateWorking` (not bound to another referral, below VIP 3 — can change over time). `supported: false` means the venue has no such API and must be read as "no opinion", never as "not earning". Note the apiReferral endpoints want the BARE agent code, not the `x-`-prefixed `newClientOrderId` form, which they reject with `-9000 AgentCode is not exist`.
+- `setReferralCustomerId()` registers an id for the credentials so the broker-side per-trader report is keyed by something joinable. Without it the venue reports a masked email (`el***87@***.com`), which cannot be matched to a user.
+
+### Fixed
+
+- **Binance futures rebate reads returned a 403 HTML page instead of data.** `getRebateOverview` passed `/fapi/v1/apiReferral/rebateVol` with a leading slash, and the client joins base + endpoint with `/` — producing `https://fapi.binance.com//fapi/v1/...`. The CDN in front of Binance rejects the doubled slash with a 403 HTML error page rather than a Binance error code, so it never looked like an API failure. Verified against the live API: the same request without the leading slash returns data.
+- A COIN-M instance had no `usdmClient`, so `getRebateOverview` threw on `undefined.getPrivate`. Every apiReferral read lives on `fapi` and selects the market with `type` (1 = USD-M, 2 = COIN-M) — there is no working `dapi` equivalent — so the USD-M client is now built for COIN-M instances too.
+
 ## [1.19.15] - 2026-08-24
 
 ### Fixed

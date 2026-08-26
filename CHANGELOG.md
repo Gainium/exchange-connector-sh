@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.2] - 2026-08-26
+
+### Fixed
+
+- **Hyperliquid `cummulativeQuoteQty` was the REMAINING notional, not the executed one.** HL reports `sz` on a resting order as the size still open, and `convertOrder` priced the quote off it (`limitPx * sz`): an untouched open order reported its full notional as executed, a fully filled one reported 0, and a canceled partially-filled TP reported the remainder's notional against a tiny `executedQty`. main-app derives the booked price as `cummulativeQuoteQty / executedQty`, so during the 2026-08-26 deploy restart one live DCA deal (TP 0.472 filled 0.025, canceled by the reload) was closed at a phantom price of ~1539 instead of 86.082 and booked +$684 on a $40 position. Quote is now `(origSz - sz) * price`, the fills-based price lookup also runs for canceled orders that carry partial fills, and a filled MARKET order without a fills price reports 0 rather than its slippage-padded IOC request price. Pinned by `convert-order-executed-quote.spec.ts`.
+
 ## [1.20.1] - 2026-08-25
 
 ### Fixed

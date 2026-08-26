@@ -1022,9 +1022,7 @@ const HL_BAD_ADDRESS_CODE = 4220
 const hlRetryAfterMs = (err: unknown): number | undefined => {
   const resp = (err as { response?: { headers?: unknown } })?.response
   const headers = resp?.headers as
-    | { get?: (k: string) => string | null }
-    | Record<string, string>
-    | undefined
+    { get?: (k: string) => string | null } | Record<string, string> | undefined
   if (!headers) return undefined
   const raw =
     typeof (headers as { get?: unknown }).get === 'function'
@@ -2008,9 +2006,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             new HyperliquidError(result.status, 0),
           )
         }
+        // A canceled order can carry partial fills (a resting TP that took
+        // some size before being canceled). Its booked price must come from
+        // the actual fills exactly like the fully-filled case — the resting
+        // order struct only knows limitPx and the REMAINING sz.
+        const executedSz = +result.order.order.origSz - +result.order.order.sz
         if (
           result.order.order.orderType === 'Limit' &&
-          result.order.status === 'filled'
+          (result.order.status === 'filled' ||
+            (result.order.status !== 'open' &&
+              isFinite(executedSz) &&
+              executedSz > 0))
         ) {
           try {
             timeProfile =
@@ -3101,7 +3107,23 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
 
     const orderType: OrderTypeT =
       order.orderType === 'Market' ? 'MARKET' : 'LIMIT'
-    let quote = +order.limitPx * +order.sz
+    // Hyperliquid's `sz` on a resting order is the REMAINING size, not the
+    // executed size. `cummulativeQuoteQty` is defined as the EXECUTED quote
+    // notional, so it must be priced off origSz - sz. The old
+    // `limitPx * sz` reported the remaining notional instead: full notional
+    // for an untouched open order, 0 for a fully filled one, and for a
+    // canceled partially-filled TP the remainder's notional against a tiny
+    // executedQty — main-app derives price as cummulativeQuoteQty /
+    // executedQty from these fields, which booked one live deal at a phantom
+    // ~18x price and +$684 profit on a $40 position (2026-08-26).
+    // For a LIMIT order the limit price bounds every fill, so it is a safe
+    // stand-in when no fills-derived price is available. A MARKET order's
+    // limitPx is the slippage-padded IOC request price — nothing traded
+    // there — so without a real fill price report 0 and let the consumer
+    // fall back to the price it already knows (same shape as bug #426).
+    const executed = +order.origSz - +order.sz
+    let quote =
+      +(filledPrice || (orderType === 'LIMIT' ? order.limitPx : 0)) * executed
     if (isNaN(quote) || !isFinite(quote)) {
       quote = 0
     }

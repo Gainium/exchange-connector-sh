@@ -312,7 +312,28 @@ type Asset = {
 export type FreeAsset = Asset[]
 
 export type FuturesFreeAsset = Omit<Asset, 'locked'>[]
-export type UserFee = { maker: number; taker: number }
+export type UserFee = {
+  maker: number
+  taker: number
+  /**
+   * Where this rate came from. `venue` = the exchange told us what THIS
+   * account pays. `ladder` = we could not ask, so this is the published
+   * schedule's entry rung — a guess that is wrong for anyone not on the
+   * bottom tier, and on Kraken is currently stale enough to match no real
+   * tier at all (its first rung reads 0.40%/0.25%; Kraken's live Tier 1 is
+   * 0.80%/0.40%).
+   *
+   * It exists so the CALLER can name the account: the connector receives only
+   * credentials (`AuthData` has no userId or uuid), so it can never say whose
+   * lookup degraded — but main-app's fee sweep knows exactly which user and
+   * connection it is asking for, and can log it the moment it sees `ladder`.
+   * Without this the fallback is invisible: it returns a plausible number,
+   * `status` is OK, and the stale rate is silently written to the user's fees.
+   *
+   * Optional and additive — absent means "not reported", never "venue".
+   */
+  source?: 'venue' | 'ladder'
+}
 export type OrderStatusType = 'CANCELED' | 'FILLED' | 'NEW' | 'PARTIALLY_FILLED'
 
 export type OrderTypeT = 'LIMIT' | 'MARKET'

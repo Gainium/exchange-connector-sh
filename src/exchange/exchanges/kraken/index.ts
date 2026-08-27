@@ -3161,7 +3161,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         // — so `.message` is literally "OK" and the REAL reason ("EGeneral:
         // Permission denied", "EAPI:Invalid key", …) lives in `body.error`.
         // Logging `.message` made the first day of this fallback undiagnosable.
-        `Kraken trade volume lookup failed, falling back to the published fee ladder: ${
+        `Kraken trade volume lookup failed for account ${hashKrakenKey(this.key)}, falling back to the published fee ladder: ${
           (error as { body?: { error?: string[] } })?.body?.error?.join('; ') ||
           (error?.message && error.message !== 'OK'
             ? error.message
@@ -3232,7 +3232,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         failures++
         if (failures === 1) {
           Logger.warn(
-            `Kraken pair-scoped trade volume failed (chunk ${i / KRAKEN_TRADE_VOLUME_CHUNK + 1}), affected pairs fall back to the ladder: ${
+            `Kraken pair-scoped trade volume failed for account ${hashKrakenKey(this.key)} (chunk ${i / KRAKEN_TRADE_VOLUME_CHUNK + 1}), affected pairs fall back to the ladder: ${
               (error as { body?: { error?: string[] } })?.body?.error?.join(
                 '; ',
               ) ||
@@ -3307,6 +3307,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           taker: account.taker ?? krakenLadderFee(pairInfo.fees, null, 0.26),
           maker:
             account.maker ?? krakenLadderFee(pairInfo.fees_maker, null, 0.16),
+          // `venue` only when Kraken actually answered for this account.
+          source: account.taker != null ? 'venue' : 'ladder',
         }
 
         return this.returnGood<UserFee>(timeProfile)(fee)
@@ -3405,6 +3407,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             exact?.taker ?? krakenLadderFee(pairInfo.fees, null, 0.26)
           const makerFee =
             exact?.maker ?? krakenLadderFee(pairInfo.fees_maker, null, 0.16)
+          const source: UserFee['source'] =
+            exact?.taker != null ? 'venue' : 'ladder'
           const base = this.symbolMapper.getActualAssetName(pairInfo.base || '')
           const quote = this.symbolMapper.getActualAssetName(
             pairInfo.quote || '',
@@ -3413,6 +3417,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             pair: `${base}-${quote}`,
             maker: makerFee,
             taker: takerFee,
+            source,
           }
         })
 

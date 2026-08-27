@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.7] - 2026-08-27
+
+### Added
+
+- `UserFee.source` (`'venue' | 'ladder'`, optional/additive) says whether a rate is what the exchange reported for THIS account or the published schedule's entry rung we fell back to. A degraded lookup was previously invisible: the fallback returns a plausible number with `status: OK`, so a stale rate was written to the user's fees with nothing logged. The connector cannot name the account — `AuthData` carries credentials only, no userId or uuid — so it now also stamps its TradeVolume warnings with the account's key fingerprint (a djb2 hash, never the key), and main-app's fee sweep logs the user and connection whenever it receives `ladder` rates.
+
 ## [1.20.6] - 2026-08-27
 
 ### Added

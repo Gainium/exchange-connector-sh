@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.5] - 2026-08-27
+
+### Changed
+
+- Dropped the client-side ladder-by-volume tier placement 1.20.3 introduced. The pair-scoped `TradeVolume` answer IS the account's rate — Kraken does the tier arithmetic — so re-deriving the rung from the 30-day volume duplicated venue logic for one narrow fallback case (a failed chunk while a pairless call worked) and could drift from Kraken's own math. Resolution is now: exact per-pair rate from Kraken, else the published ladder's first rung (the pre-1.20.3 behaviour).
+
 ## [1.20.4] - 2026-08-27
 
 ### Fixed

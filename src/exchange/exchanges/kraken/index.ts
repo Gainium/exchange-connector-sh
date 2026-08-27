@@ -373,24 +373,21 @@ function krakenLeveragePrefMatches(
 }
 
 /**
- * The account's own 30-day volume, from the PRIVATE `TradeVolume` endpoint.
+ * The account's own rate per pair, from the PRIVATE `TradeVolume` endpoint.
  *
  * Fees used to come from the PUBLIC `AssetPairs` ladder's first entry — the
  * highest tier, for the lowest volume — so every Kraken user on the platform
  * traded against 0.40% taker / 0.25% maker no matter what they actually pay.
  * That is not cosmetic: main-app grosses a spot base order up by `1 + taker`
  * and sizes take-profits against the same number, so a user on a better tier
- * silently over-buys on entry.
- *
- * One private call answers it for EVERY pair at once: `AssetPairs` publishes
- * the whole ladder, `TradeVolume` says which rung this account stands on. The
- * volume moves on a 30-day window, so a short cache costs nothing and keeps a
- * per-pair sweep from turning into one private request per pair.
+ * silently over-buys on entry. Pair-scoped `TradeVolume` answers with the
+ * rate the account ACTUALLY pays — Kraken does the tier arithmetic, and a
+ * negotiated rate (which exists on no public ladder) comes back the same way.
+ * Cached briefly so the hourly sweep and per-pair callers don't re-ask.
  */
 type KrakenAccountFees = {
-  /** 30-day volume in the account's fee currency, or null if unknown. */
-  volume: number | null
-  /** This pair's own rate when the call was pair-scoped — already a fraction. */
+  /** The account's own rate for the asked pair — already a fraction, straight
+   *  from Kraken (volume tier or negotiated alike). Null when unanswerable. */
   taker: number | null
   maker: number | null
 }
@@ -401,22 +398,18 @@ const krakenTradeVolumeCache = new Map<
 >()
 const KRAKEN_TRADE_VOLUME_TTL = 10 * 60 * 1000
 const KRAKEN_ACCOUNT_FEES_UNKNOWN: KrakenAccountFees = {
-  volume: null,
   taker: null,
   maker: null,
 }
 
 /**
- * Per-pair account rates from PAIR-SCOPED `TradeVolume` calls, per API key.
- *
- * The volume→ladder placement above is right for accounts whose rate comes
- * from the published schedule — but a NEGOTIATED rate exists on no ladder at
- * all. Live example that forced this: an account with ~5k EUR of 30-day
- * volume paying 0.10% taker / 0.00% maker. On the ladder 5k = tier 0 =
- * 0.40%/0.25%, so the pairless sweep still charged it tier 0. Kraken only
- * reveals a negotiated rate when you ask about specific pairs — `fees` /
- * `fees_maker` maps in a pair-scoped TradeVolume response — so the bulk path
- * batches the pair list through it.
+ * Per-pair account rates from PAIR-SCOPED `TradeVolume` calls, per API key —
+ * the bulk-sweep counterpart of `getAccountFees`. Kraken only reveals what an
+ * account actually pays when asked about specific pairs (`fees` / `fees_maker`
+ * maps in a pair-scoped response), and that answer covers volume tiers and
+ * negotiated rates alike. Live example that forced this: an account with ~5k
+ * EUR of 30-day volume paying a negotiated 0.10% taker / 0.00% maker — no
+ * volume-derived placement can ever produce that.
  */
 const krakenPairFeeMapCache = new Map<
   string,
@@ -3091,13 +3084,13 @@ class KrakenExchange extends AbstractExchange implements Exchange {
    * `src/user/utils.ts`). Letting a TradeVolume hiccup surface as a failed fee
    * fetch would start switching off working Kraken keys.
    *
-   * Pair-scoped calls return the account's rate for that pair directly, which
-   * is authoritative even for a negotiated rate the public ladder cannot show.
-   * Pairless calls return only the 30-day volume, which is enough to place the
-   * account on the ladder for every pair at once.
+   * Pair-scoped, and authoritative: Kraken answers with the rate this account
+   * actually pays on this pair — volume tier or negotiated alike — so no
+   * client-side tier arithmetic is involved. The bulk sweep's counterpart is
+   * `getAccountPairFees`, which batches the whole pair list the same way.
    */
   private async getAccountFees(
-    krakenSymbol?: string,
+    krakenSymbol: string,
   ): Promise<KrakenAccountFees> {
     // No credentials — the keyless public client (cron pair sync, unauthenticated
     // callers) can never answer this, and must not pay for finding that out.
@@ -3108,7 +3101,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     const cacheKey = `${hashKrakenKey(this.key)}:${krakenSymbol ?? '*'}`
     const cached = krakenTradeVolumeCache.get(cacheKey)
     if (cached && Date.now() - cached.ts < KRAKEN_TRADE_VOLUME_TTL) {
-      return { volume: cached.volume, taker: cached.taker, maker: cached.maker }
+      return { taker: cached.taker, maker: cached.maker }
     }
 
     try {
@@ -3119,9 +3112,6 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       if (!res.result || res.error?.length) {
         throw new Error(res.error?.[0] || 'Failed to get trade volume')
       }
-
-      const rawVolume = Number(res.result.volume)
-      const volume = Number.isFinite(rawVolume) ? rawVolume : null
 
       // Kraken echoes the pair back under its own name, which is not always the
       // string we asked with. Prefer an exact match, then fall back to the sole
@@ -3140,7 +3130,6 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       }
 
       const fees: KrakenAccountFees = {
-        volume,
         taker: pick(res.result.fees),
         maker: pick(res.result.fees_maker),
       }
@@ -3173,9 +3162,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
   /**
    * The account's ACTUAL rate for each requested pair, from pair-scoped
-   * `TradeVolume` calls in chunks. This is the only way Kraken exposes a
-   * negotiated rate (see `krakenPairFeeMapCache`); the ladder-by-volume
-   * placement stays as the fallback for any pair this cannot answer.
+   * `TradeVolume` calls in chunks. This is the only way Kraken exposes what
+   * an account actually pays (see `krakenPairFeeMapCache`); the published
+   * ladder's first rung is the fallback for any pair this cannot answer.
    *
    * Same best-effort contract as `getAccountFees`: every failure degrades to
    * an empty (or partial) map, never an error — a TradeVolume problem must not
@@ -3303,12 +3292,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         const account = await this.getAccountFees(krakenSymbol)
 
         const fee: UserFee = {
-          taker:
-            account.taker ??
-            krakenLadderFee(pairInfo.fees, account.volume, 0.26),
+          taker: account.taker ?? krakenLadderFee(pairInfo.fees, null, 0.26),
           maker:
-            account.maker ??
-            krakenLadderFee(pairInfo.fees_maker, account.volume, 0.16),
+            account.maker ?? krakenLadderFee(pairInfo.fees_maker, null, 0.16),
         }
 
         return this.returnGood<UserFee>(timeProfile)(fee)
@@ -3385,13 +3371,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
         }
 
-        // Account-level volume first: ONE pairless call places the account on
-        // every pair's published ladder (the 30-day volume is a property of
-        // the account). Then the pair-scoped batch OVERRIDES the ladder with
-        // the account's actual per-pair rates — the only place a negotiated
-        // rate is visible. Ladder stays the answer for any pair the batch
-        // could not cover (tokenized pairs, a failed chunk, no credentials).
-        const account = await this.getAccountFees()
+        // The account's ACTUAL per-pair rates, straight from Kraken. The
+        // pair-scoped TradeVolume batch is authoritative for both volume-tier
+        // and negotiated rates — Kraken does the tier arithmetic, not us. Any
+        // pair the batch could not answer (tokenized pairs, a failed chunk,
+        // no credentials) falls back to the published ladder's FIRST rung,
+        // which is byte-for-byte the pre-1.20.3 behaviour. Deliberately no
+        // client-side ladder-by-volume interpolation: it duplicated arithmetic
+        // Kraken already performs, and could only ever fire in the narrow case
+        // where a chunk failed but a pairless call worked.
         const pairFees = await this.getAccountPairFees(
           Object.keys(result.result),
         )
@@ -3402,10 +3390,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }).map(([pairKey, pairInfo]) => {
           const exact = pairFees.get(pairKey)
           const takerFee =
-            exact?.taker ?? krakenLadderFee(pairInfo.fees, account.volume, 0.26)
+            exact?.taker ?? krakenLadderFee(pairInfo.fees, null, 0.26)
           const makerFee =
-            exact?.maker ??
-            krakenLadderFee(pairInfo.fees_maker, account.volume, 0.16)
+            exact?.maker ?? krakenLadderFee(pairInfo.fees_maker, null, 0.16)
           const base = this.symbolMapper.getActualAssetName(pairInfo.base || '')
           const quote = this.symbolMapper.getActualAssetName(
             pairInfo.quote || '',

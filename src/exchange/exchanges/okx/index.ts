@@ -1952,10 +1952,10 @@ class OKXExchange extends AbstractExchange implements Exchange {
     // `updateSymbol` fell through to `xperpMap.get(s) ?? s` and handed OKX the
     // bare instFamily.
     //
-    // Measured on prod, hourly and identically since 2026-08-21 (72 failures):
+    // Observed in production, hourly and identically:
     //   instId=SOL-USD_UM_XPERP      → 51001 "Instrument ID … doesn't exist"
     //   instId=SOL-USD_UM_XPERP-310404 → code 0, real funding rates
-    // Same shape hit XRP-USD_UM_XPERP on 08-08. It is not one poisoned registry
+    // The same shape hit XRP-USD_UM_XPERP. It is not one poisoned registry
     // entry — it is every X-Perp symbol that ever holds a position, and while it
     // fails NO funding events are published for that symbol at all.
     //

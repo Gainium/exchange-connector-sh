@@ -11,8 +11,9 @@ process.env.NODE_ENV = 'testing'
  *
  * Pre-fix that string was in neither `retryErrors` nor the `isRateLimit` set, so
  * `shouldRetry` was false: the call failed instantly with no backoff and the
- * archive backfiller immediately re-requested. Prod node 40 showed 142 of 145
- * error lines with this signature and **zero** "Retrying after" lines.
+ * archive backfiller immediately re-requested. On an affected egress node
+ * nearly every error line carried this signature, with **zero** "Retrying
+ * after" lines.
  *
  * Run: npx ts-node --files --project tsconfig.json \
  *        src/exchange/exchanges/kraken/rate-limit.spec.ts

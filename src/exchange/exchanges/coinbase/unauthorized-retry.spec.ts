@@ -12,12 +12,12 @@ process.env.NODE_ENV = 'testing'
  * Production consequence: main-app's `updateUserBalance` refreshes EVERY stored
  * connection on a portfolio refresh, and its worker pool waits for all of them,
  * so ONE dead Coinbase connection set the wall clock of the whole
- * `updateBalance` GraphQL resolver. On 2026-08-11 that was
- * `[SlowGraphQL] op=updateBalance ms=19442..19742` for marioenzler69@gmail.com,
- * sustained over seven distinct minutes — and the same 19.3-20.8s band for
- * every other affected user, all three of whom hold a Coinbase connection
- * already flagged `status: false`. The connector logged the ladder verbatim:
- * `Coinbase Unauthorized wait 2000s 1` … `9`, 195k lines across the archive.
+ * `updateBalance` GraphQL resolver. That surfaced as
+ * `[SlowGraphQL] op=updateBalance ms=19442..19742` sustained over several
+ * minutes, in the same 19.3-20.8s band on every affected account — all of
+ * which hold a Coinbase connection already flagged `status: false`. The
+ * connector logged the ladder verbatim: `Coinbase Unauthorized wait 2000s 1`
+ * … `9`, at high volume.
  *
  * Run: npx ts-node --files --project tsconfig.json \
  *        src/exchange/exchanges/coinbase/unauthorized-retry.spec.ts

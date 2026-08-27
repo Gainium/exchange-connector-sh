@@ -376,11 +376,11 @@ export type CommonOrder = {
    *
    * This exists because `deal.commission` has always been an ESTIMATE
    * (`qty * price * storedFeeRate`), and an estimate is only ever as good as
-   * the stored rate. On 2026-08-27 that assumption broke in the open: 43 of 50
-   * Kraken accounts carried a rate matching no tier in Kraken's live schedule
+   * the stored rate. That assumption does not hold: Kraken accounts are
+   * routinely found carrying a rate matching no tier in Kraken's live schedule
    * (the public ladder we fall back to is stale — its first rung, 0.40%/0.25%,
    * is not a real tier; Kraken's actual Tier 1 is 0.80%/0.40%), so the
-   * "commission" booked against those deals was about half the true cost. An
+   * "commission" booked against those deals can be about half the true cost. An
    * observed fee cannot go stale the way a cached rate can.
    *
    * Optional and additive on purpose: `CommonOrder` is the platform's most

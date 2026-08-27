@@ -540,7 +540,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       // ever matched it — public `/public/OHLC` rejections were thrown straight
       // through with no backoff at all, and the archive backfiller simply
       // re-requested, so the egress fleet hammered Kraken continuously
-      // (2026-07-28: 142 of 145 error lines on a single node, 0 retries logged).
+      // (nearly every error line on an affected node, with 0 retries logged).
       'EGeneral:Too many requests',
       // Nonce collisions (spot `EAPI:Invalid nonce`; futures lowercase
       // `invalid nonce` / `duplicate nonce`) are pre-execution rejections — the

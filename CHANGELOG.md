@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.3] - 2026-08-27
+
+### Fixed
+
+- **Kraken spot fees were the published lowest-volume tier for every account, never the account's own.** `getUserFees` / `getAllUserFees` read `fees[0]` off the PUBLIC `AssetPairs` ladder — its own comment said "first tier (highest fee for lowest volume)" — so every Kraken user on the platform traded against 0.40% taker / 0.25% maker regardless of their 30-day volume or a negotiated rate, and the private `TradeVolume` endpoint was never called. This is not a display number: main-app grosses a spot LONG base order up by `1 + taker` before sending it (`dcaHelper` `feeFactor`) and sizes take-profit quantity and price displacement against the same figure, so a user on a better tier silently bought more than they configured — a 1521.81 EUR base order went to the wire as 1527.897 EUR of notional. The account's schedule now comes from `TradeVolume`: a pair-scoped call returns that pair's own rate (authoritative even for a negotiated one), and a single pairless call returns the 30-day volume, which places the account on the published ladder for every pair at once. Every failure path — no credentials, missing permission, a transient error — falls back to the ladder's first rung, i.e. byte-for-byte the old behaviour, so a `TradeVolume` hiccup can never surface as a failed fee fetch and start tripping main-app's `feeAuthDisabled` key-disabling backoff. Result cached for 10 minutes per account so the hourly fee sweep costs one extra private call per Kraken account. Kraken **futures** (`krakenUsdm`) still returns its hardcoded 0.02%/0.05% defaults and is unchanged.
+
 ## [1.20.2] - 2026-08-26
 
 ### Fixed

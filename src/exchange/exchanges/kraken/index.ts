@@ -35,6 +35,7 @@ import {
   krakenNonceFromError,
 } from '../../../kraken-custom'
 import limitHelper from './limit'
+import { krakenLadderFee } from './fees'
 import { Logger } from '@nestjs/common'
 import { createHash } from 'crypto'
 import { sleep } from '../../../utils/sleepUtils'
@@ -369,6 +370,40 @@ function krakenLeveragePrefMatches(
     cached.pref === pref &&
     Date.now() - cached.ts < KRAKEN_LEVERAGE_PREF_TTL
   )
+}
+
+/**
+ * The account's own 30-day volume, from the PRIVATE `TradeVolume` endpoint.
+ *
+ * Fees used to come from the PUBLIC `AssetPairs` ladder's first entry — the
+ * highest tier, for the lowest volume — so every Kraken user on the platform
+ * traded against 0.40% taker / 0.25% maker no matter what they actually pay.
+ * That is not cosmetic: main-app grosses a spot base order up by `1 + taker`
+ * and sizes take-profits against the same number, so a user on a better tier
+ * silently over-buys on entry.
+ *
+ * One private call answers it for EVERY pair at once: `AssetPairs` publishes
+ * the whole ladder, `TradeVolume` says which rung this account stands on. The
+ * volume moves on a 30-day window, so a short cache costs nothing and keeps a
+ * per-pair sweep from turning into one private request per pair.
+ */
+type KrakenAccountFees = {
+  /** 30-day volume in the account's fee currency, or null if unknown. */
+  volume: number | null
+  /** This pair's own rate when the call was pair-scoped — already a fraction. */
+  taker: number | null
+  maker: number | null
+}
+/** Keyed `<key fingerprint>:<pair|*>`; the raw API key is never stored. */
+const krakenTradeVolumeCache = new Map<
+  string,
+  KrakenAccountFees & { ts: number }
+>()
+const KRAKEN_TRADE_VOLUME_TTL = 10 * 60 * 1000
+const KRAKEN_ACCOUNT_FEES_UNKNOWN: KrakenAccountFees = {
+  volume: null,
+  taker: null,
+  maker: null,
 }
 
 /**
@@ -3022,6 +3057,90 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       )
   }
 
+  /**
+   * What this account actually pays, from the PRIVATE `TradeVolume` endpoint.
+   *
+   * Best-effort by design. Every failure path returns "unknown" rather than an
+   * error, and the caller then falls back to the published ladder's first rung
+   * — i.e. exactly the behaviour that shipped before this existed. That matters
+   * for more than tidiness: main-app's hourly fee sweep treats a hard failure
+   * from `getAllUserFees` as evidence the API key is dead and counts it toward
+   * disabling the key (`feeAuthFailures` / `feeAuthDisabled` in
+   * `src/user/utils.ts`). Letting a TradeVolume hiccup surface as a failed fee
+   * fetch would start switching off working Kraken keys.
+   *
+   * Pair-scoped calls return the account's rate for that pair directly, which
+   * is authoritative even for a negotiated rate the public ladder cannot show.
+   * Pairless calls return only the 30-day volume, which is enough to place the
+   * account on the ladder for every pair at once.
+   */
+  private async getAccountFees(
+    krakenSymbol?: string,
+  ): Promise<KrakenAccountFees> {
+    // No credentials — the keyless public client (cron pair sync, unauthenticated
+    // callers) can never answer this, and must not pay for finding that out.
+    if (!this.spotClient || !this.key || !this.secret) {
+      return KRAKEN_ACCOUNT_FEES_UNKNOWN
+    }
+
+    const cacheKey = `${hashKrakenKey(this.key)}:${krakenSymbol ?? '*'}`
+    const cached = krakenTradeVolumeCache.get(cacheKey)
+    if (cached && Date.now() - cached.ts < KRAKEN_TRADE_VOLUME_TTL) {
+      return { volume: cached.volume, taker: cached.taker, maker: cached.maker }
+    }
+
+    try {
+      await this.checkLimits('getTradingVolume', krakenSymbol)
+      const res = await this.spotClient.getTradingVolume(
+        krakenSymbol ? { pair: krakenSymbol } : {},
+      )
+      if (!res.result || res.error?.length) {
+        throw new Error(res.error?.[0] || 'Failed to get trade volume')
+      }
+
+      const rawVolume = Number(res.result.volume)
+      const volume = Number.isFinite(rawVolume) ? rawVolume : null
+
+      // Kraken echoes the pair back under its own name, which is not always the
+      // string we asked with. Prefer an exact match, then fall back to the sole
+      // entry — a pair-scoped call only ever describes one pair.
+      const pick = (
+        map: Record<string, { fee: string }> | undefined,
+      ): number | null => {
+        if (!map || !krakenSymbol) {
+          return null
+        }
+        const entry =
+          map[krakenSymbol] ??
+          (Object.keys(map).length === 1 ? map[Object.keys(map)[0]] : undefined)
+        const percent = Number(entry?.fee)
+        return Number.isFinite(percent) ? percent / 100 : null
+      }
+
+      const fees: KrakenAccountFees = {
+        volume,
+        taker: pick(res.result.fees),
+        maker: pick(res.result.fees_maker),
+      }
+      krakenTradeVolumeCache.set(cacheKey, { ...fees, ts: Date.now() })
+      return fees
+    } catch (error) {
+      // Cache the miss too, so a key without the permission (or an account
+      // Kraken refuses this endpoint for) does not re-ask on every pair of
+      // every sweep. It re-probes once the TTL lapses.
+      krakenTradeVolumeCache.set(cacheKey, {
+        ...KRAKEN_ACCOUNT_FEES_UNKNOWN,
+        ts: Date.now(),
+      })
+      Logger.warn(
+        `Kraken trade volume lookup failed, falling back to the published fee ladder: ${
+          error?.message ?? error
+        }`,
+      )
+      return KRAKEN_ACCOUNT_FEES_UNKNOWN
+    }
+  }
+
   async getUserFees(
     symbol: string,
     timeProfile = this.getEmptyTimeProfile(),
@@ -3055,7 +3174,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           ? { aclass: 'tokenized_asset' }
           : {}),
       } as Parameters<typeof this.spotClient.getAssetPairs>[0])
-      .then((result) => {
+      .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
         if (!result.result || result.error?.length) {
@@ -3067,20 +3186,21 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           throw new Error(`Pair ${symbol} not found`)
         }
 
-        // Extract fees from first tier (highest fee for lowest volume)
-        // fees format: [[volume, percent], ...] e.g., [[0, 0.26], [50000, 0.24], ...]
-        const takerFee =
-          pairInfo.fees && pairInfo.fees.length > 0
-            ? parseFloat(pairInfo.fees[0][1] as any) / 100
-            : 0.0026
-        const makerFee =
-          pairInfo.fees_maker && pairInfo.fees_maker.length > 0
-            ? parseFloat(pairInfo.fees_maker[0][1] as any) / 100
-            : 0.0016
+        // `AssetPairs` publishes the whole tier ladder — `[[volume, percent], …]`
+        // e.g. [[0, 0.40], [50000, 0.35], …] — but says nothing about WHICH rung
+        // this account is on. Reading `fees[0]` therefore charged every user the
+        // lowest-volume tier. Ask the account's own schedule and use that; the
+        // ladder's first rung is now only the answer for a caller we cannot
+        // identify.
+        const account = await this.getAccountFees(krakenSymbol)
 
         const fee: UserFee = {
-          maker: makerFee,
-          taker: takerFee,
+          taker:
+            account.taker ??
+            krakenLadderFee(pairInfo.fees, account.volume, 0.26),
+          maker:
+            account.maker ??
+            krakenLadderFee(pairInfo.fees_maker, account.volume, 0.16),
         }
 
         return this.returnGood<UserFee>(timeProfile)(fee)
@@ -3157,19 +3277,22 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
         }
 
+        // ONE private call places the account on every pair's ladder at once —
+        // the 30-day volume is a property of the account, not of the pair, so
+        // there is no need to ask per pair (and no budget to do so: this runs
+        // for every Kraken user on main-app's hourly fee sweep).
+        const account = await this.getAccountFees()
+
         const fees: (UserFee & { pair: string })[] = Object.entries({
           ...result.result,
           ...tokenizedPairs,
         }).map(([_, pairInfo]) => {
-          // Extract fees from first tier (highest fee for lowest volume)
-          const takerFee =
-            pairInfo.fees && pairInfo.fees.length > 0
-              ? parseFloat(pairInfo.fees[0][1] as any) / 100
-              : 0.0026
-          const makerFee =
-            pairInfo.fees_maker && pairInfo.fees_maker.length > 0
-              ? parseFloat(pairInfo.fees_maker[0][1] as any) / 100
-              : 0.0016
+          const takerFee = krakenLadderFee(pairInfo.fees, account.volume, 0.26)
+          const makerFee = krakenLadderFee(
+            pairInfo.fees_maker,
+            account.volume,
+            0.16,
+          )
           const base = this.symbolMapper.getActualAssetName(pairInfo.base || '')
           const quote = this.symbolMapper.getActualAssetName(
             pairInfo.quote || '',

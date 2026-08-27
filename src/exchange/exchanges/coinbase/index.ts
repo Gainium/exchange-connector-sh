@@ -52,6 +52,7 @@ import {
   CurrentApiKeyPermissions,
 } from 'coinbase-advanced-node'
 import limitHelper from './limit'
+import { normalizeSidedOrderFee } from '../../helpers/orderFee'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { AxiosError } from 'axios'
@@ -930,7 +931,13 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
             ? order.average_filled_price
             : limitPrice
           : limitPrice
+    // Coinbase Advanced Trade reports the fee it charged on the order itself
+    // as `total_fees`. There is no fee-currency field because there is nothing
+    // to disambiguate: Coinbase settles every trading fee in the product's
+    // QUOTE currency, so the side is stated directly rather than recovered by
+    // splitting `product_id`.
     return {
+      ...normalizeSidedOrderFee(order.total_fees, 'quote'),
       symbol: order.product_id,
       orderId: order.order_id,
       clientOrderId: order.client_order_id,

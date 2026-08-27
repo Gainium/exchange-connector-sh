@@ -40,6 +40,7 @@ import {
   type RestClientOptions,
 } from 'okx-api'
 import limitHelper from './limit'
+import { normalizeOrderFee } from '../../helpers/orderFee'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { RestClient as OKXOrderRestClient } from '../../../okx-custom/rest-client'
@@ -1733,7 +1734,15 @@ class OKXExchange extends AbstractExchange implements Exchange {
     }
     const size = order.accFillSz || order.fillSz || order.sz
     const price = +(order.avgPx ?? order.px) || +order.px
+    // OKX states the fee it charged on the order itself: `fee` with `feeCcy`
+    // naming the currency. It is reported NEGATIVE for a charge and positive
+    // for a rebate (OKX's sign convention is "effect on the balance"), which
+    // `normalizeOrderFee` turns into the magnitude of the cost. `rebate` is a
+    // separate field and deliberately not netted off here — a rebate is a
+    // credit, not a smaller fee, and the deal's cost basis is the fee.
+    const fee = normalizeOrderFee(order.fee, order.feeCcy)
     return {
+      ...fee,
       symbol: this.clearSymbol(order.instId),
       orderId: order.ordId,
       clientOrderId: order.clOrdId,

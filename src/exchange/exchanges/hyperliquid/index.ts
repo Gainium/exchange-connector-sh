@@ -25,6 +25,7 @@ import {
   KeyPermissions,
 } from '../../types'
 import * as hl from '@nktkas/hyperliquid'
+import { normalizeOrderFees, type OrderFeeFields } from '../../helpers/orderFee'
 import { getWalletAddress } from '@nktkas/hyperliquid/signing'
 import { unknownPermissions } from '../../helpers/keyPermissions'
 import limitHelper from './limit'
@@ -1979,6 +1980,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         return this.returnBad(timeProfile)(new Error('Response timeout'))
       }
     }
+    let fee: OrderFeeFields | undefined
     return this.infoClient
       .orderStatus({
         user: this._key,
@@ -2041,6 +2043,14 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
                 `Calculated price for order ${data.newClientOrderId} based on fills: ${price}`,
               )
               result.order.order.limitPx = price
+              // Same fills, second observation we were discarding: each one
+              // carries the fee Hyperliquid actually took (`fee`, negative for
+              // a maker rebate) and the token it took it in (`feeToken`, USDC
+              // for perps but not universally). This costs no extra request —
+              // the fills were already fetched above for the price.
+              fee = normalizeOrderFees(
+                fills.map((f) => ({ amount: f.fee, asset: f.feeToken })),
+              )
             }
             timeProfile = this.endProfilerTime(timeProfile, 'exchange')
           } catch (e) {
@@ -2056,6 +2066,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             result.order.status,
             result.order.statusTimestamp,
             price,
+            fee,
           ),
         )
       })
@@ -3101,6 +3112,14 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     status?: OrderResponseFound['order']['status'],
     timestamp?: number,
     filledPrice?: string,
+    /**
+     * The fee Hyperliquid charged, already normalised from the order's fills.
+     * Hyperliquid states the fee per FILL (`fee` + `feeToken`) and nowhere on
+     * the resting-order struct, so it can only be supplied by a caller that
+     * fetched the fills — which the `getOrder` path already does to recover
+     * the real fill price.
+     */
+    fee?: OrderFeeFields,
   ): Promise<CommonOrder> {
     const orderStatus: OrderStatusType =
       status === 'open' ? 'NEW' : status === 'filled' ? 'FILLED' : 'CANCELED'
@@ -3128,6 +3147,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       quote = 0
     }
     const response: CommonOrder = {
+      ...(fee ?? {}),
       symbol: await this.getPairByCoin(order.coin),
       orderId: order.oid,
       clientOrderId: order.cloid,

@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.8] - 2026-08-27
+
+### Added
+
+- **Every remaining venue now records the fee it actually charged**, extending the Kraken capture in 1.20.6 to Binance, Bybit, OKX, KuCoin, Bitget, Coinbase and Hyperliquid. `CommonOrder` gains `feeBreakdown` alongside the existing `feePaid` / `feeSide` / `feeAsset`; all four are optional and additive, so the platform's most load-bearing contract is unchanged for every existing consumer. Each venue is read from its OWN field, never computed as `qty * price * rate` — which is the estimate this replaces: Bybit `cumExecFee` (with `cumFeeDetail` preferred whenever Bybit sends the currency map), OKX `fee` + `feeCcy`, KuCoin `fee` + `feeCurrency` (per-fill when fills were fetched), Bitget futures `fee` settled in `marginCoin` and Bitget spot's `feeDetail` blob, Coinbase `total_fees`, Hyperliquid's per-fill `fee` + `feeToken`, and Binance's `fills[].commission` + `commissionAsset`.
+- **Binance spot placement now asks for the `FULL` response instead of `RESULT`.** `fills[]` — the only order-scoped place Binance states a commission — appears only on `FULL`, and Binance charges the same request weight for `ACK`, `RESULT` and `FULL`, so this observation was always free and simply never requested. `CommonOrder.fills` is populated from it as well, having previously been hard-coded to `[]`.
+
+### Notes
+
+- Three shapes of "which asset" are carried, because the venues genuinely differ and none of it is safe to assume. `feeAsset` holds the venue's own ticker (which may be neither side of the pair — BNB on Binance, BGB on Bitget, KCS on KuCoin). `feeSide` names a side of the pair for the venues that answer that way instead: Kraken via `oflags`, Coinbase (which settles every fee in quote and so has no currency field), and Bybit derivatives (settle coin: quote for linear, base for inverse) and spot (the asset received — base on a buy, quote on a sell). `feeBreakdown` carries the legs when one order was charged in more than one currency, and `feePaid` is deliberately left unset there so a consumer reading only `feePaid` cannot mistake one leg for the whole cost.
+- **A fee that cannot be observed is omitted, never reported as `0`.** A zero would tell the caller the fill was free and would replace a roughly-right estimate with a definitely-wrong observation; an absent field leaves `deal.commission`'s estimate in force. Negative venue figures (OKX, Bitget and Hyperliquid report a charge as negative) are normalised to the magnitude of the cost.
+- **Binance futures report no fee here on purpose.** Neither the placement response nor `GET /fapi/v1/order` carries a commission field at all; the fee arrives on the `ORDER_TRADE_UPDATE` user-stream event, which already reaches main-app, so capturing it belongs there rather than behind an extra weighted `userTrades` request per order.
+- Covered by two standalone ts-node checks (this repo has no test runner): `src/exchange/helpers/orderFee.spec.ts` for the normalisation rules, and `src/exchange/exchanges/venue-fee-capture.spec.ts` for each venue's mapper against a payload shaped the way that venue sends it.
+
 ## [1.20.7] - 2026-08-27
 
 ### Added

@@ -399,10 +399,26 @@ export type CommonOrder = {
    */
   feeSide?: 'base' | 'quote'
   /**
-   * The fee asset's ticker, for venues that charge in neither side of the pair
-   * (BNB on Binance, KCS on KuCoin). When set, `feeSide` is absent.
+   * The fee asset's TICKER, as the venue named it. Most venues answer the
+   * currency question this way rather than by naming a side, and the ticker
+   * may be neither side of the pair (BNB on Binance, BGB on Bitget, KCS on
+   * KuCoin). Resolving it against the pair is the consumer's job — it is the
+   * side that knows the order's `baseAsset`/`quoteAsset`. When set, `feeSide`
+   * is absent.
    */
   feeAsset?: string
+  /**
+   * Set INSTEAD of `feePaid`/`feeAsset` when a single order's fee was charged
+   * in more than one currency — a partial BNB/BGB deduction that covers some
+   * of the fee and leaves the rest in the quote asset.
+   *
+   * The legs are deliberately not summed: they are different currencies, and
+   * adding them would mean inventing an FX rate here, which is the same class
+   * of assumption that made the stored fee rate untrustworthy in the first
+   * place. `feePaid` is left unset in this case so that a consumer reading
+   * only `feePaid` cannot mistake one leg for the whole cost.
+   */
+  feeBreakdown?: { asset: string; amount: string }[]
 }
 
 export type FuturesOrderType_LT =

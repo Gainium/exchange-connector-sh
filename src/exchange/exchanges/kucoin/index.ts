@@ -7,6 +7,7 @@ import type {
 import Kucoin from '@gainium/kucoin-api'
 import AbstractExchange, { Exchange } from '../../abstractExchange'
 import limitHelper, { LimitType } from './limit'
+import { normalizeOrderFee, normalizeOrderFees } from '../../helpers/orderFee'
 import {
   BaseReturn,
   CandleResponse,
@@ -1503,7 +1504,22 @@ class KucoinExchange extends AbstractExchange implements Exchange {
               : `${+order.dealSize / +order.dealValue}`
             : order.price
         : order.price
+    // KuCoin settles the fee on the order record itself — `fee` with
+    // `feeCurrency` naming it — for both spot and futures. The currency is
+    // worth taking at face value rather than deriving from the pair: a KuCoin
+    // account with the KCS discount enabled pays in KCS, which is neither side
+    // of the traded pair, and futures settle in the margin coin.
+    //
+    // When fills were fetched they are the finer-grained truth (one fee line
+    // per trade, and a partially filled order can straddle two fee currencies),
+    // so prefer them and fall back to the order-level figure.
+    const fee = fills.length
+      ? normalizeOrderFees(
+          fills.map((f) => ({ amount: f.fee, asset: f.feeCurrency })),
+        )
+      : normalizeOrderFee(order.fee, order.feeCurrency)
     return {
+      ...fee,
       symbol: this.convertSymbol(order.symbol),
       orderId: order.id,
       clientOrderId: order.clientOid,

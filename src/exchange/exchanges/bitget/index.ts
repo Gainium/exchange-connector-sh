@@ -38,6 +38,8 @@ import {
 } from 'bitget-api'
 import { RestClientV2 as BitgetOrderClient } from '../../../bitget-custom/rest-client-v2'
 import limitHelper from './limit'
+import { normalizeOrderFee } from '../../helpers/orderFee'
+import { bitgetSpotFeeDetail } from './fees'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import {
@@ -2393,7 +2395,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       return 'MARKET'
     }
 
+    // Bitget futures state the charged fee on the order record as `fee`, and
+    // it is settled in `marginCoin` — the same coin the position is margined
+    // in, which the payload names, so no rule has to be inferred from the
+    // symbol. Bitget's sign convention is "effect on the balance", i.e. a
+    // charge arrives negative; `normalizeOrderFee` takes the magnitude.
     return {
+      ...normalizeOrderFee(order.fee, order.marginCoin),
       symbol: order.symbol,
       orderId: order.orderId,
       clientOrderId: order.clientOid,
@@ -2457,6 +2465,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       return 'MARKET'
     }
     return {
+      ...bitgetSpotFeeDetail(order.feeDetail),
       symbol: order.symbol,
       orderId: order.orderId,
       clientOrderId: order.clientOid,

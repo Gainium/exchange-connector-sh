@@ -51,6 +51,10 @@ import {
 } from 'bybit-api'
 import { RestClientV5 as BybitOrderClient } from '../../../bybit-custom/rest-client-v5'
 import limitHelper from './limit'
+import {
+  normalizeOrderFees,
+  normalizeSidedOrderFee,
+} from '../../helpers/orderFee'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 
@@ -1786,6 +1790,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
     }
 
     return {
+      ...this.orderFee(order),
       symbol: order.symbol,
       orderId: order.orderId,
       clientOrderId: order.orderLinkId,
@@ -1815,6 +1820,43 @@ class BybitExchange extends AbstractExchange implements Exchange {
             : PositionSide.SHORT
         : undefined,
     }
+  }
+
+  /**
+   * The fee Bybit actually charged for an order.
+   *
+   * `cumExecFee` is the cumulative fee on the order record — an observation,
+   * not our own `qty * rate`. Bybit names the currency in two different ways
+   * depending on the account, so both are handled rather than assumed:
+   *
+   * - `cumFeeDetail` is a currency-keyed map, present on accounts where the
+   *   fee can be split (a fee-coin deduction alongside the settle coin). When
+   *   Bybit gives us the map it is the authoritative answer and needs no rule
+   *   at all, so it wins.
+   * - Otherwise the currency follows from the product, which is a venue
+   *   invariant rather than a guess. Derivatives fees settle in the settle
+   *   coin: quote for linear (USDT/USDC perps), base for inverse. Spot fees
+   *   come out of the asset RECEIVED — base on a buy, quote on a sell — which
+   *   is why the side is consulted here and not the pair string.
+   */
+  private orderFee(order: AccountOrderV5) {
+    const detail = order.cumFeeDetail
+    if (detail && typeof detail === 'object') {
+      const fromDetail = normalizeOrderFees(
+        Object.entries(detail).map(([asset, amount]) => ({ amount, asset })),
+      )
+      if (fromDetail.feePaid || fromDetail.feeBreakdown) {
+        return fromDetail
+      }
+    }
+    const feeSide: 'base' | 'quote' = this.futures
+      ? this.coinm
+        ? 'base'
+        : 'quote'
+      : order.side === 'Buy'
+        ? 'base'
+        : 'quote'
+    return normalizeSidedOrderFee(order.cumExecFee, feeSide)
   }
 
   private async convertPosition(position: PositionV5): Promise<PositionInfo> {

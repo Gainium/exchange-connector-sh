@@ -5,6 +5,7 @@ import {
   FuturesCoinMAccountInformation,
   FuturesAccountAsset,
   OrderResponseResult,
+  OrderResponseFull,
   NewSpotOrderParams,
   NewFuturesOrderParams,
   NewOrderResult,
@@ -21,6 +22,7 @@ import {
 } from 'binance'
 import { USDMClient, CoinMClient, MainClient } from '../../../binance-custom'
 import limitHelper from './limit'
+import { normalizeOrderFees } from '../../helpers/orderFee'
 import {
   BaseReturn,
   CandleResponse,
@@ -748,8 +750,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       timeProfile
     const { symbol, side, quantity, price, newClientOrderId, type } = order
     let orderData:
-      | NewSpotOrderParams<'LIMIT', 'RESULT'>
-      | NewSpotOrderParams<'MARKET', 'RESULT'>
+      NewSpotOrderParams<'LIMIT', 'FULL'> | NewSpotOrderParams<'MARKET', 'FULL'>
     {
       orderData = {
         symbol,
@@ -773,8 +774,17 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       }
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    // FULL rather than RESULT: it is the only Binance spot response that
+    // carries `fills[]`, and each fill states the fee Binance actually took
+    // (`commission` + `commissionAsset`). Binance charges the same request
+    // weight for ACK, RESULT and FULL, so this observation is free — it was
+    // simply never asked for. It covers every order that trades at placement;
+    // an order that rests and fills later reports its commission on the user
+    // data stream instead (`executionReport.n`/`N`), which is where main-app
+    // picks it up, because neither `GET /api/v3/order` nor the futures order
+    // endpoint returns a fee at all.
     return this.client
-      .submitNewOrder({ ...orderData, newOrderRespType: 'RESULT' })
+      .submitNewOrder({ ...orderData, newOrderRespType: 'FULL' })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.convertOrder(res)
@@ -3149,7 +3159,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
    * @param {Order} order to convert
    * @returns {CommonOrder} Common order result
    */
-  private convertOrder(order: SpotOrder | OrderResponseResult): CommonOrder {
+  private convertOrder(
+    order: SpotOrder | OrderResponseResult | OrderResponseFull,
+  ): CommonOrder {
     const orderStatus = (status: OrderStatus): OrderStatusType => {
       if (
         status === 'FILLED' ||
@@ -3167,7 +3179,20 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       }
       return 'MARKET'
     }
+    // Binance states the fee per FILL, never on the order: `GET /api/v3/order`
+    // and the futures order endpoint carry no commission field whatsoever, so
+    // a FULL placement response is the only order-scoped place it appears.
+    // Each fill names its own `commissionAsset`, which is load-bearing rather
+    // than decorative — an account with "pay fees in BNB" enabled is charged
+    // in BNB, which is neither side of the traded pair, and a single order can
+    // straddle two fee assets when the BNB balance runs out mid-fill.
+    const fills =
+      'fills' in order && Array.isArray(order.fills) ? order.fills : []
+    const fee = normalizeOrderFees(
+      fills.map((f) => ({ amount: f.commission, asset: f.commissionAsset })),
+    )
     return {
+      ...fee,
       symbol: order.symbol,
       orderId: `${order.orderId}`,
       clientOrderId: order.clientOrderId,
@@ -3186,7 +3211,16 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       status: orderStatus(order.status),
       type: orderType(order.type),
       side: order.side,
-      fills: [],
+      fills: fills.map((f, i) => ({
+        price: `${f.price}`,
+        qty: `${f.qty}`,
+        commission: `${f.commission}`,
+        commissionAsset: f.commissionAsset,
+        // Binance's spot FULL response omits `tradeId` on the fill; the index
+        // keeps the entries distinguishable without inventing an id that
+        // looks like the venue's.
+        tradeId: `${order.orderId}-${i}`,
+      })),
     }
   }
 
@@ -3210,6 +3244,14 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       }
       return 'MARKET'
     }
+    // No fee fields here on purpose. Binance USD-M/COIN-M return no
+    // commission on either the placement response or `GET /fapi/v1/order` —
+    // the only order-scoped sources are `userTrades` (an extra weighted
+    // request per order) and the `ORDER_TRADE_UPDATE` user-stream event, which
+    // already carries `commission`/`commissionAsset` all the way into main-app
+    // and is where futures fees are captured. Emitting a 0 here would be worse
+    // than emitting nothing: the caller would book a free fill instead of
+    // keeping its estimate.
     return {
       positionSide: order.positionSide,
       reduceOnly: order.reduceOnly,

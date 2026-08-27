@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.4] - 2026-08-27
+
+### Fixed
+
+- **A negotiated Kraken rate was still invisible to the hourly fee sweep.** 1.20.3 placed each account on the PUBLISHED ladder by its 30-day volume — right for tiered accounts, but a negotiated rate exists on no ladder: a live account with ~5k EUR of volume pays 0.10% taker / 0.00% maker, and the ladder says 5k = tier 0 = 0.40%/0.25%. Kraken only reveals the real rate on PAIR-SCOPED `TradeVolume` calls, so `getAllUserFees` now batches the pair list through it (~50 pairs per call, ~14 calls per account per sweep, result cached 10 minutes) and the ladder remains the fallback for anything the batch cannot answer — a failed chunk, tokenized pairs (excluded on purpose so an asset-class refusal cannot poison 50 crypto pairs), or missing credentials. A zero fee (0.00% maker) is preserved as a real rate, not mistaken for missing.
+- The TradeVolume-failure warning now logs Kraken's actual error. The SDK wraps a Kraken-level rejection (HTTP 200 + non-empty `error`) as `{message: statusText, body}`, so the fallback line logged literally "OK" — the real reason ("EGeneral:Permission denied", …) lives in `body.error` and is now what gets printed.
+
 ## [1.20.3] - 2026-08-27
 
 ### Fixed

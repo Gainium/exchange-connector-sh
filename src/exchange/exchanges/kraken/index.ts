@@ -407,6 +407,28 @@ const KRAKEN_ACCOUNT_FEES_UNKNOWN: KrakenAccountFees = {
 }
 
 /**
+ * Per-pair account rates from PAIR-SCOPED `TradeVolume` calls, per API key.
+ *
+ * The volume→ladder placement above is right for accounts whose rate comes
+ * from the published schedule — but a NEGOTIATED rate exists on no ladder at
+ * all. Live example that forced this: an account with ~5k EUR of 30-day
+ * volume paying 0.10% taker / 0.00% maker. On the ladder 5k = tier 0 =
+ * 0.40%/0.25%, so the pairless sweep still charged it tier 0. Kraken only
+ * reveals a negotiated rate when you ask about specific pairs — `fees` /
+ * `fees_maker` maps in a pair-scoped TradeVolume response — so the bulk path
+ * batches the pair list through it.
+ */
+const krakenPairFeeMapCache = new Map<
+  string,
+  {
+    map: Map<string, { taker: number | null; maker: number | null }>
+    ts: number
+  }
+>()
+/** Pairs per TradeVolume request. ~700 Kraken pairs → ~14 calls per sweep. */
+const KRAKEN_TRADE_VOLUME_CHUNK = 50
+
+/**
  * Last time an avg-fill-price lookup failure was logged, per
  * `<key fingerprint>:<class>`. A key that lacks the permission fails on EVERY
  * filled order, so logging each one would bury the signal it is meant to raise;
@@ -3133,12 +3155,98 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         ts: Date.now(),
       })
       Logger.warn(
+        // The SDK wraps a Kraken-level rejection (HTTP 200 + non-empty
+        // `error`) as `{code: 200, message: statusText, body: response.data}`
+        // — so `.message` is literally "OK" and the REAL reason ("EGeneral:
+        // Permission denied", "EAPI:Invalid key", …) lives in `body.error`.
+        // Logging `.message` made the first day of this fallback undiagnosable.
         `Kraken trade volume lookup failed, falling back to the published fee ladder: ${
-          error?.message ?? error
+          (error as { body?: { error?: string[] } })?.body?.error?.join('; ') ||
+          (error?.message && error.message !== 'OK'
+            ? error.message
+            : safeStringify(error).slice(0, 200))
         }`,
       )
       return KRAKEN_ACCOUNT_FEES_UNKNOWN
     }
+  }
+
+  /**
+   * The account's ACTUAL rate for each requested pair, from pair-scoped
+   * `TradeVolume` calls in chunks. This is the only way Kraken exposes a
+   * negotiated rate (see `krakenPairFeeMapCache`); the ladder-by-volume
+   * placement stays as the fallback for any pair this cannot answer.
+   *
+   * Same best-effort contract as `getAccountFees`: every failure degrades to
+   * an empty (or partial) map, never an error — a TradeVolume problem must not
+   * surface as a failed fee fetch (main-app's sweep counts those toward
+   * disabling the key). A failed chunk is skipped, not fatal: chunks are
+   * independent, and one bad pair name must not cost the other 650 pairs
+   * their real rate. Tokenized (xStock) pairs are deliberately NOT batched —
+   * they live in a different asset class that TradeVolume may refuse, and
+   * refusing a chunk of 50 over one of them is the poisoning this avoids.
+   */
+  private async getAccountPairFees(
+    krakenPairs: string[],
+  ): Promise<Map<string, { taker: number | null; maker: number | null }>> {
+    const out = new Map<
+      string,
+      { taker: number | null; maker: number | null }
+    >()
+    if (!this.spotClient || !this.key || !this.secret || !krakenPairs.length) {
+      return out
+    }
+
+    const cacheKey = `${hashKrakenKey(this.key)}:pairmap`
+    const cached = krakenPairFeeMapCache.get(cacheKey)
+    if (cached && Date.now() - cached.ts < KRAKEN_TRADE_VOLUME_TTL) {
+      return cached.map
+    }
+
+    let failures = 0
+    for (let i = 0; i < krakenPairs.length; i += KRAKEN_TRADE_VOLUME_CHUNK) {
+      const chunk = krakenPairs.slice(i, i + KRAKEN_TRADE_VOLUME_CHUNK)
+      try {
+        await this.checkLimits('getTradingVolume')
+        const res = await this.spotClient.getTradingVolume({
+          pair: chunk.join(','),
+        })
+        if (!res.result) {
+          failures++
+          continue
+        }
+        const takers = res.result.fees ?? {}
+        const makers = res.result.fees_maker ?? {}
+        for (const p of chunk) {
+          const t = Number(takers[p]?.fee)
+          const m = Number(makers[p]?.fee)
+          if (Number.isFinite(t) || Number.isFinite(m)) {
+            out.set(p, {
+              taker: Number.isFinite(t) ? t / 100 : null,
+              maker: Number.isFinite(m) ? m / 100 : null,
+            })
+          }
+        }
+      } catch (error) {
+        failures++
+        if (failures === 1) {
+          Logger.warn(
+            `Kraken pair-scoped trade volume failed (chunk ${i / KRAKEN_TRADE_VOLUME_CHUNK + 1}), affected pairs fall back to the ladder: ${
+              (error as { body?: { error?: string[] } })?.body?.error?.join(
+                '; ',
+              ) ||
+              (error?.message && error.message !== 'OK'
+                ? error.message
+                : safeStringify(error).slice(0, 200))
+            }`,
+          )
+        }
+      }
+    }
+    // Cache partial and even empty results: a key that cannot answer (missing
+    // permission) must not re-ask 14 times per pair-sweep every 10 minutes.
+    krakenPairFeeMapCache.set(cacheKey, { map: out, ts: Date.now() })
+    return out
   }
 
   async getUserFees(
@@ -3277,22 +3385,27 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
         }
 
-        // ONE private call places the account on every pair's ladder at once —
-        // the 30-day volume is a property of the account, not of the pair, so
-        // there is no need to ask per pair (and no budget to do so: this runs
-        // for every Kraken user on main-app's hourly fee sweep).
+        // Account-level volume first: ONE pairless call places the account on
+        // every pair's published ladder (the 30-day volume is a property of
+        // the account). Then the pair-scoped batch OVERRIDES the ladder with
+        // the account's actual per-pair rates — the only place a negotiated
+        // rate is visible. Ladder stays the answer for any pair the batch
+        // could not cover (tokenized pairs, a failed chunk, no credentials).
         const account = await this.getAccountFees()
+        const pairFees = await this.getAccountPairFees(
+          Object.keys(result.result),
+        )
 
         const fees: (UserFee & { pair: string })[] = Object.entries({
           ...result.result,
           ...tokenizedPairs,
-        }).map(([_, pairInfo]) => {
-          const takerFee = krakenLadderFee(pairInfo.fees, account.volume, 0.26)
-          const makerFee = krakenLadderFee(
-            pairInfo.fees_maker,
-            account.volume,
-            0.16,
-          )
+        }).map(([pairKey, pairInfo]) => {
+          const exact = pairFees.get(pairKey)
+          const takerFee =
+            exact?.taker ?? krakenLadderFee(pairInfo.fees, account.volume, 0.26)
+          const makerFee =
+            exact?.maker ??
+            krakenLadderFee(pairInfo.fees_maker, account.volume, 0.16)
           const base = this.symbolMapper.getActualAssetName(pairInfo.base || '')
           const quote = this.symbolMapper.getActualAssetName(
             pairInfo.quote || '',

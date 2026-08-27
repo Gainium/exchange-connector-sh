@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.6] - 2026-08-27
+
+### Added
+
+- **The fee Kraken actually charged is now recorded on the order** (`feePaid` + `feeSide` on `CommonOrder`, both optional and additive). Kraken returns `fee` and `oflags` on every `QueryOrders` / open-orders / closed-orders payload — fields the connector already fetched on every Kraken spot order lookup and discarded. `deal.commission` has always been an ESTIMATE (`qty * price * storedFeeRate`), and an estimate is only as good as the stored rate: on 2026-08-27 43 of 50 Kraken accounts were found carrying a rate matching no tier in Kraken's live schedule (the public `AssetPairs` ladder is stale — its first rung 0.40%/0.25% is not a real tier; Kraken's actual Tier 1 is 0.80%/0.40%), so the commission booked for them was about half the true cost. An observed fee cannot go stale that way. `feeSide` carries which side of the pair the fee came out of, taken from the `oflags` Kraken echoes rather than assumed — its defaults are asymmetric (`fciq`/quote on a buy, `fcib`/base on a sell) and we set no flag when placing. A fee we cannot observe is omitted entirely, so the existing estimate stays in force and a missing fee never books as zero cost.
+
 ## [1.20.5] - 2026-08-27
 
 ### Changed

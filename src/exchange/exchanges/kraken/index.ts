@@ -35,7 +35,7 @@ import {
   krakenNonceFromError,
 } from '../../../kraken-custom'
 import limitHelper from './limit'
-import { krakenLadderFee } from './fees'
+import { krakenLadderFee, krakenOrderFee } from './fees'
 import { Logger } from '@nestjs/common'
 import { createHash } from 'crypto'
 import { sleep } from '../../../utils/sleepUtils'
@@ -1122,8 +1122,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     side: string
     updateTime?: number
     transactTime?: number
+    /** Raw `fee` from Kraken's order payload — the fee it actually charged. */
+    fee?: string
+    /** Raw `oflags`, which names the currency the fee came out of. */
+    oflags?: string
   }): CommonOrder {
+    const fee = krakenOrderFee(order.fee, order.oflags, order.side)
     return {
+      ...fee,
       symbol: order.symbol,
       orderId: order.orderId,
       clientOrderId: order.clientOrderId || '',
@@ -1945,6 +1951,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           orderId: txid,
           symbol: await this.normalizeSymbol(orderData.descr?.pair || symbol),
           clientOrderId,
+          fee: orderData.fee,
+          oflags: orderData.oflags,
           // `price` is the average executed price — the real fill price for
           // market orders, whose descr.price is '0'. Fall back to the limit
           // price for unfilled orders.
@@ -2231,6 +2239,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                   orderData.descr?.pair || symbol,
                 ),
                 clientOrderId: newClientOrderId,
+                fee: orderData.fee,
+                oflags: orderData.oflags,
                 price: orderData.descr?.price || '0',
                 origQty: orderData.vol || '0',
                 executedQty: orderData.vol_exec || '0',
@@ -2278,6 +2288,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                       orderData.descr?.pair || symbol,
                     ),
                     clientOrderId: newClientOrderId,
+                    fee: orderData.fee,
+                    oflags: orderData.oflags,
                     // avg executed price when filled (descr.price is '0'
                     // for market orders), limit price otherwise
                     price:

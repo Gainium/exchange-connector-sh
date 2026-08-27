@@ -1,11 +1,5 @@
 export type AssetClass =
-  | 'crypto'
-  | 'stock'
-  | 'etf'
-  | 'commodity'
-  | 'metal'
-  | 'forex'
-  | 'index'
+  'crypto' | 'stock' | 'etf' | 'commodity' | 'metal' | 'forex' | 'index'
 
 export type ExchangeInfo = {
   wsCode?: string
@@ -355,6 +349,39 @@ export type CommonOrder = {
     commissionAsset: string
     tradeId: string
   }[]
+  /**
+   * The fee the VENUE actually charged for this order, as the venue reports
+   * it — never a rate we applied ourselves.
+   *
+   * This exists because `deal.commission` has always been an ESTIMATE
+   * (`qty * price * storedFeeRate`), and an estimate is only ever as good as
+   * the stored rate. On 2026-08-27 that assumption broke in the open: 43 of 50
+   * Kraken accounts carried a rate matching no tier in Kraken's live schedule
+   * (the public ladder we fall back to is stale — its first rung, 0.40%/0.25%,
+   * is not a real tier; Kraken's actual Tier 1 is 0.80%/0.40%), so the
+   * "commission" booked against those deals was about half the true cost. An
+   * observed fee cannot go stale the way a cached rate can.
+   *
+   * Optional and additive on purpose: `CommonOrder` is the platform's most
+   * load-bearing contract (root CLAUDE.md Danger List #1). A venue that does
+   * not report a fee simply omits it, and callers keep their existing
+   * estimate — a missing fee must never book as zero cost.
+   */
+  feePaid?: string
+  /**
+   * WHICH side of the pair the fee came out of. Not derivable in general and
+   * never to be assumed: Kraken charges quote on a buy and base on a sell (its
+   * `oflags` default `fciq`/`fcib`), Binance-shaped venues normally take it
+   * from the asset received, and some accounts pay in a third asset entirely.
+   * Maps directly onto main-app's `deal.feePaid.{base,quote}` without any
+   * symbol string-splitting.
+   */
+  feeSide?: 'base' | 'quote'
+  /**
+   * The fee asset's ticker, for venues that charge in neither side of the pair
+   * (BNB on Binance, KCS on KuCoin). When set, `feeSide` is absent.
+   */
+  feeAsset?: string
 }
 
 export type FuturesOrderType_LT =

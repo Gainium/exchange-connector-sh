@@ -57,3 +57,39 @@ export function krakenLadderFee(
 
   return Number.isFinite(percent) ? percent / 100 : fallbackPercent / 100
 }
+
+/**
+ * The fee a Kraken order actually incurred, normalised for `CommonOrder`.
+ *
+ * Kraken reports `fee` on the order payload and names the currency it came out
+ * of in `oflags`. The defaults are asymmetric and are the thing most likely to
+ * be got wrong by assumption: `fciq` (fee in QUOTE) is the default for a BUY,
+ * `fcib` (fee in BASE) for a SELL — and we set no oflags when placing, so both
+ * defaults apply. Kraken echoes the flag that was actually used, so the
+ * explicit flag is preferred and the side-based default is only the fallback
+ * for a payload that carries no flag at all.
+ *
+ * Returns an empty object when there is no usable fee, so the caller spreads
+ * nothing and `deal.commission`'s estimate stays in force — a fee we could not
+ * observe must never book as zero cost.
+ */
+export function krakenOrderFee(
+  fee: string | undefined,
+  oflags: string | undefined,
+  side: string | undefined,
+): { feePaid?: string; feeSide?: 'base' | 'quote' } {
+  const amount = Number(fee)
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return {}
+  }
+  const flags = (oflags ?? '').toLowerCase()
+  const feeSide: 'base' | 'quote' = flags.includes('fcib')
+    ? 'base'
+    : flags.includes('fciq')
+      ? 'quote'
+      : // No flag echoed: fall back to Kraken's own documented defaults.
+        `${side ?? ''}`.toUpperCase() === 'SELL'
+        ? 'base'
+        : 'quote'
+  return { feePaid: String(fee), feeSide }
+}

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.10] - 2026-08-28
+
+### Fixed
+
+- **The pair-scoped fee lookup made the hourly fee sweep longer than its own period.** 1.20.4 asked TradeVolume about every pair in 50-pair chunks — 33 calls per account. Kraken paces private REST per API KEY (counter ~15-20, decay ~0.5/s), so that is ~66s per account and ~59 MINUTES across 54 Kraken connections: passes overlapped, and accounts late in the iteration stopped being refreshed at all (some were last updated in April). It was invisible until the #543 lockout fix, because before that TradeVolume failed FAST and never paid the pacing cost. Kraken bills per published SCHEDULE rather than per pair — real accounts collapse to 3-5 distinct rates across all ~1614 pairs — so the lookup now probes ONE representative pair per published fee class and applies the venue's answer to that class, 1 call per account instead of 33 (~2 min instead of ~59). The grouping key is Kraken's own published ladder, so two pairs share a probe only where Kraken itself puts them on the same schedule.
+
 ## [1.20.9] - 2026-08-28
 
 ### Fixed

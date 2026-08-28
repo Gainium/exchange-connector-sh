@@ -3222,15 +3222,53 @@ class KrakenExchange extends AbstractExchange implements Exchange {
    * refusing a chunk of 50 over one of them is the poisoning this avoids.
    */
   private async getAccountPairFees(
-    krakenPairs: string[],
+    pairInfos: Record<string, { fees?: number[][]; fees_maker?: number[][] }>,
   ): Promise<Map<string, { taker: number | null; maker: number | null }>> {
     const out = new Map<
       string,
       { taker: number | null; maker: number | null }
     >()
+    const krakenPairs = Object.keys(pairInfos)
     if (!this.spotClient || !this.key || !this.secret || !krakenPairs.length) {
       return out
     }
+
+    // Ask about ONE pair per published fee CLASS, not all ~1600.
+    //
+    // Kraken bills per schedule, not per pair: every pair sharing a published
+    // ladder bills an account the same way, which is why a real account's fees
+    // collapse to a handful of distinct (taker, maker) pairs — measured on
+    // production accounts: 3 to 5 groups covering all 1614 pairs, matching the
+    // published classes (standard crypto, the 0.20/0.20 class, the stablecoin
+    // class, and so on).
+    //
+    // Asking per pair cost 33 chunked calls per account. Kraken paces private
+    // REST per API KEY (counter ~15-20, decay ~0.5/s), so that is ~66s per
+    // account and ~59 MINUTES across 54 connections — longer than the hourly
+    // sweep's own period, so passes overlapped and accounts late in the
+    // iteration stopped being refreshed at all. It was invisible until the
+    // #543 lockout fix, because before that TradeVolume was failing FAST and
+    // never paying the pacing cost.
+    //
+    // One representative per class is 1-2 calls instead of 33, and the answer
+    // is the venue's own for every pair it is applied to — the grouping key is
+    // Kraken's published ladder, so two pairs share a representative only when
+    // Kraken itself puts them on the same schedule.
+    const classOf = (p: string) => {
+      const i = pairInfos[p]
+      return JSON.stringify([i?.fees ?? null, i?.fees_maker ?? null])
+    }
+    const representatives = new Map<string, string>()
+    const members = new Map<string, string[]>()
+    for (const p of krakenPairs) {
+      const k = classOf(p)
+      if (!representatives.has(k)) {
+        representatives.set(k, p)
+        members.set(k, [])
+      }
+      members.get(k)!.push(p)
+    }
+    const probePairs = [...representatives.values()]
 
     const cacheKey = `${hashKrakenKey(this.key)}:pairmap`
     const cached = krakenPairFeeMapCache.get(cacheKey)
@@ -3239,8 +3277,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     }
 
     let failures = 0
-    for (let i = 0; i < krakenPairs.length; i += KRAKEN_TRADE_VOLUME_CHUNK) {
-      const chunk = krakenPairs.slice(i, i + KRAKEN_TRADE_VOLUME_CHUNK)
+    for (let i = 0; i < probePairs.length; i += KRAKEN_TRADE_VOLUME_CHUNK) {
+      const chunk = probePairs.slice(i, i + KRAKEN_TRADE_VOLUME_CHUNK)
       try {
         await this.checkLimits('getTradingVolume')
         const res = await this.spotClient.getTradingVolume({
@@ -3256,10 +3294,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           const t = Number(takers[p]?.fee)
           const m = Number(makers[p]?.fee)
           if (Number.isFinite(t) || Number.isFinite(m)) {
-            out.set(p, {
+            const rate = {
               taker: Number.isFinite(t) ? t / 100 : null,
               maker: Number.isFinite(m) ? m / 100 : null,
-            })
+            }
+            // The answer is for this pair's whole published class.
+            for (const member of members.get(classOf(p)) ?? [p]) {
+              out.set(member, rate)
+            }
           }
         }
       } catch (error) {
@@ -3428,9 +3470,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         // client-side ladder-by-volume interpolation: it duplicated arithmetic
         // Kraken already performs, and could only ever fire in the narrow case
         // where a chunk failed but a pairless call worked.
-        const pairFees = await this.getAccountPairFees(
-          Object.keys(result.result),
-        )
+        const pairFees = await this.getAccountPairFees(result.result)
 
         const fees: (UserFee & { pair: string })[] = Object.entries({
           ...result.result,

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.9] - 2026-08-28
+
+### Fixed
+
+- **A Kraken `EGeneral:Temporary lockout` was retried, which extends the lockout.** It sat on the generic ladder — 10 attempts at 1s->10s, ~74s of hammering — and because the ramp is per-request state that resets on every new call, each caller kept starting a fresh one. Since the connector's ladder multiplies with main-app's own unknown-order ladder, single order ids were driven 20-90 `getOrder` calls deep, ~15x the caller's ceiling: 740 lockout lines across three episodes in ~50 minutes, none behind a restart or deploy (#543). A lockout is the one retryable-looking class where every attempt makes the penalty worse, so it now gets zero attempts and surfaces immediately; the caller's own loop retries later, by which point the lockout has expired on its own. Rate limits and provider outages keep their existing paced 3, ordinary transients keep the full ladder.
+- `getSpotOrderByTxid` no longer swallows a lockout or rate-limit rejection. Its `catch` returned null for every failure, which sends the caller down the userref fallback — a SECOND request to the account Kraken has just told us to stop calling, doubling the load at the only moment it must not. Those two classes now rethrow so the caller backs off; everything else still falls back as before.
+
 ## [1.20.8] - 2026-08-27
 
 ### Added

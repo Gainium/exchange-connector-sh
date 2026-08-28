@@ -765,7 +765,27 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         ['500', '502', '503', '504', '520', '521', '522'].includes(
           String(httpStatus),
         )
-      const maxAttempts = isRateLimit || isProviderOutage ? 3 : this.retry
+      // A LOCKOUT is not a transient to ride out — it is Kraken telling us to
+      // stop, and it is the one error class where retrying actively makes the
+      // situation worse: Kraken EXTENDS a temporary lockout on further
+      // requests, so a ladder converts a fixed penalty into an open-ended one.
+      // It was nonetheless on the generic ladder (10 attempts, 1s->10s = ~74s
+      // of hammering), and because the ramp is per-request state that resets
+      // on every new call, each caller kept starting a fresh one.
+      //
+      // 2026-08-28 (#543): three episodes drove single order ids 20-90
+      // getOrder calls deep — ~15x the caller's own ceiling — because the
+      // connector's ladder multiplies with main-app's unknown-order ladder.
+      // 740 lockout lines in ~50 minutes, none of them behind a restart or a
+      // deploy. Zero attempts is the only depth that cannot extend the
+      // penalty; the caller's own loop retries later, by which time the
+      // lockout has expired on its own.
+      const isLockout = matches(['EGeneral:Temporary lockout'])
+      const maxAttempts = isLockout
+        ? 0
+        : isRateLimit || isProviderOutage
+          ? 3
+          : this.retry
 
       if (shouldRetry && timeProfile.attempts < maxAttempts) {
         const waitTime = isRateLimit
@@ -1967,9 +1987,23 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           side: orderData.descr?.type?.toUpperCase() || 'BUY',
         }),
       )
-    } catch {
-      // Any failure here is non-fatal — caller falls back to getOrder().
+    } catch (error) {
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      // A lockout or rate-limit rejection is NOT "this txid is unresolvable".
+      // Returning null here sends the caller down the userref path, which
+      // issues a SECOND request to the very account Kraken has just told us to
+      // stop calling — doubling the load at the only moment it must not, and
+      // extending the lockout that caused it (#543). Rethrow so the caller's
+      // own error handling backs off instead of retrying through this path.
+      const msg = `${(error as Error)?.message ?? ''} ${safeStringify(error)}`
+      if (
+        msg.includes('EGeneral:Temporary lockout') ||
+        msg.includes('EAPI:Rate limit exceeded') ||
+        msg.includes('EGeneral:Too many requests')
+      ) {
+        throw error
+      }
+      // Anything else really is non-fatal — caller falls back to getOrder().
       return null
     }
   }

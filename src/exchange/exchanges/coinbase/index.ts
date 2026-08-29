@@ -56,6 +56,32 @@ import { normalizeSidedOrderFee } from '../../helpers/orderFee'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { AxiosError } from 'axios'
+import { safeStringify } from '../../../utils/redact'
+
+/**
+ * Normalise whatever the Coinbase SDK threw into an Error safe to surface.
+ *
+ * Two hazards. The SDK staples the *request* onto its errors and a signed
+ * Coinbase request carries live credentials, so nothing here may be
+ * interpolated raw — object payloads go through `safeStringify`. And the
+ * message now reaches a user-facing string in main-app, not just a log line,
+ * so it is capped rather than allowed to carry a whole response body.
+ */
+const coinbaseAuthError = (e: unknown): Error => {
+  const err = e as
+    | { message?: unknown; body?: unknown; response?: { data?: unknown } }
+    | undefined
+  const body = err?.body ?? err?.response?.data
+  const parts: string[] = []
+  if (typeof err?.message === 'string' && err.message) {
+    parts.push(err.message)
+  }
+  if (body !== undefined) {
+    parts.push(typeof body === 'string' ? body : safeStringify(body))
+  }
+  const message = parts.join(' ').trim() || safeStringify(e)
+  return new Error(message.length > 300 ? `${message.slice(0, 300)}…` : message)
+}
 
 class CoinbaseError extends Error {}
 
@@ -287,9 +313,26 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
         if (account.data.length) {
           return this.returnGood<boolean>(timeProfile)(true)
         }
+        // Authenticated, but the key can see no portfolios. A real answer, and
+        // distinct from the rejection below.
         return this.returnGood<boolean>(timeProfile)(false)
       })
-      .catch(() => this.returnGood<boolean>(timeProfile)(false))
+      .catch((e: unknown) => {
+        // This used to be `.catch(() => returnGood(false))`, which reported
+        // every failure as a SUCCESSFUL "no permission" and threw the cause
+        // away. Coinbase is the only venue whose verification told main-app
+        // literally nothing — `{"status":"OK","data":false,"reason":null}` —
+        // for a wrong key type, a bad signature, an IP block and a revoked key
+        // alike. It was the single largest verification-failure bucket in prod
+        // (75 of 370 over 2026-08-04..28, one user retrying 19 times) and the
+        // only one that could not be diagnosed downstream, because the
+        // evidence was destroyed here.
+        //
+        // The verdict is unchanged — a rejection is still "cannot use this
+        // key" — so no caller's decision moves; only the reason survives.
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnBad(timeProfile)(coinbaseAuthError(e))
+      })
   }
 
   override returnGood<T>(

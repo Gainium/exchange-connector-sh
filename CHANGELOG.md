@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.12] - 2026-08-31
+
+### Fixed
+
+- **Coinbase key verification no longer destroys the reason it failed.**
+  `getApiPermission` ended in `.catch(() => returnGood(false))`, reporting every
+  failure as a SUCCESSFUL "no permission" — `{"status":"OK","data":false,
+  "reason":null}` — for a wrong key type, a bad signature, an IP block and a
+  revoked key alike. Coinbase was the only venue whose verification told
+  main-app literally nothing, and it was the largest verification-failure
+  bucket in production: 75 of 370 over 2026-08-04..28, across 9 users, one of
+  whom retried 19 times. Because the evidence was discarded here, no amount of
+  message handling downstream could recover it. The verdict is unchanged — a
+  rejection still means "cannot use this key", so no caller's decision moves —
+  only the reason now survives. An authenticated key that simply sees no
+  portfolios still reports `ok/false`, which is a real answer and stays
+  distinct from a rejection.
+- The surfaced message is redacted and capped. Coinbase's SDK staples the
+  signed request onto its errors, so the payload goes through `safeStringify`
+  (verified against an error carrying `apiKey`, a PEM `apiSecret`,
+  `CB-ACCESS-KEY` and `CB-ACCESS-SIGN` — all four blanked) and is truncated at
+  300 characters, because this string now reaches a user-facing message in
+  main-app rather than only a log line.
+
 ## [1.20.11] - 2026-08-30
 
 ### Fixed

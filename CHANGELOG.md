@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.11] - 2026-08-30
+
+### Fixed
+
+- **Binance order placement was queued behind background reads and could only go out in the first ~10s of each minute (#583).** The per-minute weight/raw budgets are one undifferentiated pool, and a request that exhausts them is not dropped but PARKED until `weightFrame - (time % weightFrame)` — the top of the next minute, which is when Binance itself resets the counter. Reads vastly outnumber order calls: on 2026-08-30 a single connector logged 2,000 parked Binance calls in 4h, 1,403 of them `getOrder` and only 197 `openOrder`. The fresh budget was therefore consumed within seconds of every rollover, so binanceUsdm grid bots could only place between second 0 and ~10 of a minute — a filled grid level waited up to 3 minutes for its replacement order, with that price level absent from the book meanwhile (44% of one bot's 367 fills waited >30s; p90 118s, max 265s). Order placement and cancellation now spend against the full budget while everything else stops at 85% of it, on all four Binance domains and on the shared raw-request counter (which is the one that binds first on spot). Nothing raises the total sent to Binance.
+- **A parked request still consumed budget.** The counters were incremented before the ceiling check and never rolled back on refusal, so they measured ATTEMPTS rather than what was actually sent: every parked attempt inflated the window further, holding it shut longer than the venue does and publishing a usage figure above 1.0 on the `exchangeLimits` channel exchange-balancer routes by (2.404 was measured against a 1.0 scale). The raw slot was already handed back here; the weight now is too.
+
 ## [1.20.10] - 2026-08-28
 
 ### Fixed

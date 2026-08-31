@@ -422,6 +422,21 @@ const krakenPairFeeMapCache = new Map<
 const KRAKEN_TRADE_VOLUME_CHUNK = 50
 
 /**
+ * Txids per QueryOrders request. Kraken's documented ceiling is 50 unique ids,
+ * and the call costs one REST token regardless of how many it carries.
+ */
+const KRAKEN_QUERY_ORDERS_MAX = 50
+
+/**
+ * How many times `checkLimits` will wait and re-ask the budget before letting
+ * the call through anyway. Each wait is the limiter's own estimate of when the
+ * counter admits it, so the normal case resolves on the first retry; the
+ * ceiling exists so a saturated account cannot hold a connector slot open
+ * indefinitely.
+ */
+const KRAKEN_LIMIT_WAIT_ATTEMPTS = 3
+
+/**
  * Last time an avg-fill-price lookup failure was logged, per
  * `<key fingerprint>:<class>`. A key that lacks the permission fails on EVERY
  * filled order, so logging each one would bury the signal it is meant to raise;
@@ -819,9 +834,16 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     const isOrderMethod = ['submitOrder', 'cancelOrder', 'amendOrder'].includes(
       method,
     )
-    const isHeavyMethod = ['getLedgersInfo', 'getTradesHistory'].includes(
-      method,
-    )
+    // Kraken bills its history endpoints at 2, not 1. `getClosedOrders` is one
+    // of them and was absent from this list AND — until now — was reached on a
+    // path that never called this function at all (see `getOrder`'s
+    // closed-orders fallback), so the busiest Kraken read on the platform was
+    // charged nothing while the venue charged double.
+    const isHeavyMethod = [
+      'getLedgersInfo',
+      'getTradesHistory',
+      'getClosedOrders',
+    ].includes(method)
 
     if (timeProfile) {
       timeProfile = this.startProfilerTime(timeProfile, 'queue')
@@ -835,21 +857,42 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     // the legacy global counter is used.
     const accountKey = hashKrakenKey(this.key)
 
-    let waitTime = 0
-    if (isOrderMethod && symbol) {
-      const orderType =
-        method === 'submitOrder'
-          ? 'add'
-          : method === 'cancelOrder'
-            ? 'cancel'
-            : 'amend'
-      waitTime = await limitHelper.addOrderCall(symbol, orderType, accountKey)
-    } else {
-      waitTime = await limitHelper.addRestCall(isHeavyMethod, accountKey)
+    const charge = async () => {
+      if (isOrderMethod && symbol) {
+        const orderType =
+          method === 'submitOrder'
+            ? 'add'
+            : method === 'cancelOrder'
+              ? 'cancel'
+              : 'amend'
+        return await limitHelper.addOrderCall(symbol, orderType, accountKey)
+      }
+      return await limitHelper.addRestCall(isHeavyMethod, accountKey)
     }
 
-    if (waitTime > 0) {
+    // Re-ask after waiting, and keep asking until the budget actually admits
+    // the call. The limiter does NOT charge a refused call (by design — a
+    // parked request is not a sent one), so the previous single
+    // `sleep(waitTime)` sent the request having taken no token at all: under
+    // load, when every call is being deferred, the local counter stopped
+    // counting almost everything while Kraken kept counting all of it. The
+    // model was least accurate exactly where it is load-bearing, and it drifted
+    // in the direction that produces `EAPI:Rate limit exceeded` with local
+    // headroom to spare.
+    //
+    // Bounded, because this now blocks rather than passes through: the
+    // per-account REST bucket refills at 0.33-0.5/s so a legitimate wait is
+    // seconds, and anything beyond the ceiling means the account is saturated
+    // by something this call cannot outwait. Giving up returns control to the
+    // caller's own retry/backoff rather than holding a connector slot open.
+    let waitTime = await charge()
+    for (
+      let attempt = 0;
+      waitTime > 0 && attempt < KRAKEN_LIMIT_WAIT_ATTEMPTS;
+      attempt++
+    ) {
       await sleep(waitTime)
+      waitTime = await charge()
     }
 
     if (timeProfile) {
@@ -1921,6 +1964,129 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * One QueryOrders row -> `CommonOrder`. Shared by the single-txid lookup and
+   * the batch below so the two can never drift: they read the same endpoint and
+   * must produce the same order.
+   */
+  private async convertSpotQueryOrder(
+    txid: string,
+    orderData: {
+      descr?: {
+        pair?: string
+        price?: string
+        ordertype?: string
+        type?: string
+      }
+      fee?: string
+      oflags?: string
+      price?: string
+      vol?: string
+      vol_exec?: string
+      status?: string
+    },
+    symbol: string,
+    clientOrderId: string,
+  ): Promise<CommonOrder> {
+    return this.convertOrder({
+      orderId: txid,
+      symbol: await this.normalizeSymbol(orderData.descr?.pair || symbol),
+      clientOrderId,
+      fee: orderData.fee,
+      oflags: orderData.oflags,
+      // `price` is the average executed price — the real fill price for
+      // market orders, whose descr.price is '0'. Fall back to the limit
+      // price for unfilled orders.
+      price:
+        +(orderData.price || 0) > 0
+          ? orderData.price
+          : orderData.descr?.price || '0',
+      origQty: orderData.vol || '0',
+      executedQty: orderData.vol_exec || '0',
+      status: orderData.status || 'NEW',
+      type: orderData.descr?.ordertype || 'limit',
+      side: orderData.descr?.type?.toUpperCase() || 'BUY',
+    })
+  }
+
+  /**
+   * Resolve up to 50 spot orders per venue call via QueryOrders, which is
+   * authoritative for open AND closed orders and costs the same one REST token
+   * whether it carries one txid or fifty.
+   *
+   * This exists because the reconcile pass is a strictly serial
+   * `for (…) await getOrder(o)` and Kraken's private REST budget is tiny — 20
+   * tokens decaying at 0.5/s per account. Average Kraken load measured over 6h
+   * on 2026-08-31 was 2.5 calls/min, ~8% of that budget, but the sweep arrives
+   * in bursts: 11 bursts carried 735 of 913 calls, the largest 119 calls in
+   * 51s. Each burst drains the bucket in seconds, after which every further
+   * call — including the user's `openOrder` — is parked for the ~2.1s the
+   * refusal formula returns. 50.5% of ALL Kraken order placements were queued,
+   * 72% of `openOrder` specifically, while Kraken itself never once rate-limited
+   * us (zero `EAPI:Rate limit exceeded` fleet-wide over two days). The burst is
+   * the whole problem, and one call per 50 orders removes it.
+   *
+   * Only txids are batched. QueryOrders resolves by txid; the userref path is
+   * the ambiguous one (`parseInt(id.slice(0,8),16)`, on which every Gainium id
+   * collides — see `getOrder`), and batching an ambiguous lookup would multiply
+   * that ambiguity rather than resolve it. Anything not batched here is simply
+   * absent from the result and the caller falls back to its per-order path,
+   * which is what resolves it today.
+   */
+  override async getOrdersBatch({
+    symbol,
+    newClientOrderIds,
+  }: {
+    symbol: string
+    newClientOrderIds: string[]
+  }): Promise<BaseReturn<CommonOrder[]>> {
+    let timeProfile = this.getEmptyTimeProfile()
+    // Kraken Futures has its own multi-id lookup (`getOrderStatus` already
+    // takes `cliOrdIds: string[]`), but its not-found path falls through to
+    // `getOrderEvents` per order, which is a different shape. Left on the
+    // per-order path deliberately rather than half-batched.
+    if (this.usdm || !this.spotClient) {
+      return super.getOrdersBatch({ symbol, newClientOrderIds })
+    }
+    const txids = [...new Set(newClientOrderIds)].filter((id) =>
+      this.isKrakenSpotTxid(id),
+    )
+    if (!txids.length) {
+      return super.getOrdersBatch({ symbol, newClientOrderIds })
+    }
+
+    const orders: CommonOrder[] = []
+    for (let i = 0; i < txids.length; i += KRAKEN_QUERY_ORDERS_MAX) {
+      const chunk = txids.slice(i, i + KRAKEN_QUERY_ORDERS_MAX)
+      timeProfile =
+        (await this.checkLimits('getOrders', symbol, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      const result = await this.spotClient.getOrders({ txid: chunk.join(',') })
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (!result.result || result.error?.length) {
+        // A partial batch is still useful: the caller resolves whatever came
+        // back and falls back per-order for the rest. Only a batch that
+        // resolved NOTHING is reported as a failure.
+        break
+      }
+      for (const txid of chunk) {
+        const orderData = result.result[txid]
+        if (!orderData) {
+          continue
+        }
+        orders.push(
+          await this.convertSpotQueryOrder(txid, orderData, symbol, txid),
+        )
+      }
+    }
+
+    if (!orders.length) {
+      return super.getOrdersBatch({ symbol, newClientOrderIds })
+    }
+    return this.returnGood<CommonOrder[]>(timeProfile)(orders)
+  }
+
+  /**
    * Kraken requires `asset_class: 'tokenized_asset'` on every public/private
    * per-pair call for tokenized-equity ("xStocks") pairs — without it Kraken
    * replies "Unknown asset pair". Returns the param object to spread into the
@@ -1967,25 +2133,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         return null
       }
       return this.returnGood<CommonOrder>(timeProfile)(
-        this.convertOrder({
-          orderId: txid,
-          symbol: await this.normalizeSymbol(orderData.descr?.pair || symbol),
+        await this.convertSpotQueryOrder(
+          txid,
+          orderData,
+          symbol,
           clientOrderId,
-          fee: orderData.fee,
-          oflags: orderData.oflags,
-          // `price` is the average executed price — the real fill price for
-          // market orders, whose descr.price is '0'. Fall back to the limit
-          // price for unfilled orders.
-          price:
-            +(orderData.price || 0) > 0
-              ? orderData.price
-              : orderData.descr?.price || '0',
-          origQty: orderData.vol || '0',
-          executedQty: orderData.vol_exec || '0',
-          status: orderData.status || 'NEW',
-          type: orderData.descr?.ordertype || 'limit',
-          side: orderData.descr?.type?.toUpperCase() || 'BUY',
-        }),
+        ),
       )
     } catch (error) {
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -2292,6 +2445,16 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         // If order not found in open orders, try closed orders history
         if (error.message?.includes('Order not found')) {
           try {
+            // Charged like every other venue call. This was the one Kraken
+            // read that skipped the limiter entirely, and it is reached on the
+            // hottest path there is — the reconcile fallback for an order that
+            // is no longer open, i.e. every fill.
+            timeProfile =
+              (await this.checkLimits(
+                'getClosedOrders',
+                symbol,
+                timeProfile,
+              )) || timeProfile
             timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
             // Convert client order ID to userref (same way as in submitOrder)

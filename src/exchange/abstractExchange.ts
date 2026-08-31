@@ -66,6 +66,19 @@ export interface Exchange {
     newClientOrderId: string
   }): Promise<BaseReturn<CommonOrder>>
 
+  /**
+   * Resolve several orders in one venue call. OPTIONAL — a venue that has no
+   * multi-id lookup declines, and the caller keeps its per-order loop. See the
+   * base implementation for why declining rather than looping is the default.
+   */
+  getOrdersBatch?({
+    symbol,
+    newClientOrderIds,
+  }: {
+    symbol: string
+    newClientOrderIds: string[]
+  }): Promise<BaseReturn<CommonOrder[]>>
+
   cancelOrder({
     symbol,
     newClientOrderId,
@@ -197,6 +210,32 @@ abstract class AbsctractExchange implements Exchange {
   /** Convert number to string for qty and price */
   convertNumberToString(number: number) {
     return convertNumberToString(number)
+  }
+
+  /**
+   * Resolve several orders in one venue call. Declines by default: only a venue
+   * with a genuine multi-id lookup overrides it.
+   *
+   * Deliberately NOT a loop over {@link Exchange#getOrder}. A loop here would
+   * cost the caller exactly what its own loop costs, minus nothing, while
+   * pinning every one of those calls to the single connector instance that
+   * received the batch — on a venue whose rate-limit budget is per instance
+   * (Binance) that is strictly worse than letting the balancer spread them.
+   * Declining keeps every venue that has no batch lookup byte-for-byte on the
+   * path it uses today, and leaves the caller's per-order fallback as the only
+   * behaviour that ever runs for them.
+   */
+  async getOrdersBatch(_data: {
+    symbol: string
+    newClientOrderIds: string[]
+  }): Promise<BaseReturn<CommonOrder[]>> {
+    return {
+      status: StatusEnum.notok as StatusEnum.notok,
+      data: null,
+      reason: 'Batch order lookup not supported for this exchange',
+      usage: [],
+      timeProfile: this.getEmptyTimeProfile(),
+    }
   }
 
   /** Function to handle and format success result */

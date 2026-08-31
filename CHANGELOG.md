@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.13] - 2026-08-31
+
+### Added
+
+- **`getOrdersBatch` — resolve up to 50 Kraken spot orders in one venue call**, on a new optional `Exchange` method (`POST /orders/batch`). Kraken paces private REST per API key at 20 tokens decaying 0.5/s, and main-app's reconcile pass is a strictly serial `for (…) await getOrder(o)`, so a bot's pass arrives as a burst that drains the bucket in seconds and then parks everything behind it — the user's own `openOrder` included — for the ~2.1s the refusal formula returns. Measured on prod 2026-08-31 over 6h: average Kraken load 2.5 calls/min (~8% of budget) but 11 bursts carried 735 of 913 calls, the largest **119 calls in 51s**; 50.5% of ALL Kraken order placements were queued and **72% of `openOrder`** specifically, at a mean 2.4s. Kraken itself never rate-limited us once in two days — the throttle was entirely self-inflicted by the burst shape. QueryOrders costs the same one token for fifty txids as for one, so a 119-call burst becomes 3 calls.
+- The default implementation **declines** rather than looping `getOrder`. A loop would cost the caller exactly what its own loop costs while pinning every call to the single connector instance that received the batch — strictly worse on a venue whose budget is per instance (Binance). Declining keeps every venue without a real batch lookup byte-for-byte on today's path, and leaves the caller's per-order fallback as the only behaviour that runs for them. Only txids are batched: QueryOrders resolves by txid, and the userref path is the ambiguous one every Gainium client id collides on. Kraken Futures keeps the per-order path — `getOrderStatus` already takes `cliOrdIds: string[]`, but its not-found fallback is per order, and half-batching it would be worse than not.
+
+### Fixed
+
+- **A rate-limited Kraken call was sent having taken no token at all.** `checkLimits` asked the budget once, slept for whatever wait it was quoted, and then proceeded without re-asking — but the limiter deliberately does not charge a call it refuses, so every deferred call went to the venue uncounted. The local model was therefore least accurate exactly under load, when it is load-bearing, and it drifted in the direction that produces `EAPI:Rate limit exceeded` with local headroom to spare. It now re-asks after each wait and only proceeds once the budget admits it, bounded at three attempts so a saturated account cannot hold a connector slot open; after the ceiling the call proceeds as it always did, so no new failure mode.
+- **`getClosedOrders` skipped the limiter entirely and was billed at half rate.** The closed-orders fallback in spot `getOrder` — the path taken for every order that is no longer open, i.e. every fill — made a live Kraken call without ever calling `checkLimits`, and `getClosedOrders` is one of Kraken's history endpoints, which it bills at 2 rather than 1. It is now charged, at the heavy cost.
+
 ## [1.20.12] - 2026-08-31
 
 ### Fixed

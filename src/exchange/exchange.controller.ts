@@ -180,6 +180,20 @@ export class ExchangeController {
     return this.exchangeService.getOrder({ newClientOrderId, symbol }, headers)
   }
 
+  /**
+   * POST, not GET: 50 Kraken txids is ~1.9KB of ids, which belongs in a body
+   * rather than a query string that has to survive the balancer hop. The path
+   * is deliberately outside every `publicUrl` prefix the balancer matches on,
+   * so this credentialed call routes to the private (IP-whitelisted) pool.
+   */
+  @Post('/orders/batch')
+  async getOrdersBatch(
+    @Body() body: { symbol: string; newClientOrderIds: string[] },
+    @Headers() headers: AuthData,
+  ) {
+    return this.exchangeService.getOrdersBatch(body, headers)
+  }
+
   @Get('/open/all')
   async getAllOpenOrders(
     @Headers() headers: AuthData,

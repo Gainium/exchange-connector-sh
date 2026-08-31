@@ -205,6 +205,26 @@ export class ExchangeService {
     ).getOrder({ symbol: data.symbol, newClientOrderId: data.newClientOrderId })
   }
 
+  getOrdersBatch(
+    data: { symbol: string; newClientOrderIds: string[] },
+    auth: AuthData,
+  ): Promise<BaseReturn<CommonOrder[]>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getOrdersBatch({
+      symbol: data.symbol,
+      newClientOrderIds: data.newClientOrderIds ?? [],
+    })
+  }
+
   getAllOpenOrders(
     data: { symbol?: string; returnOrders: boolean },
     auth: AuthData,

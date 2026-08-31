@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.14] - 2026-08-31
+
+### Fixed
+
+- **Binance spot, USD-M and COIN-M shared ONE raw-request budget, so each throttled the others for no venue reason.** `addRawSpotRequest`, `addRawUsdmRequest` and `addRawCoinmRequest` were three byte-identical functions mutating the same module-level `rawCount`/`rawLastTime` pair, behind the same global mutex key. Futures traffic therefore consumed spot's allowance and reset spot's window, and vice versa — while Binance meters the three as what they are: separate hosts (`api`/`fapi`/`dapi.binance.com`) with separate limits. Each family now has its own counter and window, and the mutex key is scoped per family too (one global lock over three independent counters serialised spot behind futures while protecting nothing). The refund path that hands a slot back when the weight budget parks a call now credits the family that took it, rather than whichever counter happened to be shared.
+
+  **This raises the aggregate allowance**, from 1800/min across all three families to 1800/min each. Measured against Binance's own `exchangeInfo` on 2026-08-31, that is still far inside the venue's published limits, and `rawLimit` itself is deliberately left at 1800 — this counter is a backstop against a runaway request loop, not a model of the venue, and the weight budget remains the binding constraint by design:
+
+  | host | Binance REQUEST_WEIGHT | Binance RAW_REQUESTS | our weight cap | our raw cap | binds first |
+  |---|---|---|---|---|---|
+  | spot `api` | 6000/min | 300,000 / 5 min | 4500/min | 1800/min | weight |
+  | usdm `fapi` | 2400/min | *none published* | 2000/min | 1800/min | weight |
+  | coinm `dapi` | 2400/min | *none published* | 2000/min | 1800/min | weight |
+
+  For USD-M that ordering is exact: 2000 × 0.85 read reserve ÷ 1.2 multiplier = 1416 reads, against a raw ceiling of 1530. Raising `rawLimit` is a separate decision from fixing the sharing and is deliberately not taken here — note only that the old shared 1800 was ~3% of spot's real raw ceiling, and was additionally charged against two hosts that publish no raw limit at all.
+
+  Not changed, but worth recording: `addWeightUS` never calls the raw counter, so `binanceUS` has no raw backstop of any kind. Left alone rather than invented.
+
 ## [1.20.13] - 2026-08-31
 
 ### Added

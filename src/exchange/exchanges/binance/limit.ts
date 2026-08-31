@@ -27,8 +27,44 @@ let lastWeightTimeUS = 0
 let binanceRequestUS = false
 let weightCountWhileRequestUS = 0
 
-let rawCount = 0
-let rawLastTime = 0
+/**
+ * Raw-request budget, tracked PER ENDPOINT FAMILY.
+ *
+ * This used to be ONE `rawCount`/`rawLastTime` pair shared by
+ * `addRawSpotRequest`, `addRawUsdmRequest` and `addRawCoinmRequest` — three
+ * byte-identical functions mutating the same two variables. Spot, USD-M and
+ * COIN-M therefore competed for a single 1800/min allowance and reset each
+ * other's window, so futures traffic throttled spot placement and vice versa,
+ * for no venue reason at all: they are three different hosts
+ * (api/fapi/dapi.binance.com) metered separately by Binance.
+ *
+ * Measured from Binance's own `exchangeInfo` on 2026-08-31:
+ *   spot  api  — REQUEST_WEIGHT 6000/min, RAW_REQUESTS 300000 per 5 MINUTE
+ *   usdm  fapi — REQUEST_WEIGHT 2400/min, no RAW_REQUESTS limit published
+ *   coinm dapi — REQUEST_WEIGHT 2400/min, no RAW_REQUESTS limit published
+ * i.e. the shared 1800/min was ~3% of spot's real raw ceiling and was also
+ * being charged against two hosts that publish no raw limit whatsoever.
+ * `rawLimit` is left at 1800 PER FAMILY here: this counter is a backstop
+ * against a runaway request loop, not a model of the venue's limit (the weight
+ * budget is that), and raising it is a separate decision from fixing the
+ * sharing. See the CHANGELOG entry.
+ */
+type RawFamily = 'com' | 'usdm' | 'coinm'
+const rawState: Record<RawFamily, { count: number; lastTime: number }> = {
+  com: { count: 0, lastTime: 0 },
+  usdm: { count: 0, lastTime: 0 },
+  coinm: { count: 0, lastTime: 0 },
+}
+
+/**
+ * Hand back a raw slot taken by `addRawRequest` for a call that then got parked
+ * by the weight budget and so never reached Binance. Not mutex-guarded, exactly
+ * as the shared-counter version was not: it is a synchronous decrement with no
+ * await inside it.
+ */
+const refundRawSlot = (family: RawFamily) => {
+  rawState[family].count--
+}
 
 const orderFrame = 11000
 const orderCountInFrame = 80
@@ -98,65 +134,29 @@ class RawClass {
   }
 
   private usersOrders: Map<Type, Map<string, UserOrder>> = new Map()
-  @IdMute(mutex, () => 'binance')
-  async addRawUsdmRequest(isOrder = false) {
+  /**
+   * Charge one raw request against `family`'s own budget. The mutex key is
+   * scoped to the family too — a single global lock over three now-independent
+   * counters would serialise spot behind futures while protecting nothing.
+   */
+  @IdMute(mutex, (family: RawFamily) => `${family}addRaw`)
+  async addRawRequest(family: RawFamily, isOrder = false) {
+    const s = rawState[family]
     const time = new Date().getTime()
-    if (time - rawLastTime > rawTimeframe) {
-      rawCount = 1
-      rawLastTime = time - (time % rawTimeframe)
-      return 0
-    } else {
-      rawCount++
-      if (rawCount > weightCapFor(rawLimit, isOrder)) {
-        // Parked, so never sent: give the slot back. Same reserve as the
-        // per-domain weight budgets — this counter is the one that binds
-        // first on Binance spot, and without it an order would still queue
-        // behind the reads there.
-        rawCount--
-        return rawTimeframe - (time % rawTimeframe)
-      }
+    if (time - s.lastTime > rawTimeframe) {
+      s.count = 1
+      s.lastTime = time - (time % rawTimeframe)
       return 0
     }
-  }
-  @IdMute(mutex, () => 'binance')
-  async addRawCoinmRequest(isOrder = false) {
-    const time = new Date().getTime()
-    if (time - rawLastTime > rawTimeframe) {
-      rawCount = 1
-      rawLastTime = time - (time % rawTimeframe)
-      return 0
-    } else {
-      rawCount++
-      if (rawCount > weightCapFor(rawLimit, isOrder)) {
-        // Parked, so never sent: give the slot back. Same reserve as the
-        // per-domain weight budgets — this counter is the one that binds
-        // first on Binance spot, and without it an order would still queue
-        // behind the reads there.
-        rawCount--
-        return rawTimeframe - (time % rawTimeframe)
-      }
-      return 0
+    s.count++
+    if (s.count > weightCapFor(rawLimit, isOrder)) {
+      // Parked, so never sent: give the slot back. Same reserve as the
+      // per-domain weight budgets — orders spend the whole budget, reads stop
+      // at `requestWeightShare` of it.
+      s.count--
+      return rawTimeframe - (time % rawTimeframe)
     }
-  }
-  @IdMute(mutex, () => 'binance')
-  async addRawSpotRequest(isOrder = false) {
-    const time = new Date().getTime()
-    if (time - rawLastTime > rawTimeframe) {
-      rawCount = 1
-      rawLastTime = time - (time % rawTimeframe)
-      return 0
-    } else {
-      rawCount++
-      if (rawCount > weightCapFor(rawLimit, isOrder)) {
-        // Parked, so never sent: give the slot back. Same reserve as the
-        // per-domain weight budgets — this counter is the one that binds
-        // first on Binance spot, and without it an order would still queue
-        // behind the reads there.
-        rawCount--
-        return rawTimeframe - (time % rawTimeframe)
-      }
-      return 0
-    }
+    return 0
   }
   @IdMute(mutex, () => 'binance')
   async checkBannedTime(type: Type) {
@@ -284,7 +284,7 @@ const addWeight = async (_w: number, isOrder = false) => {
   if (banned) {
     return banned
   }
-  const raw = await Raw.addRawSpotRequest(isOrder)
+  const raw = await Raw.addRawRequest('com', isOrder)
   if (raw) {
     return raw
   }
@@ -304,7 +304,7 @@ const addWeight = async (_w: number, isOrder = false) => {
       weightCountWhileRequest += w
     }
     if (weight > weightCapFor(weightInFrameCom(), isOrder)) {
-      rawCount--
+      refundRawSlot('com')
       // Parked, so it never reaches Binance and must not be charged for. The
       // raw slot was already handed back above; the weight was not, so the
       // counter tracked ATTEMPTS instead of what we actually sent — and every
@@ -333,7 +333,7 @@ const addWeightUsdm = async (_w: number, isOrder = false) => {
   if (banned) {
     return banned
   }
-  const raw = await Raw.addRawUsdmRequest(isOrder)
+  const raw = await Raw.addRawRequest('usdm', isOrder)
   if (raw) {
     return raw
   }
@@ -353,7 +353,7 @@ const addWeightUsdm = async (_w: number, isOrder = false) => {
       usdmWeightCountWhileRequest += w
     }
     if (usdmWeight > weightCapFor(usdmWeightInFrame, isOrder)) {
-      rawCount--
+      refundRawSlot('usdm')
       // See `addWeight`: a parked request is not a sent request.
       usdmWeight -= w
       if (usdmBinanceRequest) {
@@ -378,7 +378,7 @@ const addWeightCoinm = async (_w: number, isOrder = false) => {
   if (banned) {
     return banned
   }
-  const raw = await Raw.addRawCoinmRequest(isOrder)
+  const raw = await Raw.addRawRequest('coinm', isOrder)
   if (raw) {
     return raw
   }
@@ -398,7 +398,7 @@ const addWeightCoinm = async (_w: number, isOrder = false) => {
       coinmWeightCountWhileRequest += w
     }
     if (coinmWeight > weightCapFor(coinmWeightInFrame, isOrder)) {
-      rawCount--
+      refundRawSlot('coinm')
       // See `addWeight`: a parked request is not a sent request.
       coinmWeight -= w
       if (coinmBinanceRequest) {

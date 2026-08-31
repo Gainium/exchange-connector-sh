@@ -45,6 +45,7 @@ import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { RestClient as OKXOrderRestClient } from '../../../okx-custom/rest-client'
 import { round } from '../../../utils/math'
+import { createHash } from 'crypto'
 
 class OKXError extends Error {
   code: number
@@ -168,6 +169,58 @@ class OKXExchange extends AbstractExchange implements Exchange {
         })
     }
     return this.accountConfigInFlight
+  }
+
+  /**
+   * Account mode (`acctLv`) per account, cached briefly.
+   *
+   * Unlike {@link accountConfig}, which shares only the in-flight promise,
+   * this keeps the settled value: it is read on the ORDER path, and
+   * `account/config` is rate-limited per **UserID**, so asking once per order
+   * would spend a scarce budget on a value that changes only when the user
+   * deliberately switches account mode. A short TTL keeps that rare change
+   * self-healing without a restart.
+   *
+   * Keyed by a digest of the credential (never the credential itself) plus
+   * the OKX origin, since global and Europe are separate accounts.
+   */
+  private static acctLvCache = new Map<string, { at: number; acctLv: string }>()
+  private static readonly ACCT_LV_TTL = 10 * 60 * 1000
+
+  private async getAcctLv(): Promise<string | undefined> {
+    const cacheKey = createHash('sha256')
+      .update(`${this.key ?? ''}|${this.okxSource ?? ''}`)
+      .digest('hex')
+      .slice(0, 16)
+    const cached = OKXExchange.acctLvCache.get(cacheKey)
+    if (cached && +new Date() - cached.at < OKXExchange.ACCT_LV_TTL) {
+      return cached.acctLv
+    }
+    return this.accountConfig()
+      .then((account) => {
+        const acctLv = account?.[0]?.acctLv
+        if (acctLv) {
+          OKXExchange.acctLvCache.set(cacheKey, { at: +new Date(), acctLv })
+        }
+        return acctLv
+      })
+      .catch(() => undefined)
+  }
+
+  /**
+   * `tdMode` for a SPOT order.
+   *
+   * `cash` is valid ONLY in OKX's Spot and Futures account modes. In
+   * Multi-currency margin (`acctLv` 3) and Portfolio margin (4) the spot book
+   * is part of the unified margin account and every spot order must be
+   * `cross`; `cash` is rejected outright with "Parameter tdMode error", so a
+   * bot on such an account cannot place a single order (2026-08-31: a new OKX
+   * Europe user, 58 orders, 0 fills). An unreadable account config falls back
+   * to `cash` — the behaviour that shipped before this existed.
+   */
+  private async spotTdMode(): Promise<'cash' | 'cross'> {
+    const acctLv = await this.getAcctLv()
+    return acctLv === '3' || acctLv === '4' ? 'cross' : 'cash'
   }
 
   constructor(
@@ -1359,6 +1412,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     } = order
     await this.ensureXperpMap()
     const symbol = this.updateSymbol(_symbol)
+    const spotTdMode = this.futures ? undefined : await this.spotTdMode()
     const request: OrderRequest = {
       instId: symbol,
       side: side === 'BUY' ? 'buy' : 'sell',
@@ -1369,7 +1423,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         ? marginType === MarginType.CROSSED
           ? 'cross'
           : 'isolated'
-        : 'cash',
+        : (spotTdMode ?? 'cash'),
       tgtCcy: 'base_ccy',
       tag: this.code,
     }

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.15] - 2026-08-31
+
+### Fixed
+
+- OKX spot orders now pick their trade mode from the account mode instead of always sending `cash`. `cash` is valid only in OKX's Spot and Futures account modes — in Multi-currency margin and Portfolio margin the spot book belongs to the unified margin account and orders must be `cross`, so every order from an account in one of those modes was rejected with "Parameter tdMode error" and the bot could not trade at all. The account mode is read from `account/config` and cached briefly, and an unreadable config still falls back to `cash`.
+
 ## [1.20.14] - 2026-08-31
 
 ### Fixed

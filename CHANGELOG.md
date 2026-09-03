@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.18] - 2026-09-03
+
+### Fixed
+
+- Binance errors whose response body carries no `msg` no longer render as the
+  literal string `[object Object]`. The SDK's `parseException` throws a plain
+  object, not an `Error`, and sets `message` from `response.data?.msg` — so any
+  failure answered with a different JSON shape (proxy and CDN error pages, most
+  visibly on the `.us` domain, which routes through the raw `getPrivate()` call)
+  left `message` undefined and fell through to interpolating the parsed body
+  object. That string became the connector's `reason` and travelled unchanged
+  into the caller's user-visible error, so the only diagnostic the response
+  carried was destroyed at the first hop.
+
+  Both copies of the ladder — the `returnBad` override and `handleBinanceErrors`
+  — now share one `describeBinanceError` helper. Strings pass through untouched
+  so existing message matching is unaffected; non-strings go through
+  `safeStringify`, never `JSON.stringify`, since a thrown exchange error has the
+  failing request stapled to it. Covered by
+  `src/exchange/exchanges/binance/describeBinanceError.spec.ts`.
+
 ## [1.20.16] - 2026-09-03
 
 ### Added

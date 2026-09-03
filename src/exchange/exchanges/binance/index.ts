@@ -60,6 +60,7 @@ import {
 } from '../../helpers/keyPermissions'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
+import { safeStringify } from '../../../utils/redact'
 
 export enum HttpMethod {
   GET = 'GET',
@@ -99,6 +100,53 @@ function binanceFuturesAssetClass(
       return 'commodity'
     default:
       return undefined
+  }
+}
+
+/**
+ * Render a thrown Binance error as a human string.
+ *
+ * The SDK's `parseException` does not throw an Error. On any non-2xx it throws
+ * a PLAIN OBJECT shaped `{ code, message, body, headers, requestUrl,
+ * requestBody, requestOptions }`, where `message` is `response.data?.msg` --
+ * i.e. UNDEFINED whenever the venue's error body is not Binance's own
+ * `{code,msg}` JSON. `body` is then the parsed response payload, which for a
+ * JSON error page is an object.
+ *
+ * The previous ladder interpolated that object directly, so every such failure
+ * reduced to the literal string "[object Object]" -- carried through the
+ * connector's `reason`, the balancer and main-app into the user-visible bot
+ * error, destroying the only diagnostic the response had. The US domain is
+ * hit hardest because it routes through the raw `getPrivate()` call, whose
+ * upstream failures (proxy and CDN error pages) are exactly the ones that
+ * carry no `msg`.
+ *
+ * Strings pass through untouched, so existing message matching is unaffected.
+ * Non-strings go through `safeStringify`, never `JSON.stringify`: a thrown
+ * exchange error has the failing request stapled to it, and the redaction the
+ * SDKs advertise is not the redaction you get.
+ */
+export const describeBinanceError = (e: unknown): string => {
+  const render = (v: unknown): string =>
+    typeof v === 'string' ? v : safeStringify(v)
+  try {
+    const err = e as { message?: unknown; body?: unknown } | null
+    if (err && err.message != null && err.message !== '') {
+      return render(err.message)
+    }
+    if (err && err.body != null && err.body !== '') {
+      return render(err.body)
+    }
+    if (typeof e === 'string') {
+      return e
+    }
+    if (e instanceof Error) {
+      return e.message
+    }
+    return safeStringify(e)
+  } catch {
+    // Never let diagnostics throw inside an error path.
+    return '<unrenderable exchange error>'
   }
 }
 
@@ -582,17 +630,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
   }
   override returnBad(timeProfile: TimeProfile, usage = limitHelper.getUsage()) {
     return (e: Error) => {
-      let msg = ''
-      try {
-        msg =
-          'message' in e && e.message
-            ? `${e.message}`
-            : 'body' in e && e.body
-              ? `${e.body}`
-              : `${e}`
-      } catch {
-        msg = `${e}`
-      }
+      const msg = describeBinanceError(e)
       return {
         status: StatusEnum.notok as StatusEnum.notok,
         reason: msg,
@@ -2986,17 +3024,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         'Request throttled by system-level protection'.toLowerCase()
       const html500 = '500 internal server error'
       const timeProfile: TimeProfile = args[args.length - 1]
-      let msg = ''
-      try {
-        msg =
-          'message' in e && e.message
-            ? `${e.message}`
-            : 'body' in e && e.body
-              ? `${e.body}`
-              : `${e}`
-      } catch {
-        msg = `${e}`
-      }
+      const msg = describeBinanceError(e)
       if (
         this.retryErrors.includes(e.code || 0) ||
         e.response ||

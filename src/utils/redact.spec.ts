@@ -15,10 +15,11 @@ process.env.NODE_ENV = 'testing'
  * committed to a public repo, and the whole point of the module under test is
  * that key material does not get written down.
  *
- * Run: npx ts-node --files --project tsconfig.json src/utils/redact.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — the module is pure.
  */
+import { describe, it } from 'mocha'
 import { safeStringify, isSecretKey } from './redact'
 
 const FAKE_KEY = 'FAKE-KEY-AAAA'
@@ -27,14 +28,13 @@ const FAKE_SECRET = 'FAKE-SECRET-CCCC'
 const FAKE_TOKEN = 'FAKE-WS-TOKEN-DDDD'
 const FAKE_PASS = 'FAKE-PASSPHRASE-EEEE'
 
-let failures = 0
 function check(label: string, ok: boolean, detail = '') {
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` :: ${detail}` : ''}`,
-  )
+  it(label, () => {
+    if (!ok) throw new Error(detail ? `${label} :: ${detail}` : label)
+  })
 }
 
+describe('redact', () => {
 // 1) The Kraken shape, as thrown by parseException() for any rejected private
 //    call — an order in the connector, GetWebSocketsToken in the ws connector.
 //    Credentials ride inside requestParams.options.headers, right beside the
@@ -260,6 +260,4 @@ check(
   !rewrapped.includes(FAKE_KEY) && !rewrapped.includes(FAKE_SIGN),
   rewrapped,
 )
-
-console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
-process.exit(failures === 0 ? 0 : 1)
+})

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.16] - 2026-09-03
+
+### Added
+
+- CI now runs a real `npm test` (mocha) on every PR. The 17 `*.spec.ts`
+  files under `src/` each ran as a standalone hand-rolled ts-node
+  script before, with no test runner and nothing wiring them into CI —
+  converted to real mocha `describe`/`it`, 329 assertions, verified
+  against a captured baseline for zero drift.
+
 ## [1.20.15] - 2026-08-31
 
 ### Fixed

@@ -20,24 +20,28 @@ process.env.NODE_ENV = 'testing'
  *     slippage-padded IOC request price, nothing traded there (bug #426
  *     shape); with a fills price, that price is used.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        src/exchange/exchanges/hyperliquid/convert-order-executed-quote.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network: getPairByCoin is stubbed.
  */
+import { describe, it, before } from 'mocha'
 import { Futures } from '../../types'
 import HyperliquidExchange from './index'
 
 const PRIVATE_KEY =
   '0x0123456789012345678901234567890123456789012345678901234567890123'
 
-let failures = 0
-function expect(label: string, actual: unknown, want: unknown) {
-  const ok = JSON.stringify(actual) === JSON.stringify(want)
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+/** `getActual` is evaluated lazily, inside the it(), after `before()` has run. */
+function expect(label: string, getActual: () => unknown, want: unknown) {
+  it(label, () => {
+    const actual = getActual()
+    const ok = JSON.stringify(actual) === JSON.stringify(want)
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
 function makeOrder(overrides: Record<string, unknown>) {
@@ -55,98 +59,103 @@ function makeOrder(overrides: Record<string, unknown>) {
   }
 }
 
-async function main() {
-  const ex = new HyperliquidExchange(
-    Futures.usdm,
-    '0x14791697260e4c9a71f18484c9f997b308e59325',
-    PRIVATE_KEY,
-    '',
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    false,
-  )
+describe('hyperliquid convert-order-executed-quote', () => {
+  let canceled: any
+  let canceledWithFillPx: any
+  let open: any
+  let filled: any
+  let market: any
+  let marketWithPx: any
 
-  const anyEx = ex as any
-  anyEx.getPairByCoin = async () => 'xyz:CL-USDC'
+  before(async () => {
+    const ex = new HyperliquidExchange(
+      Futures.usdm,
+      '0x14791697260e4c9a71f18484c9f997b308e59325',
+      PRIVATE_KEY,
+      '',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    )
+    const anyEx = ex as any
+    anyEx.getPairByCoin = async () => 'xyz:CL-USDC'
 
-  // The incident order: TP 0.472, filled 0.025, canceled with 0.447 remaining.
-  const canceled = await anyEx.convertOrder(makeOrder({}), 'canceled', 1)
+    // The incident order: TP 0.472, filled 0.025, canceled with 0.447 remaining.
+    canceled = await anyEx.convertOrder(makeOrder({}), 'canceled', 1)
+
+    // Same order with a fills-derived price supplied by getOrder.
+    canceledWithFillPx = await anyEx.convertOrder(
+      makeOrder({}),
+      'canceled',
+      1,
+      '86.100',
+    )
+
+    // Untouched open order: nothing executed, nothing to report.
+    open = await anyEx.convertOrder(makeOrder({ sz: '0.472' }), 'open', 1)
+
+    // Fully filled limit order.
+    filled = await anyEx.convertOrder(makeOrder({ sz: '0' }), 'filled', 1)
+
+    // Filled MARKET without a fills price: limitPx is the padded IOC request
+    // price — report 0 so the consumer falls back to the price it knows.
+    market = await anyEx.convertOrder(
+      makeOrder({ orderType: 'Market', sz: '0' }),
+      'filled',
+      1,
+    )
+    marketWithPx = await anyEx.convertOrder(
+      makeOrder({ orderType: 'Market', sz: '0' }),
+      'filled',
+      1,
+      '85.9',
+    )
+  })
+
   // Float subtraction — this exact string is what prod stored for the
   // incident order.
   expect(
     'canceled partial executedQty',
-    canceled.executedQty,
+    () => canceled.executedQty,
     '0.024999999999999967',
   )
   expect(
     'canceled partial quote = executed * limitPx',
-    +(+canceled.cummulativeQuoteQty).toFixed(6),
+    () => +(+canceled.cummulativeQuoteQty).toFixed(6),
     +(0.025 * 86.082).toFixed(6),
   )
   expect(
     'canceled partial derived price sane',
-    +(+canceled.cummulativeQuoteQty / +canceled.executedQty).toFixed(3),
+    () => +(+canceled.cummulativeQuoteQty / +canceled.executedQty).toFixed(3),
     86.082,
   )
 
-  // Same order with a fills-derived price supplied by getOrder.
-  const canceledWithFillPx = await anyEx.convertOrder(
-    makeOrder({}),
-    'canceled',
-    1,
-    '86.100',
-  )
   expect(
     'canceled partial quote uses fills price when given',
-    +(+canceledWithFillPx.cummulativeQuoteQty).toFixed(6),
+    () => +(+canceledWithFillPx.cummulativeQuoteQty).toFixed(6),
     +(0.025 * 86.1).toFixed(6),
   )
 
-  // Untouched open order: nothing executed, nothing to report.
-  const open = await anyEx.convertOrder(makeOrder({ sz: '0.472' }), 'open', 1)
-  expect('open order executedQty', open.executedQty, '0')
-  expect('open order quote', +open.cummulativeQuoteQty, 0)
+  expect('open order executedQty', () => open.executedQty, '0')
+  expect('open order quote', () => +open.cummulativeQuoteQty, 0)
 
-  // Fully filled limit order.
-  const filled = await anyEx.convertOrder(makeOrder({ sz: '0' }), 'filled', 1)
-  expect('filled limit executedQty', filled.executedQty, '0.472')
+  expect('filled limit executedQty', () => filled.executedQty, '0.472')
   expect(
     'filled limit quote = origSz * limitPx',
-    +(+filled.cummulativeQuoteQty).toFixed(6),
+    () => +(+filled.cummulativeQuoteQty).toFixed(6),
     +(0.472 * 86.082).toFixed(6),
   )
 
-  // Filled MARKET without a fills price: limitPx is the padded IOC request
-  // price — report 0 so the consumer falls back to the price it knows.
-  const market = await anyEx.convertOrder(
-    makeOrder({ orderType: 'Market', sz: '0' }),
-    'filled',
-    1,
-  )
   expect(
     'filled market quote without fills price',
-    +market.cummulativeQuoteQty,
+    () => +market.cummulativeQuoteQty,
     0,
-  )
-  const marketWithPx = await anyEx.convertOrder(
-    makeOrder({ orderType: 'Market', sz: '0' }),
-    'filled',
-    1,
-    '85.9',
   )
   expect(
     'filled market quote with fills price',
-    +(+marketWithPx.cummulativeQuoteQty).toFixed(6),
+    () => +(+marketWithPx.cummulativeQuoteQty).toFixed(6),
     +(0.472 * 85.9).toFixed(6),
   )
-
-  console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PASS')
-  process.exit(failures ? 1 : 0)
-}
-
-main().catch((e) => {
-  console.error(e)
-  process.exit(1)
 })

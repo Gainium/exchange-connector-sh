@@ -16,25 +16,28 @@ process.env.NODE_ENV = 'testing'
  * this reader turns them into a size-weighted average. This spec pins that
  * reader and the permanent-vs-transient failure classification.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        src/exchange/exchanges/kraken/fill-price.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — both units under test are pure.
  */
+import { describe, it } from 'mocha'
 import { Futures } from '../../types'
 import KrakenExchange, { isKrakenPermanentAuthFailure } from './index'
 
 const ex: any = new KrakenExchange(Futures.usdm, '', '')
 
-let failures = 0
 function check(label: string, actual: unknown, want: unknown) {
-  const ok = JSON.stringify(actual) === JSON.stringify(want)
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+  it(label, () => {
+    const ok = JSON.stringify(actual) === JSON.stringify(want)
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
+describe('fill-price', () => {
 const orderJson = (over: Record<string, unknown> = {}) => ({
   orderId: 'a2704204-0452-4579-bbc1-c22327c2dd13',
   cliOrdId: 'D-TP-K759dVXOwvpaICs9d5C4PAqeDTsA1U',
@@ -132,8 +135,4 @@ check(
   isKrakenPermanentAuthFailure('timeout of 10000ms exceeded'),
   false,
 )
-
-console.log(
-  failures === 0 ? '\nAll fill-price checks passed' : `\n${failures} FAILED`,
-)
-process.exit(failures === 0 ? 0 : 1)
+})

@@ -17,23 +17,23 @@ process.env.NODE_ENV = 'testing'
  * shapes below are the ones observed being rejected in prod on connector node
  * 62.84.191.112 on 2026-08-11.
  *
- * Run: npx ts-node --files --project tsconfig.json src/kraken-custom/serializeParams.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — the function is pure.
  */
+import { describe, it } from 'mocha'
 import { serializeParams } from './SpotClient'
 
 const S = (params: Record<string, any>, strict?: boolean) =>
   serializeParams(params, strict, true, '', true)
 
-let failures = 0
 function check(label: string, ok: boolean, detail = '') {
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}${detail ? ` :: ${detail}` : ''}`,
-  )
+  it(label, () => {
+    if (!ok) throw new Error(detail ? `${label} :: ${detail}` : label)
+  })
 }
 
+describe('serializeParams', () => {
 // 1) The regression itself: a DCA base order (`D-BO-…`) never sets reduceOnly,
 //    so openOrder() hands the serializer a `reduceOnly: undefined` key. It must
 //    not reach Kraken in any form — present-and-undefined has to be
@@ -119,6 +119,4 @@ try {
     e.message,
   )
 }
-
-console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
-process.exit(failures === 0 ? 0 : 1)
+})

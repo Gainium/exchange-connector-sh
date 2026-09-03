@@ -1,11 +1,12 @@
 {
   "name": "exchange-connector",
-  "version": "1.20.15",
+  "version": "1.20.16",
   "description": "",
   "author": "",
   "private": true,
   "license": "MIT",
   "scripts": {
+    "test": "env NODE_NO_WARNINGS=1 NODE_ENV=testing TS_NODE_TRANSPILE_ONLY=1 mocha --timeout 20000 --exit -r ts-node/register --extension ts 'src/**/*.spec.ts'",
     "build": "tsc -p tsconfig.build.json",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
@@ -50,6 +51,7 @@
     "@eslint/js": "^9.31.0",
     "@nestjs/cli": "^11.0.7",
     "@types/crypto-js": "^4.2.2",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^24.1.0",
     "@typescript-eslint/eslint-plugin": "^8.38.0",
     "@typescript-eslint/parser": "^8.38.0",
@@ -59,6 +61,7 @@
     "eslint-plugin-unused-imports": "^4.1.4",
     "globals": "^16.3.0",
     "husky": "^9.1.7",
+    "mocha": "^11.8.0",
     "prettier": "^3.6.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.3"

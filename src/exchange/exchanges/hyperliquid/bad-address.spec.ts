@@ -23,11 +23,11 @@ process.env.NODE_ENV = 'testing'
  *      bot reads a misconfigured account as "no funds / no positions" instead
  *      of surfacing a configuration error.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        src/exchange/exchanges/hyperliquid/bad-address.spec.ts
+ * Run: `npm test` (mocha).
  *
  * Makes real (unauthenticated, read-only) calls to api.hyperliquid.xyz.
  */
+import { describe, it, before } from 'mocha'
 import { Futures } from '../../types'
 import HyperliquidExchange from './index'
 
@@ -38,13 +38,17 @@ const GOOD_ADDRESS = '0x14791697260e4c9a71f18484c9f997b308e59325'
 const PRIVATE_KEY =
   '0x0123456789012345678901234567890123456789012345678901234567890123'
 
-let failures = 0
-function expect(label: string, actual: unknown, want: unknown) {
-  const ok = JSON.stringify(actual) === JSON.stringify(want)
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+/** `getActual` is evaluated lazily, inside the it(), after `before()` has run. */
+function expect(label: string, getActual: () => unknown, want: unknown) {
+  it(label, () => {
+    const actual = getActual()
+    const ok = JSON.stringify(actual) === JSON.stringify(want)
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
 /**
@@ -68,112 +72,114 @@ function instrumentFetch(): {
   return { calls: () => n, restore: () => (globalThis.fetch = orig) }
 }
 
-async function main() {
-  // --- 1. HL's own acceptance, probed live -------------------------------
-  // Documents exactly which shapes the guard may reject. Note HL accepts a
-  // BARE 40-hex address (no 0x) — a stricter /^0x…/ guard would break an
-  // account that works today.
-  const probe = async (user: string) => {
-    const r = await fetch('https://api.hyperliquid.xyz/info', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'clearinghouseState', user }),
-    })
-    return r.status
-  }
-  expect('HL accepts 0x + 40 hex', await probe(GOOD_ADDRESS), 200)
-  expect('HL accepts bare 40 hex', await probe(GOOD_ADDRESS.slice(2)), 200)
-  expect('HL rejects 39 hex (the typo)', await probe(BAD_ADDRESS), 422)
-  expect('HL rejects empty', await probe(''), 422)
-
-  // --- 2. What the connector does with that address -----------------------
-  const ex = new HyperliquidExchange(
-    Futures.usdm,
-    BAD_ADDRESS,
-    PRIVATE_KEY,
-    '',
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    false,
-  )
-
-  const fetchSpy = instrumentFetch()
-  const t0 = Date.now()
-  const bal = await ex.futures_getBalance()
-  const elapsed = Date.now() - t0
-  const httpCalls = fetchSpy.calls()
-  fetchSpy.restore()
-
-  console.log(
-    `\n  clearinghouseState HTTP calls: ${httpCalls}   elapsed: ${elapsed}ms`,
-  )
-  console.log(
-    `  futures_getBalance -> ${JSON.stringify(bal.status)} data=${JSON.stringify(bal.data)} reason=${JSON.stringify(bal.reason)}\n`,
-  )
-
-  // The fix must fail fast and loud, not retry and lie.
-  expect('no HTTP call made for a malformed address', httpCalls, 0)
-  expect('balance does NOT report OK', bal.status, 'NOTOK')
-  expect(
-    'balance reason names the misconfiguration',
-    /invalid wallet address/i.test(`${bal.reason ?? ''}`),
-    true,
-  )
-
-  // Positions and open orders swallow the same per-dex failure, so they must
-  // fail loudly too — an empty position list is what a bot acts on.
-  const pos = await ex.futures_getPositions()
-  console.log(
-    `  futures_getPositions -> ${JSON.stringify(pos.status)} data=${JSON.stringify(pos.data)} reason=${JSON.stringify(pos.reason)}`,
-  )
-  expect('positions do NOT report OK', pos.status, 'NOTOK')
-
-  const oo = await ex.getAllOpenOrders()
-  console.log(
-    `  getAllOpenOrders    -> ${JSON.stringify(oo.status)} data=${JSON.stringify(oo.data)} reason=${JSON.stringify(oo.reason)}\n`,
-  )
-  expect('open orders do NOT report OK', oo.status, 'NOTOK')
-
-  // --- 3. A GOOD address must still work unchanged (no false positive) ----
-  const good = new HyperliquidExchange(
-    Futures.usdm,
-    GOOD_ADDRESS,
-    PRIVATE_KEY,
-    '',
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    false,
-  )
-  const goodBal = await good.futures_getBalance()
-  console.log(
-    `  GOOD address futures_getBalance -> ${JSON.stringify(goodBal.status)} data=${JSON.stringify(goodBal.data)}`,
-  )
-  expect('valid address still returns OK', goodBal.status, 'OK')
-
-  // HL also accepts a bare 40-hex address — the guard must not reject it.
-  const bare = new HyperliquidExchange(
-    Futures.usdm,
-    GOOD_ADDRESS.slice(2),
-    PRIVATE_KEY,
-    '',
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    false,
-  )
-  const bareBal = await bare.futures_getBalance()
-  console.log(
-    `  BARE-hex address futures_getBalance -> ${JSON.stringify(bareBal.status)}`,
-  )
-  expect('bare 40-hex address still returns OK', bareBal.status, 'OK')
-
-  console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
-  process.exit(failures === 0 ? 0 : 1)
+const probe = async (user: string) => {
+  const r = await fetch('https://api.hyperliquid.xyz/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'clearinghouseState', user }),
+  })
+  return r.status
 }
 
-void main()
+describe('hyperliquid bad-address', () => {
+  describe("HL's own acceptance, probed live", () => {
+    // Documents exactly which shapes the guard may reject. Note HL accepts a
+    // BARE 40-hex address (no 0x) — a stricter /^0x…/ guard would break an
+    // account that works today.
+    let goodStatus: number
+    let bareStatus: number
+    let badStatus: number
+    let emptyStatus: number
+
+    before(async () => {
+      goodStatus = await probe(GOOD_ADDRESS)
+      bareStatus = await probe(GOOD_ADDRESS.slice(2))
+      badStatus = await probe(BAD_ADDRESS)
+      emptyStatus = await probe('')
+    })
+
+    expect('HL accepts 0x + 40 hex', () => goodStatus, 200)
+    expect('HL accepts bare 40 hex', () => bareStatus, 200)
+    expect('HL rejects 39 hex (the typo)', () => badStatus, 422)
+    expect('HL rejects empty', () => emptyStatus, 422)
+  })
+
+  describe('what the connector does with that address', () => {
+    let httpCalls: number
+    let bal: any
+    let pos: any
+    let oo: any
+
+    before(async () => {
+      const ex = new HyperliquidExchange(
+        Futures.usdm,
+        BAD_ADDRESS,
+        PRIVATE_KEY,
+        '',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+      )
+
+      const fetchSpy = instrumentFetch()
+      bal = await ex.futures_getBalance()
+      httpCalls = fetchSpy.calls()
+      fetchSpy.restore()
+
+      // Positions and open orders swallow the same per-dex failure, so they
+      // must fail loudly too — an empty position list is what a bot acts on.
+      pos = await ex.futures_getPositions()
+      oo = await ex.getAllOpenOrders()
+    })
+
+    // The fix must fail fast and loud, not retry and lie.
+    expect('no HTTP call made for a malformed address', () => httpCalls, 0)
+    expect('balance does NOT report OK', () => bal.status, 'NOTOK')
+    expect(
+      'balance reason names the misconfiguration',
+      () => /invalid wallet address/i.test(`${bal?.reason ?? ''}`),
+      true,
+    )
+    expect('positions do NOT report OK', () => pos.status, 'NOTOK')
+    expect('open orders do NOT report OK', () => oo.status, 'NOTOK')
+  })
+
+  describe('a GOOD address must still work unchanged (no false positive)', () => {
+    let goodBalStatus: string
+    let bareBalStatus: string
+
+    before(async () => {
+      const good = new HyperliquidExchange(
+        Futures.usdm,
+        GOOD_ADDRESS,
+        PRIVATE_KEY,
+        '',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+      )
+      goodBalStatus = (await good.futures_getBalance()).status
+
+      // HL also accepts a bare 40-hex address — the guard must not reject it.
+      const bare = new HyperliquidExchange(
+        Futures.usdm,
+        GOOD_ADDRESS.slice(2),
+        PRIVATE_KEY,
+        '',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+      )
+      bareBalStatus = (await bare.futures_getBalance()).status
+    })
+
+    expect('valid address still returns OK', () => goodBalStatus, 'OK')
+    expect('bare 40-hex address still returns OK', () => bareBalStatus, 'OK')
+  })
+})

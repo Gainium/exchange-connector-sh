@@ -22,6 +22,7 @@ process.env.NODE_ENV = 'testing'
  *
  * No network / auth needed — every parser is pure.
  */
+import { describe, it } from 'mocha'
 import {
   isKrakenPermissionDenied,
   krakenWithdrawState,
@@ -36,13 +37,15 @@ import {
 } from './keyPermissions'
 import { KeyPermissions } from '../types'
 
-let failures = 0
 function expect(label: string, actual: unknown, want: unknown) {
-  const ok = JSON.stringify(actual) === JSON.stringify(want)
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+  it(label, () => {
+    const ok = JSON.stringify(actual) === JSON.stringify(want)
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
 /** Parsers stamp `checkedAt`; compare everything else. */
@@ -56,7 +59,7 @@ const shape = (p: KeyPermissions | null) =>
         ips: p.ips,
       }
 
-function main() {
+describe('keyPermissions', () => {
   // ── Binance ───────────────────────────────────────────────────────────────
   // REAL: the apiRestrictions shape returned across live Binance keys.
   // Trade-only keys come back enableWithdrawals=false.
@@ -507,9 +510,4 @@ function main() {
     ],
     [true, true, true],
   )
-
-  console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PASS')
-  process.exit(failures ? 1 : 0)
-}
-
-main()
+})

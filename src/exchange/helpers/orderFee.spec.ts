@@ -16,6 +16,7 @@ process.env.NODE_ENV = 'testing'
  * observation; an absent field leaves the estimate in force. Every degenerate
  * input below is asserted to produce `{}` for that reason.
  */
+import { describe, it } from 'mocha'
 import {
   normalizeOrderFee,
   normalizeOrderFees,
@@ -23,17 +24,18 @@ import {
 } from './orderFee'
 import { bitgetSpotFeeDetail } from '../exchanges/bitget/fees'
 
-let failures = 0
 function expect(label: string, actual: unknown, want: unknown) {
-  const ok = JSON.stringify(actual) === JSON.stringify(want)
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(
-      actual,
-    )} want ${JSON.stringify(want)}`,
-  )
+  it(label, () => {
+    const ok = JSON.stringify(actual) === JSON.stringify(want)
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
+describe('orderFee', () => {
 // 1) The happy path: one fee, one currency, ticker passed through upper-cased.
 expect('single fee', normalizeOrderFee('0.42', 'USDT'), {
   feePaid: '0.42',
@@ -156,6 +158,4 @@ for (const [label, input] of [
     {},
   )
 }
-
-console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
-process.exit(failures === 0 ? 0 : 1)
+})

@@ -8,22 +8,28 @@ process.env.NODE_ENV = 'testing'
  * through, so mapOrderStatus() fell through to NEW and main-app never recorded
  * the fill → duplicate buys.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        src/exchange/exchanges/kraken/partial-fill.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — it exercises the pure status-mapping helpers.
  */
+import { describe, it } from 'mocha'
 import { Futures } from '../../types'
 import KrakenExchange from './index'
 
 const ex: any = new KrakenExchange(Futures.usdm, '', '')
 
-let failures = 0
 function expect(label: string, actual: unknown, want: unknown) {
-  const ok = actual === want
-  if (!ok) failures++
-  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`)
+  it(label, () => {
+    const ok = actual === want
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
+
+describe('partial-fill', () => {
 
 // 1) Raw Kraken Futures statuses must map, not fall through to NEW.
 expect('mapOrderStatus(partiallyFilled)', ex.mapOrderStatus('partiallyFilled'), 'PARTIALLY_FILLED')
@@ -67,9 +73,4 @@ expect('open partiallyFilled', openPartial.status, 'PARTIALLY_FILLED')
 expect('derive fully filled', ex.futures_deriveOrderStatus('ENTERED_BOOK', 1, 1), 'FILLED')
 expect('derive untouched no fill', ex.futures_deriveOrderStatus('untouched', 0, 1), 'NEW')
 expect('derive cancelled beats fill', ex.futures_deriveOrderStatus('CANCELLED', 0.4, 1), 'CANCELED')
-
-if (failures) {
-  console.error(`\n${failures} assertion(s) FAILED`)
-  process.exit(1)
-}
-console.log('\nAll assertions passed')
+})

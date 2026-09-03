@@ -10,25 +10,28 @@ process.env.NODE_ENV = 'testing'
  * to main-app as dead: the position stayed on the venue with no take-profit and
  * no stop-loss, and the deal was short by the filled size.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        src/exchange/exchanges/kraken/cancel-verdict.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — it exercises the pure verdict reader.
  */
+import { describe, it } from 'mocha'
 import { Futures } from '../../types'
 import KrakenExchange from './index'
 
 const ex: any = new KrakenExchange(Futures.usdm, '', '')
 
-let failures = 0
 function check(label: string, actual: unknown, want: unknown) {
-  const ok = JSON.stringify(actual) === JSON.stringify(want)
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+  it(label, () => {
+    const ok = JSON.stringify(actual) === JSON.stringify(want)
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
+describe('cancel-verdict', () => {
 const orderJson = (over: Record<string, unknown> = {}) => ({
   orderId: 'a2704204-0452-4579-bbc1-c22327c2dd13',
   cliOrdId: 'D-BO-K759dVXOwvpaICs9d5C4PAqeDTsA1U',
@@ -162,10 +165,4 @@ check(
   ex.futures_readCancelOutcome({ status: 'filled', orderEvents: [] }).unknown,
   true,
 )
-
-console.log(
-  failures === 0
-    ? '\nAll cancel-verdict checks passed'
-    : `\n${failures} FAILED`,
-)
-process.exit(failures === 0 ? 0 : 1)
+})

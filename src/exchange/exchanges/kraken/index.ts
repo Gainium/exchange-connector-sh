@@ -2104,10 +2104,86 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * What an exact QueryOrders lookup said about a txid. Three answers, kept
+   * apart because a caller must act differently on each:
+   *
+   *   - `found`   — the venue has the order, open or closed.
+   *   - `unknown` — the venue ANSWERED and does not know the txid. The only
+   *                 answer an order may ever be retired on.
+   *   - `failed`  — the call did not succeed (nonce, rate limit, outage,
+   *                 transport). Says nothing about the order. `thrown` tells
+   *                 a rejected request (whose error object comes from the SDK
+   *                 and carries live credentials — never log it raw) from an
+   *                 error array delivered in a 200 body.
+   *
+   * The distinction is the whole point. Collapsing `unknown` and `failed`
+   * into one "could not resolve" is how a transient miss on a FILLED order
+   * gets reported to the caller as the venue denying it.
+   */
+  private async querySpotOrderByTxid(
+    txid: string,
+    symbol: string,
+    clientOrderId: string,
+    timeProfile: TimeProfile,
+  ): Promise<
+    | { kind: 'found'; order: BaseReturn<CommonOrder> }
+    | { kind: 'unknown'; reason: string }
+    | { kind: 'failed'; error: Error; thrown: boolean }
+  > {
+    try {
+      timeProfile =
+        (await this.checkLimits('getOrders', symbol, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      const result = await this.spotClient!.getOrders({ txid })
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (result.error?.length) {
+        const reason = result.error.join(', ')
+        // Kraken's own spelling of "no such order". Anything else in the
+        // error array is about the CALL — a nonce, a rate limit, an outage.
+        return /EOrder:(Unknown|Invalid) order/.test(reason)
+          ? { kind: 'unknown', reason }
+          : { kind: 'failed', error: new Error(reason), thrown: false }
+      }
+      if (!result.result) {
+        return {
+          kind: 'failed',
+          error: new Error('Failed to get orders'),
+          thrown: false,
+        }
+      }
+      const orderData = result.result[txid]
+      if (!orderData) {
+        return {
+          kind: 'unknown',
+          reason: `QueryOrders has no record of txid ${txid}`,
+        }
+      }
+      return {
+        kind: 'found',
+        order: this.returnGood<CommonOrder>(timeProfile)(
+          await this.convertSpotQueryOrder(
+            txid,
+            orderData,
+            symbol,
+            clientOrderId,
+          ),
+        ),
+      }
+    } catch (error) {
+      this.endProfilerTime(timeProfile, 'exchange')
+      return { kind: 'failed', error: error as Error, thrown: true }
+    }
+  }
+
+  /**
    * Resolve a spot order by its Kraken txid via QueryOrders. Exact —
    * immune to the shared-userref collision in getOrder() — and works
-   * regardless of open/closed state. Returns null when the txid can't
-   * be resolved (caller falls back to the legacy userref lookup).
+   * regardless of open/closed state. Returns null when the txid can't be
+   * resolved right now, for the ONE caller that may legitimately wait and ask
+   * again: `openOrder`, which holds a txid the venue issued seconds ago and
+   * knows QueryOrders can lag behind it. `getOrder` must not use this — it
+   * has to know WHY, and asks {@link querySpotOrderByTxid} directly.
    */
   private async getSpotOrderByTxid(
     txid: string,
@@ -2118,47 +2194,33 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     if (!this.spotClient) {
       return null
     }
-    try {
-      timeProfile =
-        (await this.checkLimits('getOrders', symbol, timeProfile)) ||
-        timeProfile
-      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const result = await this.spotClient.getOrders({ txid })
-      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      if (!result.result || result.error?.length) {
-        return null
-      }
-      const orderData = result.result[txid]
-      if (!orderData) {
-        return null
-      }
-      return this.returnGood<CommonOrder>(timeProfile)(
-        await this.convertSpotQueryOrder(
-          txid,
-          orderData,
-          symbol,
-          clientOrderId,
-        ),
-      )
-    } catch (error) {
-      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+    const lookup = await this.querySpotOrderByTxid(
+      txid,
+      symbol,
+      clientOrderId,
+      timeProfile,
+    )
+    if (lookup.kind === 'found') {
+      return lookup.order
+    }
+    if (lookup.kind === 'failed' && lookup.thrown) {
       // A lockout or rate-limit rejection is NOT "this txid is unresolvable".
       // Returning null here sends the caller down the userref path, which
       // issues a SECOND request to the very account Kraken has just told us to
       // stop calling — doubling the load at the only moment it must not, and
       // extending the lockout that caused it (#543). Rethrow so the caller's
       // own error handling backs off instead of retrying through this path.
-      const msg = `${(error as Error)?.message ?? ''} ${safeStringify(error)}`
+      const msg = `${lookup.error?.message ?? ''} ${safeStringify(lookup.error)}`
       if (
         msg.includes('EGeneral:Temporary lockout') ||
         msg.includes('EAPI:Rate limit exceeded') ||
         msg.includes('EGeneral:Too many requests')
       ) {
-        throw error
+        throw lookup.error
       }
-      // Anything else really is non-fatal — caller falls back to getOrder().
-      return null
     }
+    // Anything else really is non-fatal — caller falls back to getOrder().
+    return null
   }
 
   async getOrder(
@@ -2384,15 +2446,36 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     // every Gainium id shares a prefix. This is what repairs missed-fill
     // reconcile for resting Kraken spot orders (forum #4890).
     if (this.isKrakenSpotTxid(newClientOrderId)) {
-      const byTxid = await this.getSpotOrderByTxid(
+      const lookup = await this.querySpotOrderByTxid(
         newClientOrderId,
         symbol,
         newClientOrderId,
         timeProfile,
       )
-      if (byTxid) {
-        return byTxid
+      if (lookup.kind === 'found') {
+        return lookup.order
       }
+      // Never fall through to the userref scan for a txid. `parseInt('O…', 16)`
+      // is NaN, so that scan cannot find the order and always ends in "Order
+      // not found in open orders" — a definitive-looking negative manufactured
+      // from a lookup that may merely have failed, about the one list a FILLED
+      // order is guaranteed to be absent from. A caller that trusted the
+      // wording retired three filled safety orders as phantoms on a restart,
+      // and nothing was logged here because the failure had been swallowed.
+      // Report what QueryOrders actually said instead: a venue denial is
+      // worded so main-app's `isDefinitiveOrderNotFound` matches it; a failed
+      // call keeps its real reason, so it is logged with it, retried here when
+      // it is on the retry list (a nonce collision is), and read as ambiguous
+      // by the caller when it is not.
+      return this.handleKrakenErrors(
+        this.getOrder,
+        { symbol, newClientOrderId },
+        timeProfile,
+      )(
+        lookup.kind === 'unknown'
+          ? new Error(`Order not found: ${lookup.reason}`)
+          : lookup.error,
+      )
     }
 
     timeProfile =

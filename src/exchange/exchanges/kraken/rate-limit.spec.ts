@@ -15,24 +15,27 @@ process.env.NODE_ENV = 'testing'
  * nearly every error line carried this signature, with **zero** "Retrying
  * after" lines.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        src/exchange/exchanges/kraken/rate-limit.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — it drives handleKrakenErrors with a stub callback.
  */
+import { describe, it, before } from 'mocha'
 import { Futures } from '../../types'
 import KrakenExchange from './index'
 import limitHelper from './limit'
 
 const ex: any = new KrakenExchange(Futures.null, '', '')
 
-let failures = 0
-function expect(label: string, actual: unknown, want: unknown) {
-  const ok = actual === want
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+function expect(label: string, getActual: () => unknown, want: unknown) {
+  it(label, () => {
+    const actual = getActual()
+    const ok = actual === want
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
 /**
@@ -67,88 +70,104 @@ async function drive(error: string, throwTimes: number) {
   return { calls, waits, res }
 }
 
-async function main() {
-  // ── 1) The classification predicates, straight off the instance ────────────
-  const retryable = (msg: string) =>
-    ex.retryErrors.some((code: string) => msg.includes(code))
+describe('kraken rate-limit', () => {
+  describe('the classification predicates, straight off the instance', () => {
+    const retryable = (msg: string) =>
+      ex.retryErrors.some((code: string) => msg.includes(code))
 
-  expect(
-    'retryErrors matches "EGeneral:Too many requests"',
-    retryable('EGeneral:Too many requests'),
-    true,
-  )
-  // Regression guards: the pre-existing classes must keep matching.
-  expect(
-    'retryErrors still matches "EAPI:Rate limit exceeded"',
-    retryable('EAPI:Rate limit exceeded'),
-    true,
-  )
-  expect(
-    'retryErrors still matches "apiLimitExceeded"',
-    retryable('apiLimitExceeded'),
-    true,
-  )
-  expect(
-    'retryErrors still matches "EGeneral:Temporary lockout"',
-    retryable('EGeneral:Temporary lockout'),
-    true,
-  )
-  // A genuine rejection must NOT become retryable.
-  expect(
-    'retryErrors does NOT match "EOrder:Insufficient funds"',
-    retryable('EOrder:Insufficient funds'),
-    false,
-  )
+    expect(
+      'retryErrors matches "EGeneral:Too many requests"',
+      () => retryable('EGeneral:Too many requests'),
+      true,
+    )
+    // Regression guards: the pre-existing classes must keep matching.
+    expect(
+      'retryErrors still matches "EAPI:Rate limit exceeded"',
+      () => retryable('EAPI:Rate limit exceeded'),
+      true,
+    )
+    expect(
+      'retryErrors still matches "apiLimitExceeded"',
+      () => retryable('apiLimitExceeded'),
+      true,
+    )
+    expect(
+      'retryErrors still matches "EGeneral:Temporary lockout"',
+      () => retryable('EGeneral:Temporary lockout'),
+      true,
+    )
+    // A genuine rejection must NOT become retryable.
+    expect(
+      'retryErrors does NOT match "EOrder:Insufficient funds"',
+      () => retryable('EOrder:Insufficient funds'),
+      false,
+    )
+  })
 
-  // ── 2) The public IP limit must NOT drop an account's private tier ─────────
+  // The public IP limit must NOT drop an account's private tier.
   // noteRateLimited is the per-account adaptive downgrade; an IP-level public
   // rejection says nothing about any account's private budget.
-  let noted: string[] = []
-  const origNote = limitHelper.noteRateLimited
-  ;(limitHelper as any).noteRateLimited = (k?: string) => {
-    noted.push(String(k))
-  }
+  describe("the public IP limit must NOT drop an account's private tier", () => {
+    let publicNoted: string[]
+    let accountNoted: string[]
 
-  noted = []
-  await drive('EGeneral:Too many requests', 1)
-  expect(
-    'public "Too many requests" does NOT call noteRateLimited',
-    noted.length,
-    0,
-  )
+    before(async () => {
+      const origNote = limitHelper.noteRateLimited
+      let noted: string[] = []
+      ;(limitHelper as any).noteRateLimited = (k?: string) => {
+        noted.push(String(k))
+      }
 
-  noted = []
-  await drive('EAPI:Rate limit exceeded', 1)
-  expect(
-    'account "Rate limit exceeded" still calls noteRateLimited',
-    noted.length,
-    1,
-  )
+      noted = []
+      await drive('EGeneral:Too many requests', 1)
+      publicNoted = noted
 
-  ;(limitHelper as any).noteRateLimited = origNote
+      noted = []
+      await drive('EAPI:Rate limit exceeded', 1)
+      accountNoted = noted
+      ;(limitHelper as any).noteRateLimited = origNote
+    })
 
-  // ── 3) End-to-end: the handler now retries with rate-limit pacing ──────────
-  const once = await drive('EGeneral:Too many requests', 1)
-  expect('transient public 429 is retried (callback runs twice)', once.calls, 2)
-  expect('backoff used the rate-limit wait (30s)', once.waits[0], 30000)
-  expect('and the retry succeeds', (once.res as any)?.status, 'OK')
+    expect(
+      'public "Too many requests" does NOT call noteRateLimited',
+      () => publicNoted.length,
+      0,
+    )
+    expect(
+      'account "Rate limit exceeded" still calls noteRateLimited',
+      () => accountNoted.length,
+      1,
+    )
+  })
 
-  // Sustained saturation: capped at 3 attempts, not this.retry (10).
-  const sustained = await drive('EGeneral:Too many requests', 99)
-  expect('sustained saturation caps at 3 attempts', sustained.calls, 3)
-  expect(
-    'every wait is the 30s rate-limit pacing (never the 1-10s ramp)',
-    sustained.waits.every((w) => w === 30000),
-    true,
-  )
-  expect(
-    'gives up as NOTOK rather than looping',
-    (sustained.res as any)?.status,
-    'NOTOK',
-  )
+  describe('end-to-end: the handler now retries with rate-limit pacing', () => {
+    let once: { calls: number; waits: number[]; res: any }
+    let sustained: { calls: number; waits: number[]; res: any }
 
-  console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PASS')
-  process.exit(failures ? 1 : 0)
-}
+    before(async () => {
+      once = await drive('EGeneral:Too many requests', 1)
+      // Sustained saturation: capped at 3 attempts, not this.retry (10).
+      sustained = await drive('EGeneral:Too many requests', 99)
+    })
 
-main()
+    expect(
+      'transient public 429 is retried (callback runs twice)',
+      () => once.calls,
+      2,
+    )
+    expect('backoff used the rate-limit wait (30s)', () => once.waits[0], 30000)
+    expect('and the retry succeeds', () => once.res?.status, 'OK')
+
+    expect('sustained saturation caps at 3 attempts', () => sustained.calls, 3)
+    expect(
+      'every wait is the 30s rate-limit pacing (never the 1-10s ramp)',
+      () => sustained.waits.every((w) => w === 30000),
+      true,
+    )
+    expect(
+      'gives up as NOTOK rather than looping',
+      () => sustained.res?.status,
+      'NOTOK',
+    )
+  })
+})

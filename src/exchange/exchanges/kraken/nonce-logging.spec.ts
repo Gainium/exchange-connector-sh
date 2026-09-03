@@ -19,11 +19,11 @@ process.env.NODE_ENV = 'testing'
  * `API-Key` / `API-Sign` headers. So this spec asserts both halves: the nonce
  * is present, and nothing else from that object came with it.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        core/src/exchange/exchanges/kraken/nonce-logging.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — it drives handleKrakenErrors with a stub callback.
  */
+import { describe, it, before } from 'mocha'
 import { Logger } from '@nestjs/common'
 import { Futures } from '../../types'
 import KrakenExchange from './index'
@@ -31,13 +31,16 @@ import { krakenNonceFromError, nextKrakenNonce } from '../../../kraken-custom'
 
 const ex: any = new KrakenExchange(Futures.null, '', '')
 
-let failures = 0
-function expect(label: string, actual: unknown, want: unknown) {
-  const ok = actual === want
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+function expect(label: string, getActual: () => unknown, want: unknown) {
+  it(label, () => {
+    const actual = getActual()
+    const ok = actual === want
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
 const LIVE_KEY = 'LIVEKEY/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
@@ -100,110 +103,133 @@ async function logLineFor(err: any) {
   return { msg, details }
 }
 
-async function main() {
-  // ── 1) The nonce reaches the log line ─────────────────────────────────────
-  const { msg, details } = await logLineFor(krakenNonceError('1786100000123'))
+describe('kraken nonce-logging', () => {
+  describe('the nonce reaches the log line', () => {
+    let msg: string
+    let details: string
 
-  expect(
-    'the message line is unchanged',
-    msg,
-    '[200] Kraken API error: EAPI:Invalid nonce',
-  )
-  expect(
-    'Details names the nonce the rejected request carried',
-    details.includes('"nonce":"1786100000123"'),
-    true,
-  )
+    before(async () => {
+      ;({ msg, details } = await logLineFor(krakenNonceError('1786100000123')))
+    })
 
-  // ── 2) …and nothing else from requestParams came with it ──────────────────
-  expect('the live API-Key does not appear', details.includes(LIVE_KEY), false)
-  expect(
-    'the live API-Sign does not appear',
-    details.includes(LIVE_SIGN),
-    false,
-  )
-  expect(
-    'no header block leaked in at all',
-    /API-Key|API-Sign/.test(details),
-    false,
-  )
+    expect(
+      'the message line is unchanged',
+      () => msg,
+      '[200] Kraken API error: EAPI:Invalid nonce',
+    )
+    expect(
+      'Details names the nonce the rejected request carried',
+      () => details.includes('"nonce":"1786100000123"'),
+      true,
+    )
 
-  // ── 3) A duplicate is now visible as a duplicate ──────────────────────────
-  // The distinction the +24h check could not make: same value twice = the
-  // counter regressed; two different values = concurrency, counter is fine.
-  const a = await logLineFor(krakenNonceError('1786100000200'))
-  const b = await logLineFor(krakenNonceError('1786100000200'))
-  const nonceOf = (d: string) => /"nonce":"(\d+)"/.exec(d)?.[1]
-  expect(
-    'two rejections carrying one nonce are readable as duplicates',
-    nonceOf(a.details) === nonceOf(b.details),
-    true,
-  )
+    // …and nothing else from requestParams came with it.
+    expect(
+      'the live API-Key does not appear',
+      () => details.includes(LIVE_KEY),
+      false,
+    )
+    expect(
+      'the live API-Sign does not appear',
+      () => details.includes(LIVE_SIGN),
+      false,
+    )
+    expect(
+      'no header block leaked in at all',
+      () => /API-Key|API-Sign/.test(details),
+      false,
+    )
+  })
 
-  // ── 4) Extractor edge cases ───────────────────────────────────────────────
-  expect(
-    'a pre-serialized urlencoded body still yields the nonce',
-    krakenNonceFromError({
-      requestParams: { options: { data: 'nonce=1786100000300&pair=XBTUSD' } },
-    }),
-    '1786100000300',
-  )
-  expect(
-    'a JSON-string body still yields the nonce',
-    krakenNonceFromError({
-      requestParams: {
-        options: { data: '{"nonce":"1786100000400","pair":"XBTUSD"}' },
-      },
-    }),
-    '1786100000400',
-  )
-  expect(
-    'the futures path (signed with an empty nonce) yields nothing',
-    krakenNonceFromError({
-      requestParams: { options: { data: 'orderType=mkt&symbol=PF_XBTUSD' } },
-    }),
-    undefined,
-  )
-  expect(
-    'an error this connector raised itself yields nothing',
-    krakenNonceFromError(new Error('wouldNotReducePosition')),
-    undefined,
-  )
-  expect(
-    'a non-numeric nonce is rejected rather than logged',
-    krakenNonceFromError({
-      requestParams: { options: { data: { nonce: LIVE_SIGN } } },
-    }),
-    undefined,
-  )
-  expect(
-    'undefined input is handled',
-    krakenNonceFromError(undefined),
-    undefined,
-  )
+  describe('a duplicate is now visible as a duplicate', () => {
+    // The distinction the +24h check could not make: same value twice = the
+    // counter regressed; two different values = concurrency, counter is fine.
+    let a: { details: string }
+    let b: { details: string }
 
-  // ── 5) The counter itself is still strictly increasing (regression guard) ──
-  // This is what a duplicate in the log would now disprove; keep it honest.
-  const key = 'spec-key'
-  const seen = new Set<string>()
-  let monotonic = true
-  let prev = -1
-  for (let i = 0; i < 5000; i++) {
-    const n = Number(nextKrakenNonce(key))
-    if (n <= prev) monotonic = false
-    prev = n
-    seen.add(String(n))
-  }
-  expect('5000 nonces on one key are all distinct', seen.size, 5000)
-  expect('…and strictly increasing', monotonic, true)
+    before(async () => {
+      a = await logLineFor(krakenNonceError('1786100000200'))
+      b = await logLineFor(krakenNonceError('1786100000200'))
+    })
 
-  console.log(
-    failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`,
-  )
-  process.exit(failures === 0 ? 0 : 1)
-}
+    const nonceOf = (d: string) => /"nonce":"(\d+)"/.exec(d)?.[1]
+    expect(
+      'two rejections carrying one nonce are readable as duplicates',
+      () => nonceOf(a.details) === nonceOf(b.details),
+      true,
+    )
+  })
 
-main().catch((e) => {
-  console.error(e)
-  process.exit(1)
+  describe('extractor edge cases', () => {
+    expect(
+      'a pre-serialized urlencoded body still yields the nonce',
+      () =>
+        krakenNonceFromError({
+          requestParams: {
+            options: { data: 'nonce=1786100000300&pair=XBTUSD' },
+          },
+        }),
+      '1786100000300',
+    )
+    expect(
+      'a JSON-string body still yields the nonce',
+      () =>
+        krakenNonceFromError({
+          requestParams: {
+            options: { data: '{"nonce":"1786100000400","pair":"XBTUSD"}' },
+          },
+        }),
+      '1786100000400',
+    )
+    expect(
+      'the futures path (signed with an empty nonce) yields nothing',
+      () =>
+        krakenNonceFromError({
+          requestParams: {
+            options: { data: 'orderType=mkt&symbol=PF_XBTUSD' },
+          },
+        }),
+      undefined,
+    )
+    expect(
+      'an error this connector raised itself yields nothing',
+      () => krakenNonceFromError(new Error('wouldNotReducePosition')),
+      undefined,
+    )
+    expect(
+      'a non-numeric nonce is rejected rather than logged',
+      () =>
+        krakenNonceFromError({
+          requestParams: { options: { data: { nonce: LIVE_SIGN } } },
+        }),
+      undefined,
+    )
+    expect(
+      'undefined input is handled',
+      () => krakenNonceFromError(undefined),
+      undefined,
+    )
+  })
+
+  describe('the counter itself is still strictly increasing (regression guard)', () => {
+    // This is what a duplicate in the log would now disprove; keep it honest.
+    let size = 0
+    let monotonic = true
+
+    before(() => {
+      const key = 'spec-key'
+      const seen = new Set<string>()
+      let prev = -1
+      for (let i = 0; i < 5000; i++) {
+        const n = Number(nextKrakenNonce(key))
+        if (n <= prev) monotonic = false
+        prev = n
+        seen.add(String(n))
+      }
+      size = seen.size
+    })
+
+    expect('5000 nonces on one key are all distinct', () => size, 5000)
+    expect('…and strictly increasing', () => monotonic, true)
+  })
 })

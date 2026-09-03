@@ -30,24 +30,27 @@ process.env.NODE_ENV = 'testing'
  * class in this exact handler by classifying it and capping/pacing its retries
  * (see rate-limit.spec.ts). This applies that pattern to the outage class.
  *
- * Run: npx ts-node --files --project tsconfig.json \
- *        core/src/exchange/exchanges/kraken/outage-backoff.spec.ts
+ * Run: `npm test` (mocha).
  *
  * No network / auth needed — it drives handleKrakenErrors with a stub callback.
  */
+import { describe, it, before } from 'mocha'
 import { Logger } from '@nestjs/common'
 import { Futures } from '../../types'
 import KrakenExchange from './index'
 
 const ex: any = new KrakenExchange(Futures.null, '', '')
 
-let failures = 0
-function expect(label: string, actual: unknown, want: unknown) {
-  const ok = actual === want
-  if (!ok) failures++
-  console.log(
-    `${ok ? 'PASS' : 'FAIL'}  ${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
-  )
+function expect(label: string, getActual: () => unknown, want: unknown) {
+  it(label, () => {
+    const actual = getActual()
+    const ok = actual === want
+    if (!ok) {
+      throw new Error(
+        `${label}: got ${JSON.stringify(actual)} want ${JSON.stringify(want)}`,
+      )
+    }
+  })
 }
 
 /**
@@ -109,59 +112,80 @@ async function drive(err: any, throwTimes: number) {
   return { calls, waits, res, errorLines, totalWaitS }
 }
 
-async function main() {
-  // ── 1) The prod error really does render as the line the monitor counted ───
-  const err503 = krakenHttpError(503, 'Service Unavailable')
-  let logged = ''
-  const origError = Logger.error
-  ;(Logger as any).error = (msg: any) => {
-    logged = String(msg)
-  }
-  await ex.handleKrakenErrors(async () => ({}), ex.getEmptyTimeProfile())(
-    err503,
-  )
-  ;(Logger as any).error = origError
-  expect(
-    'a Kraken 503 logs the exact prod line "[503] Kraken API error: Service Unavailable"',
-    logged,
-    '[503] Kraken API error: Service Unavailable',
-  )
+describe('kraken outage-backoff', () => {
+  // The prod error really does render as the line the monitor counted.
+  describe('the prod 503 line', () => {
+    let logged: string
 
-  // The name-based codes do NOT catch it — retryability comes from '503' only.
-  expect(
-    '"EService:Unavailable" does NOT substring-match "Service Unavailable"',
-    'EService:Unavailable'.includes('Service Unavailable'),
-    false,
-  )
-  expect(
-    'the numeric 503 entry is what makes it retryable',
-    ex.retryErrors.some((c: string) => String(503).includes(c)),
-    true,
-  )
+    before(async () => {
+      const err503 = krakenHttpError(503, 'Service Unavailable')
+      const origError = Logger.error
+      ;(Logger as any).error = (msg: any) => {
+        logged = String(msg)
+      }
+      await ex.handleKrakenErrors(
+        async () => ({}),
+        ex.getEmptyTimeProfile(),
+      )(err503)
+      ;(Logger as any).error = origError
+    })
 
-  // ── 2) A brief blip must still self-heal (regression guard) ────────────────
-  const blip = await drive(err503, 1)
-  expect('a one-off 503 is still retried', blip.calls, 2)
-  expect('and the retry succeeds', (blip.res as any)?.status, 'OK')
+    expect(
+      'a Kraken 503 logs the exact prod line "[503] Kraken API error: Service Unavailable"',
+      () => logged,
+      '[503] Kraken API error: Service Unavailable',
+    )
+    // The name-based codes do NOT catch it — retryability comes from '503' only.
+    expect(
+      '"EService:Unavailable" does NOT substring-match "Service Unavailable"',
+      () => 'EService:Unavailable'.includes('Service Unavailable'),
+      false,
+    )
+    expect(
+      'the numeric 503 entry is what makes it retryable',
+      () => ex.retryErrors.some((c: string) => String(503).includes(c)),
+      true,
+    )
+  })
 
-  // ── 3) A SUSTAINED outage — this is the bug ───────────────────────────────
-  const outage = await drive(err503, 99)
-  console.log(
-    `\n  sustained 503: attempts=${outage.calls} errorLines=${outage.errorLines} ` +
-      `waits=[${outage.waits.join(',')}] totalWait=${outage.totalWaitS}s\n`,
-  )
-  expect('sustained outage caps attempts at 3', outage.calls, 3)
-  expect('…so it logs 3 error lines per call, not 10', outage.errorLines, 3)
-  expect(
-    'and gives up in well under the old 65s ladder',
-    outage.totalWaitS <= 30,
-    true,
-  )
-  expect(
-    'gives up as NOTOK rather than looping',
-    (outage.res as any)?.status,
-    'NOTOK',
-  )
+  // A brief blip must still self-heal (regression guard).
+  describe('a brief blip', () => {
+    let blip: { calls: number; res: any }
+    before(async () => {
+      blip = await drive(krakenHttpError(503, 'Service Unavailable'), 1)
+    })
+    expect('a one-off 503 is still retried', () => blip.calls, 2)
+    expect('and the retry succeeds', () => blip.res?.status, 'OK')
+  })
+
+  // A SUSTAINED outage — this is the bug.
+  describe('a sustained outage', () => {
+    let outage: {
+      calls: number
+      errorLines: number
+      totalWaitS: number
+      res: any
+    }
+    before(async () => {
+      outage = await drive(krakenHttpError(503, 'Service Unavailable'), 99)
+    })
+    expect('sustained outage caps attempts at 3', () => outage.calls, 3)
+    expect(
+      '…so it logs 3 error lines per call, not 10',
+      () => outage.errorLines,
+      3,
+    )
+    expect(
+      'and gives up in well under the old 65s ladder',
+      () => outage.totalWaitS <= 30,
+      true,
+    )
+    expect(
+      'gives up as NOTOK rather than looping',
+      () => outage.res?.status,
+      'NOTOK',
+    )
+  })
 
   // Same treatment for the other provider-outage spellings/statuses.
   for (const [status, reason] of [
@@ -169,66 +193,104 @@ async function main() {
     [504, 'Gateway Timeout'],
     [520, 'Web Server Returned an Unknown Error'],
   ] as [number, string][]) {
-    const r = await drive(krakenHttpError(status, reason), 99)
-    expect(`HTTP ${status} is capped the same way`, r.calls, 3)
+    describe(`HTTP ${status}`, () => {
+      let calls: number
+      before(async () => {
+        const r = await drive(krakenHttpError(status, reason), 99)
+        calls = r.calls
+      })
+      expect(`HTTP ${status} is capped the same way`, () => calls, 3)
+    })
   }
-  const named = await drive(
-    Object.assign(new Error('EService:Unavailable'), {
-      body: { error: ['EService:Unavailable'] },
-    }),
-    99,
-  )
-  expect('the spot code "EService:Unavailable" is capped too', named.calls, 3)
-  const busy = await drive(
-    Object.assign(new Error('EService:Busy'), {
-      body: { error: ['EService:Busy'] },
-    }),
-    99,
-  )
-  expect('"EService:Busy" is capped too', busy.calls, 3)
 
-  // ── 4) Regression guards: the OTHER classes keep their own pacing ──────────
-  const rl = await drive(
-    Object.assign(new Error('EGeneral:Too many requests'), {
-      body: { error: ['EGeneral:Too many requests'] },
-    }),
-    99,
-  )
-  expect('rate-limit class still caps at 3 attempts (bug #181)', rl.calls, 3)
-  expect(
-    'rate-limit class still waits 30s, not the outage pacing',
-    rl.waits.every((w) => w === 30000),
-    true,
-  )
+  describe('the spot code "EService:Unavailable"', () => {
+    let calls: number
+    before(async () => {
+      const named = await drive(
+        Object.assign(new Error('EService:Unavailable'), {
+          body: { error: ['EService:Unavailable'] },
+        }),
+        99,
+      )
+      calls = named.calls
+    })
+    expect('the spot code "EService:Unavailable" is capped too', () => calls, 3)
+  })
 
-  const nonce = await drive(
-    Object.assign(new Error('EAPI:Invalid nonce'), {
-      body: { error: ['EAPI:Invalid nonce'] },
-    }),
-    99,
-  )
-  expect(
-    'ordinary transients keep the full 10-attempt ladder',
-    nonce.calls,
-    10,
-  )
-  // `attempts` starts at 1 (getEmptyTimeProfile), so the ramp opens at 2s.
-  expect(
-    'ordinary transients keep the 2s→10s exponential ramp',
-    nonce.waits.join(','),
-    '2000,4000,8000,10000,10000,10000,10000,10000,10000',
-  )
+  describe('"EService:Busy"', () => {
+    let calls: number
+    before(async () => {
+      const busy = await drive(
+        Object.assign(new Error('EService:Busy'), {
+          body: { error: ['EService:Busy'] },
+        }),
+        99,
+      )
+      calls = busy.calls
+    })
+    expect('"EService:Busy" is capped too', () => calls, 3)
+  })
 
-  const rejected = await drive(
-    Object.assign(new Error('EOrder:Insufficient funds'), {
-      body: { error: ['EOrder:Insufficient funds'] },
-    }),
-    99,
-  )
-  expect('a genuine rejection is still never retried', rejected.calls, 1)
+  // Regression guards: the OTHER classes keep their own pacing.
+  describe('rate-limit class (bug #181)', () => {
+    let rl: { calls: number; waits: number[] }
+    before(async () => {
+      rl = await drive(
+        Object.assign(new Error('EGeneral:Too many requests'), {
+          body: { error: ['EGeneral:Too many requests'] },
+        }),
+        99,
+      )
+    })
+    expect(
+      'rate-limit class still caps at 3 attempts (bug #181)',
+      () => rl.calls,
+      3,
+    )
+    expect(
+      'rate-limit class still waits 30s, not the outage pacing',
+      () => rl.waits.every((w) => w === 30000),
+      true,
+    )
+  })
 
-  console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL PASS')
-  process.exit(failures ? 1 : 0)
-}
+  describe('ordinary transients', () => {
+    let nonce: { calls: number; waits: number[] }
+    before(async () => {
+      nonce = await drive(
+        Object.assign(new Error('EAPI:Invalid nonce'), {
+          body: { error: ['EAPI:Invalid nonce'] },
+        }),
+        99,
+      )
+    })
+    expect(
+      'ordinary transients keep the full 10-attempt ladder',
+      () => nonce.calls,
+      10,
+    )
+    // `attempts` starts at 1 (getEmptyTimeProfile), so the ramp opens at 2s.
+    expect(
+      'ordinary transients keep the 2s→10s exponential ramp',
+      () => nonce.waits.join(','),
+      '2000,4000,8000,10000,10000,10000,10000,10000,10000',
+    )
+  })
 
-main()
+  describe('a genuine rejection', () => {
+    let rejected: { calls: number }
+    before(async () => {
+      rejected = await drive(
+        Object.assign(new Error('EOrder:Insufficient funds'), {
+          body: { error: ['EOrder:Insufficient funds'] },
+        }),
+        99,
+      )
+    })
+    expect(
+      'a genuine rejection is still never retried',
+      () => rejected.calls,
+      1,
+    )
+  })
+})

@@ -102,11 +102,7 @@ describe('hyperliquid master-key', () => {
     true,
   )
   // HL credentials are bearer keys — there is no IP allowlist to report.
-  expect(
-    'hyperliquid keys are never IP-bound',
-    () => agent.ipRestricted,
-    'no',
-  )
+  expect('hyperliquid keys are never IP-bound', () => agent.ipRestricted, 'no')
 
   expect('undecodable secret → unknown', () => badSecret.withdraw, 'unknown')
   expect(

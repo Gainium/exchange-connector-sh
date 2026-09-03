@@ -107,7 +107,7 @@ describe('kraken rate-limit', () => {
   // The public IP limit must NOT drop an account's private tier.
   // noteRateLimited is the per-account adaptive downgrade; an IP-level public
   // rejection says nothing about any account's private budget.
-  describe('the public IP limit must NOT drop an account\'s private tier', () => {
+  describe("the public IP limit must NOT drop an account's private tier", () => {
     let publicNoted: string[]
     let accountNoted: string[]
 
@@ -125,7 +125,6 @@ describe('kraken rate-limit', () => {
       noted = []
       await drive('EAPI:Rate limit exceeded', 1)
       accountNoted = noted
-
       ;(limitHelper as any).noteRateLimited = origNote
     })
 

@@ -109,9 +109,7 @@ describe('kraken nonce-logging', () => {
     let details: string
 
     before(async () => {
-      ;({ msg, details } = await logLineFor(
-        krakenNonceError('1786100000123'),
-      ))
+      ;({ msg, details } = await logLineFor(krakenNonceError('1786100000123')))
     })
 
     expect(
@@ -126,7 +124,11 @@ describe('kraken nonce-logging', () => {
     )
 
     // …and nothing else from requestParams came with it.
-    expect('the live API-Key does not appear', () => details.includes(LIVE_KEY), false)
+    expect(
+      'the live API-Key does not appear',
+      () => details.includes(LIVE_KEY),
+      false,
+    )
     expect(
       'the live API-Sign does not appear',
       () => details.includes(LIVE_SIGN),
@@ -163,7 +165,9 @@ describe('kraken nonce-logging', () => {
       'a pre-serialized urlencoded body still yields the nonce',
       () =>
         krakenNonceFromError({
-          requestParams: { options: { data: 'nonce=1786100000300&pair=XBTUSD' } },
+          requestParams: {
+            options: { data: 'nonce=1786100000300&pair=XBTUSD' },
+          },
         }),
       '1786100000300',
     )
@@ -181,7 +185,9 @@ describe('kraken nonce-logging', () => {
       'the futures path (signed with an empty nonce) yields nothing',
       () =>
         krakenNonceFromError({
-          requestParams: { options: { data: 'orderType=mkt&symbol=PF_XBTUSD' } },
+          requestParams: {
+            options: { data: 'orderType=mkt&symbol=PF_XBTUSD' },
+          },
         }),
       undefined,
     )
@@ -198,7 +204,11 @@ describe('kraken nonce-logging', () => {
         }),
       undefined,
     )
-    expect('undefined input is handled', () => krakenNonceFromError(undefined), undefined)
+    expect(
+      'undefined input is handled',
+      () => krakenNonceFromError(undefined),
+      undefined,
+    )
   })
 
   describe('the counter itself is still strictly increasing (regression guard)', () => {

@@ -131,7 +131,11 @@ describe('coinbase unauthorized-retry', () => {
       ])
     })
 
-    check('other errors | still retrying after 9s', () => settled, 'still-retrying')
+    check(
+      'other errors | still retrying after 9s',
+      () => settled,
+      'still-retrying',
+    )
     check('other errors | more than one attempt', () => calls() > 1, true)
   })
 })

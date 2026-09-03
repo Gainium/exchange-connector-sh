@@ -101,9 +101,17 @@ describe('kraken phantom-order-status', () => {
         newClientOrderId: CLI_ORD_ID,
       })
     })
-    check('statusless element -> not reported as live', () => res.data?.status, undefined)
+    check(
+      'statusless element -> not reported as live',
+      () => res.data?.status,
+      undefined,
+    )
     check('statusless element -> NOTOK', () => res.status, 'NOTOK')
-    check('statusless element -> history consulted', () => calls.getOrderEvents, 1)
+    check(
+      'statusless element -> history consulted',
+      () => calls.getOrderEvents,
+      1,
+    )
   })
 
   // Same, spelled as Kraken's explicit not-found marker.
@@ -118,7 +126,11 @@ describe('kraken phantom-order-status', () => {
         newClientOrderId: CLI_ORD_ID,
       })
     })
-    check('NOT_FOUND -> not reported as live', () => res.data?.status, undefined)
+    check(
+      'NOT_FOUND -> not reported as live',
+      () => res.data?.status,
+      undefined,
+    )
     check('NOT_FOUND -> history consulted', () => calls.getOrderEvents, 1)
   })
 
@@ -136,7 +148,11 @@ describe('kraken phantom-order-status', () => {
     })
     check('ENTERED_BOOK -> OK', () => res.status, 'OK')
     check('ENTERED_BOOK -> NEW', () => res.data?.status, 'NEW')
-    check('ENTERED_BOOK -> no extra history call', () => calls.getOrderEvents, 0)
+    check(
+      'ENTERED_BOOK -> no extra history call',
+      () => calls.getOrderEvents,
+      0,
+    )
   })
 
   // A resting-but-filled order must still derive FILLED (forum #4924).
@@ -152,7 +168,11 @@ describe('kraken phantom-order-status', () => {
         newClientOrderId: CLI_ORD_ID,
       })
     })
-    check('ENTERED_BOOK + fully filled -> FILLED', () => res.data?.status, 'FILLED')
+    check(
+      'ENTERED_BOOK + fully filled -> FILLED',
+      () => res.data?.status,
+      'FILLED',
+    )
   })
 
   // A terminal cancel is still read straight from the status element.
@@ -202,7 +222,11 @@ describe('kraken phantom-order-status', () => {
         newClientOrderId: CLI_ORD_ID,
       })
     })
-    check('phantom with cancel in history -> CANCELED', () => res.data?.status, 'CANCELED')
+    check(
+      'phantom with cancel in history -> CANCELED',
+      () => res.data?.status,
+      'CANCELED',
+    )
   })
 
   // --- bug #408: the OrderPlaced half of the same lie -------------------------
@@ -245,7 +269,11 @@ describe('kraken phantom-order-status', () => {
         newClientOrderId: CLI_ORD_ID,
       })
     })
-    check('stale OrderPlaced -> not reported as live', () => res.data?.status, undefined)
+    check(
+      'stale OrderPlaced -> not reported as live',
+      () => res.data?.status,
+      undefined,
+    )
     check('stale OrderPlaced -> NOTOK', () => res.status, 'NOTOK')
     check(
       'stale OrderPlaced -> reason is a definitive not-found',
@@ -318,7 +346,11 @@ describe('kraken phantom-order-status', () => {
         newClientOrderId: CLI_ORD_ID,
       })
     })
-    check('stale OrderPlaced with fills -> PARTIALLY_FILLED', () => res.data?.status, 'PARTIALLY_FILLED')
+    check(
+      'stale OrderPlaced with fills -> PARTIALLY_FILLED',
+      () => res.data?.status,
+      'PARTIALLY_FILLED',
+    )
   })
 
   // A `getOrderStatus` call that did not come back `success` is a failed
@@ -357,6 +389,10 @@ describe('kraken phantom-order-status', () => {
         newClientOrderId: CLI_ORD_ID,
       })
     })
-    check('status view did not answer -> not a phantom', () => res.data?.status, 'NEW')
+    check(
+      'status view did not answer -> not a phantom',
+      () => res.data?.status,
+      'NEW',
+    )
   })
 })

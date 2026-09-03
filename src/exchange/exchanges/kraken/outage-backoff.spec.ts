@@ -123,9 +123,10 @@ describe('kraken outage-backoff', () => {
       ;(Logger as any).error = (msg: any) => {
         logged = String(msg)
       }
-      await ex.handleKrakenErrors(async () => ({}), ex.getEmptyTimeProfile())(
-        err503,
-      )
+      await ex.handleKrakenErrors(
+        async () => ({}),
+        ex.getEmptyTimeProfile(),
+      )(err503)
       ;(Logger as any).error = origError
     })
 
@@ -179,7 +180,11 @@ describe('kraken outage-backoff', () => {
       () => outage.totalWaitS <= 30,
       true,
     )
-    expect('gives up as NOTOK rather than looping', () => outage.res?.status, 'NOTOK')
+    expect(
+      'gives up as NOTOK rather than looping',
+      () => outage.res?.status,
+      'NOTOK',
+    )
   })
 
   // Same treatment for the other provider-outage spellings/statuses.
@@ -237,7 +242,11 @@ describe('kraken outage-backoff', () => {
         99,
       )
     })
-    expect('rate-limit class still caps at 3 attempts (bug #181)', () => rl.calls, 3)
+    expect(
+      'rate-limit class still caps at 3 attempts (bug #181)',
+      () => rl.calls,
+      3,
+    )
     expect(
       'rate-limit class still waits 30s, not the outage pacing',
       () => rl.waits.every((w) => w === 30000),
@@ -278,6 +287,10 @@ describe('kraken outage-backoff', () => {
         99,
       )
     })
-    expect('a genuine rejection is still never retried', () => rejected.calls, 1)
+    expect(
+      'a genuine rejection is still never retried',
+      () => rejected.calls,
+      1,
+    )
   })
 })

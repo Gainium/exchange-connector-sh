@@ -1839,7 +1839,9 @@ class BybitExchange extends AbstractExchange implements Exchange {
    *   come out of the asset RECEIVED — base on a buy, quote on a sell — which
    *   is why the side is consulted here and not the pair string.
    */
-  private orderFee(order: AccountOrderV5) {
+  private orderFee(
+    order: AccountOrderV5 & { cumFeeDetail?: Record<string, string> },
+  ) {
     const detail = order.cumFeeDetail
     if (detail && typeof detail === 'object') {
       const fromDetail = normalizeOrderFees(

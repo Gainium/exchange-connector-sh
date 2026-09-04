@@ -6,6 +6,7 @@ import OKX from '../exchanges/okx'
 import Coinbase from '../exchanges/coinbase'
 import Hyperliquid from '../exchanges/hyperliquid'
 import Kraken from '../exchanges/kraken'
+import Whitebit from '../exchanges/whitebit'
 import {
   BybitHost,
   CoinbaseKeysType,
@@ -365,6 +366,41 @@ const verifyKraken = async (
   )
 }
 
+/**
+ * WhiteBit key verification — spec 002 §2.7.
+ *
+ * A successful `getBalance()` is the whole check, deliberately: unlike Kraken,
+ * WhiteBit exposes no probe that distinguishes a scope-limited key from a full
+ * one (spec §3.7 — keys *can* be endpoint-restricted by the user, but nothing
+ * in the docs says how to detect a too-narrow key from a call's shape). This is
+ * the same floor `verifyKraken` starts from before its extra WS-permission
+ * check; add an equivalent probe here if WhiteBit ever documents one.
+ *
+ * Both variants share one credential and one balance call — WhiteBit has no
+ * separate futures account (spec §2.2), so `tradeType` only picks which wallet
+ * (trade-account vs collateral-account) the balance is read from.
+ */
+const verifyWhitebit = async (
+  tradeType: TradeTypeEnum,
+  key: string,
+  secret: string,
+): Promise<VerifyResponse> => {
+  const client = new Whitebit(
+    tradeType === TradeTypeEnum.spot ? Futures.null : Futures.usdm,
+    key,
+    secret,
+  )
+  return await withPermissions(client, () =>
+    client
+      .getBalance()
+      .then((res) => ({
+        status: res.status === StatusEnum.ok && !!res.data,
+        reason: JSON.stringify(res),
+      }))
+      .catch((e) => ({ status: false, reason: `Whitebit catch ${errStr(e)}` })),
+  )
+}
+
 const verifyPaper = async (
   key: string,
   secret: string,
@@ -459,6 +495,9 @@ const verifyExchange = async (
   if ([ExchangeEnum.kraken, ExchangeEnum.krakenUsdm].includes(provider)) {
     return verifyKraken(tradeType, key, secret)
   }
+  if ([ExchangeEnum.whitebit, ExchangeEnum.whitebitUsdm].includes(provider)) {
+    return verifyWhitebit(tradeType, key, secret)
+  }
   return { status: false, reason: 'Exchange not supported' }
 }
 
@@ -467,6 +506,7 @@ const verifiers = {
   kucoin: verifyKucoin,
   bybit: verifyBybit,
   kraken: verifyKraken,
+  whitebit: verifyWhitebit,
   verifyExchange,
   verifyPaper,
   verifyCoinbase,

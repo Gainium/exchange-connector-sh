@@ -6,6 +6,7 @@ import BitgetExchange from '../exchanges/bitget'
 import CoinbaseExchange from '../exchanges/coinbase'
 import HyperliquidExchange from '../exchanges/hyperliquid'
 import KrakenExchange from '../exchanges/kraken'
+import WhitebitExchange from '../exchanges/whitebit'
 import { ExchangeDomain, ExchangeEnum, Futures } from '../types'
 import { createExchangeFactory } from './createExchangeFactoryUtils'
 
@@ -85,6 +86,12 @@ class ExchangeChooser {
     }
     if (exchange === ExchangeEnum.krakenUsdm) {
       return createExchangeFactory(KrakenExchange, ...[Futures.usdm])
+    }
+    if (exchange === ExchangeEnum.whitebit) {
+      return createExchangeFactory(WhitebitExchange, ...[Futures.null])
+    }
+    if (exchange === ExchangeEnum.whitebitUsdm) {
+      return createExchangeFactory(WhitebitExchange, ...[Futures.usdm])
     }
   }
 }

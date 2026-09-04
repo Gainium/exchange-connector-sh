@@ -12,6 +12,7 @@ import OKX from '../exchanges/okx'
 import Coinbase from '../exchanges/coinbase'
 import Hyperliquid from '../exchanges/hyperliquid'
 import Kraken from '../exchanges/kraken'
+import Whitebit from '../exchanges/whitebit'
 
 export const getPrices = (exchange: ExchangeEnum) => {
   switch (exchange) {
@@ -83,6 +84,12 @@ export const getPrices = (exchange: ExchangeEnum) => {
     case ExchangeEnum.krakenUsdm:
       const krakenUsdm = new Kraken(Futures.usdm, '', '')
       return krakenUsdm.getAllPrices()
+    case ExchangeEnum.whitebit:
+      const whitebit = new Whitebit(Futures.null, '', '')
+      return whitebit.getAllPrices()
+    case ExchangeEnum.whitebitUsdm:
+      const whitebitUsdm = new Whitebit(Futures.usdm, '', '')
+      return whitebitUsdm.getAllPrices()
     default:
       throw new Error(`getPrices is not supported for ${exchange}`)
   }
@@ -277,6 +284,22 @@ export const getCandles = (
     case ExchangeEnum.krakenUsdm:
       const krakenUsdm = new Kraken(Futures.usdm, '', '')
       return krakenUsdm.getCandles(
+        params.symbol,
+        params.type as ExchangeIntervals,
+        params.startAt,
+        params.endAt,
+      )
+    case ExchangeEnum.whitebit:
+      const whitebit = new Whitebit(Futures.null, '', '')
+      return whitebit.getCandles(
+        params.symbol,
+        params.type as ExchangeIntervals,
+        params.startAt,
+        params.endAt,
+      )
+    case ExchangeEnum.whitebitUsdm:
+      const whitebitUsdm = new Whitebit(Futures.usdm, '', '')
+      return whitebitUsdm.getCandles(
         params.symbol,
         params.type as ExchangeIntervals,
         params.startAt,

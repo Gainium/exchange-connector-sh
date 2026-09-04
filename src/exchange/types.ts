@@ -214,6 +214,8 @@ export enum ExchangeEnum {
   kraken = 'kraken',
   krakenUsdm = 'krakenUsdm',
   krakenCoinm = 'krakenCoinm',
+  whitebit = 'whitebit',
+  whitebitUsdm = 'whitebitUsdm',
 }
 
 export enum ExchangeDomain {

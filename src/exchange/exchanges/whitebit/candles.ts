@@ -79,7 +79,10 @@ export function parseWhitebitCandles(
   }
   const out: CandleResponse[] = []
   for (const row of rows) {
-    if (!Array.isArray(row) || row.length <= WHITEBIT_CANDLE_INDEX.volumeStock) {
+    if (
+      !Array.isArray(row) ||
+      row.length <= WHITEBIT_CANDLE_INDEX.volumeStock
+    ) {
       continue
     }
     out.push({

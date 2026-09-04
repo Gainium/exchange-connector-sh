@@ -83,7 +83,11 @@ describe('signWhitebitRequest (spec 002 §2.5)', () => {
       signed.headers['Content-Type'],
       'application/json',
     )
-    expect('X-TXC-APIKEY header carries the key', signed.headers['X-TXC-APIKEY'], KEY)
+    expect(
+      'X-TXC-APIKEY header carries the key',
+      signed.headers['X-TXC-APIKEY'],
+      KEY,
+    )
     expect(
       'X-TXC-PAYLOAD header matches the payload',
       signed.headers['X-TXC-PAYLOAD'],
@@ -191,7 +195,11 @@ describe('signWhitebitRequest (spec 002 §2.5)', () => {
       key: KEY,
       secret: SECRET,
       nonce: NONCE,
-      params: { market: 'BTC_USDT', clientOrderId: undefined, limit: undefined },
+      params: {
+        market: 'BTC_USDT',
+        clientOrderId: undefined,
+        limit: undefined,
+      },
     })
     check(
       'no clientOrderId key at all',
@@ -223,7 +231,11 @@ describe('signWhitebitRequest (spec 002 §2.5)', () => {
     const a1 = +nextWhitebitNonce('key-a')
     const a2 = +nextWhitebitNonce('key-a')
     const a3 = +nextWhitebitNonce('key-a')
-    check('strictly increasing within one key', a2 > a1 && a3 > a2, `${a1},${a2},${a3}`)
+    check(
+      'strictly increasing within one key',
+      a2 > a1 && a3 > a2,
+      `${a1},${a2},${a3}`,
+    )
     check(
       'looks like a ms epoch',
       a1 > 1_600_000_000_000 && a1 < 4_000_000_000_000,

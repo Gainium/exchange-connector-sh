@@ -137,7 +137,11 @@ describe('WhiteBit symbol mapping (spec 002 §2.4)', () => {
       whitebitMarketToPair({ name: 'XRP_USDT' }),
       'XRP-USDT',
     )
-    expect('empty name yields empty pair', whitebitMarketToPair({ name: '' }), '')
+    expect(
+      'empty name yields empty pair',
+      whitebitMarketToPair({ name: '' }),
+      '',
+    )
   })
 
   describe('the spot mapper instance', () => {

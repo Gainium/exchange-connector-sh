@@ -304,7 +304,9 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
 
   private spotOnly(timeProfile: TimeProfile, what: string) {
     return this.returnBad(timeProfile)(
-      new Error(`${what} is only supported for WhiteBit futures (whitebitUsdm)`),
+      new Error(
+        `${what} is only supported for WhiteBit futures (whitebitUsdm)`,
+      ),
     )
   }
 
@@ -423,7 +425,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
       ? WHITEBIT_ENDPOINTS.collateral.balance
       : WHITEBIT_ENDPOINTS.spot.balance
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -478,7 +481,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
       return this.noCredentials(timeProfile)
     }
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -555,8 +559,14 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
       return this.noCredentials(timeProfile)
     }
 
-    const { symbol, side, quantity, price, newClientOrderId, type = 'LIMIT' } =
-      order
+    const {
+      symbol,
+      side,
+      quantity,
+      price,
+      newClientOrderId,
+      type = 'LIMIT',
+    } = order
 
     const market = this.toWhitebitSymbol(symbol)
 
@@ -589,7 +599,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
     // trading endpoint is exactly how Kraken's bug #383 turned a plain BUY into
     // a rejected reduce-only order. Left out on purpose, not forgotten.
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -645,7 +656,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
 
     const market = this.toWhitebitSymbol(symbol)
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -750,8 +762,7 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
         status: 'FILLED',
         type: this.mapOrderType(first?.type),
         side:
-          `${first?.side}` === '1' ||
-          `${first?.side}`.toLowerCase() === 'sell'
+          `${first?.side}` === '1' || `${first?.side}`.toLowerCase() === 'sell'
             ? 'SELL'
             : 'BUY',
       }
@@ -805,7 +816,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
     const { symbol, orderId } = order
     const market = this.toWhitebitSymbol(symbol)
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -862,7 +874,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
 
     const market = this.toWhitebitSymbol(symbol)
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -1050,9 +1063,9 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
           unique.map((i) => ({ pair: i.pair, code: `${i.code}` })),
         )
 
-        return this.returnGood<(ExchangeInfo & { pair: string })[]>(timeProfile)(
-          unique,
-        )
+        return this.returnGood<(ExchangeInfo & { pair: string })[]>(
+          timeProfile,
+        )(unique)
       })
       .catch(
         this.handleWhitebitErrors(
@@ -1220,7 +1233,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
               fundingRate: Number(
                 row?.funding_rate ?? row?.fundingRate ?? row?.rate ?? 0,
               ),
-              fundingTime: seconds > 1e11 ? seconds : Math.round(seconds * 1000),
+              fundingTime:
+                seconds > 1e11 ? seconds : Math.round(seconds * 1000),
             }
           })
           .filter(
@@ -1262,7 +1276,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
   private async fetchAccountFee(
     timeProfile: TimeProfile,
   ): Promise<{ fee: UserFee; timeProfile: TimeProfile }> {
-    timeProfile = (await this.checkLimits('privateMain', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateMain', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     const result = await this.client.privatePost<any>(
@@ -1370,7 +1385,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
       return this.noCredentials(timeProfile)
     }
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -1439,7 +1455,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
       return this.noCredentials(timeProfile)
     }
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -1476,7 +1493,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
       return this.noCredentials(timeProfile)
     }
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client
@@ -1544,7 +1562,8 @@ class WhitebitExchange extends AbstractExchange implements Exchange {
       return this.noCredentials(timeProfile)
     }
 
-    timeProfile = (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
+    timeProfile =
+      (await this.checkLimits('privateTrade', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.client

@@ -111,7 +111,11 @@ describe('WhiteBit candle parsing (spec 002 §2.3)', () => {
   })
 
   describe('defensive parsing', () => {
-    expect('undefined input yields []', parseWhitebitCandles(undefined).length, 0)
+    expect(
+      'undefined input yields []',
+      parseWhitebitCandles(undefined).length,
+      0,
+    )
     expect('null input yields []', parseWhitebitCandles(null).length, 0)
     expect(
       'non-array input yields []',

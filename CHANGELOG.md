@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.22] - 2026-09-05
+
+### Fixed
+
+- Binance order numbers are now recorded exactly as the exchange issued them. Binance USDM order numbers have grown past the largest whole number JavaScript can hold precisely, so the connector was rounding the last few digits off every one it received — and because rounding is not reversible, several genuinely different orders ended up filed under the same number. Filled orders were affected, so fills, fees and profit could be attributed to the wrong order, and a cancel or a lookup addressed by that number could reach an order the platform never meant to touch. The connector now reads the order number from the exchange's reply without losing any digits, and sends it back to Binance unchanged. Order numbers small enough to be held precisely are handled exactly as before.
+
+## [1.20.21] - 2026-09-05
+
+### Fixed
+
+- The Kraken connector now sends a short Gainium client order id to Kraken exactly as it is, instead of hashing it first. Kraken only accepts a client order id as a UUID or as free text of at most 18 characters; the previous id was 35 characters long, so it had to be encoded, and the identifier stored against the order was not the one Kraken held. Now the connector looks at the id it is given and picks the right lookup for it: a Kraken transaction id, a short id sent as-is, or an older long id that still goes through the previous encoding and its fallback. Orders placed before this change — including any placed while only one side of the update was live — continue to resolve, so nothing resting on a live account is lost.
+
 ## [1.20.20] - 2026-09-05
 
 ### Fixed

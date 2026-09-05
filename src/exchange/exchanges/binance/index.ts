@@ -1227,7 +1227,13 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     return this.client
       .cancelOrder({
         symbol,
-        orderId: +orderId,
+        // Sent as the caller's string, NOT `+orderId`: a venue order id above 2^53
+        // does not survive a JS number round trip, so the `+` addressed a different
+        // order than the one we were asked to cancel (spec 004 §4.7). The SDK
+        // serialises the param into the query string either way, and the id-format
+        // check that would reject a string is already disabled in
+        // `binance-custom` (`validateOrderId`).
+        orderId: orderId as unknown as number,
       })
       .then((res) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -1270,7 +1276,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     const { symbol, orderId } = order
     const input = {
       symbol,
-      orderId: +orderId,
+      // See the note in `cancelOrderByOrderIdAndSymbol` — the caller's id goes to
+      // the venue verbatim so a >2^53 futures id is not rounded onto another order.
+      orderId: orderId as unknown as number,
       recvWindow: this.recvWindow,
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')

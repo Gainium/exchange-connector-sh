@@ -1889,8 +1889,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         pair: await this.toKrakenSymbol(symbol),
         volume: quantity.toString(),
         price: type === 'LIMIT' ? price.toString() : undefined,
-        userref: newClientOrderId
-          ? parseInt(newClientOrderId.substring(0, 8), 16)
+        // `cl_ord_id` and `userref` are MUTUALLY EXCLUSIVE on AddOrder — a
+        // request carrying both is rejected — so this replaces the userref,
+        // it does not accompany it.
+        cl_ord_id: newClientOrderId
+          ? this.krakenClOrdId(newClientOrderId)
           : undefined,
         ...this.xstockParams(symbol),
       })
@@ -1904,24 +1907,19 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         const orderIds = result.result.txid || []
 
         await sleep(500)
-        // Re-fetch by the Kraken txid via QueryOrders — the ONLY unambiguous
-        // lookup available. getOrder() resolves spot orders by userref =
-        // parseInt(clientOrderId.substring(0,8), 16); every Gainium client id
-        // starts with a shared prefix ("D-…", "GRID-…"), so parseInt stops at
-        // the first non-hex char and MANY orders collide on the same userref
-        // (e.g. all "D-*" ids → 13). With ≥2 such orders on the account,
-        // getOrder() returned a DIFFERENT order's data — an instantly-filled
-        // market Add came back as the account's resting limit order (open/
-        // vol_exec 0), so the fill was silently never registered on the deal
-        // (community thread 4890). QueryOrders also covers the closed-orders
-        // consistency lag for instantly-filled market orders.
+        // Re-fetch by the Kraken txid via QueryOrders. This stays the primary
+        // read even now that the order carries a cl_ord_id: QueryOrders is the
+        // one lookup that is authoritative for open AND closed orders in a
+        // single call, so it also covers the closed-orders consistency lag for
+        // an instantly-filled market order — which the open-orders scan cannot,
+        // and which silently lost fills on the deal (community thread 4890).
         const txid = orderIds?.[0]
         if (txid) {
           // QueryOrders can briefly lag right after submit, so a single miss
           // does not mean the order failed — we hold its txid and the submit
-          // succeeded. Retry the exact lookup a few times before ever touching
-          // the userref path, which collides (all client ids → one userref) and
-          // would report a just-placed order as "not found" (false negative).
+          // succeeded. Retry the exact lookup a few times before falling back
+          // to a list scan, which would report a just-placed order as "not
+          // found" (false negative) if it has not surfaced yet.
           for (let attempt = 0; attempt < 3; attempt++) {
             const fetched = await this.getSpotOrderByTxid(
               txid,
@@ -1936,8 +1934,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           }
         }
         // Last resort: prefer the Kraken txid so getOrder() re-routes through
-        // the exact isKrakenSpotTxid() path; only fall back to the ambiguous
-        // client-order-id/userref lookup when no txid was returned at all.
+        // the exact isKrakenSpotTxid() path; only fall back to the client-order-id
+        // lookup when no txid was returned at all.
         return await this.getOrder(
           { symbol, newClientOrderId: txid || newClientOrderId || '' },
           timeProfile,
@@ -1964,10 +1962,37 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
-   * The answer when a client-order-id lookup matched more than one Kraken spot
-   * order. Kraken's open/closed order payloads carry no client order id, so
-   * there is nothing left to disambiguate with: the only honest answers are
-   * "exactly one match, here it is" and this.
+   * A Gainium client order id as Kraken's native `cl_ord_id`.
+   *
+   * Kraken accepts exactly three forms: a long UUID (8-4-4-4-12 hex), a SHORT
+   * UUID (32 hex, no dashes), or free ASCII text of at most 18 characters. A
+   * Gainium client order id is ~35 mixed-case alphanumerics
+   * (`D-RO-o54rqRLIW9rTGgeSaVaepKlstZBZpY`) and is none of the three, so it
+   * cannot be passed through — it has to be encoded.
+   *
+   * sha256 of the WHOLE id, first 32 hex chars: the short-UUID form.
+   * Deterministic, so submitOrder, getOrder and cancelOrder all recompute the
+   * same value with nothing stored and no mapping to keep in sync. 128 bits,
+   * so two client ids do not collide.
+   *
+   * Truncating the client id to 18 characters would also satisfy Kraken and is
+   * deliberately NOT done: `D-RO-` plus 13 characters is not unique across a
+   * bot's orders, and a non-injective encoding is the entire defect this
+   * replaces (`userref = parseInt(id.substring(0,8), 16)` collapsed every `D-*`
+   * id to 13, every `CMB-*` to 12 and every `GRID-*` to NaN). See
+   * `specs/003.kraken-spot-native-cl-ord-id.md`.
+   */
+  private krakenClOrdId(clientOrderId: string): string {
+    return createHash('sha256').update(clientOrderId).digest('hex').slice(0, 32)
+  }
+
+  /**
+   * The answer when the LEGACY userref lookup matched more than one Kraken spot
+   * order. Orders placed since `krakenClOrdId` carry a native `cl_ord_id` and
+   * are resolved exactly; these are the ones placed before it, which carry only
+   * `userref = parseInt(id.substring(0,8), 16)` and nothing to disambiguate
+   * with. For them the only honest answers remain "exactly one match, here it
+   * is" and this. Reachable until those orders drain off live accounts.
    *
    * `returnBad`, not `throw`, on purpose. A throw in the open-orders scan is
    * caught below and re-asked as a closed-orders lookup, which collides in
@@ -2518,8 +2543,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getOrders', symbol, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
-    // Kraken doesn't support querying by client order ID directly for spot
-    // We need to use userref if it was set, or fetch all open orders
+    // Asked UNFILTERED on purpose, even though OpenOrders accepts a
+    // `cl_ord_id` filter: the legacy userref pass below has to read the same
+    // payload, and a filter Kraken did not honour would hand us every open
+    // order with nothing to tell them apart — which is the defect this whole
+    // path is about. One call, then match locally.
     return this.spotClient
       .getOpenOrders()
       .then(async (result) => {
@@ -2529,27 +2557,39 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           throw new Error(result.error?.[0] || 'Failed to get orders')
         }
 
-        // Find order by client order ID (userref)
-        // Convert client order ID to userref (same way as in submitOrder)
+        const orders = result.result.open || {}
+        const clOrdId = newClientOrderId
+          ? this.krakenClOrdId(newClientOrderId)
+          : undefined
+
+        // The exact answer: Kraken carries our own client order id back on
+        // every row, so identity is read, not inferred.
+        const exact = clOrdId
+          ? Object.entries(orders).filter(
+              ([, orderData]) => orderData.cl_ord_id === clOrdId,
+            )
+          : []
+
+        // LEGACY ONLY. Orders placed before the cl_ord_id switch carry a
+        // `userref = parseInt(id.substring(0,8), 16)` and nothing else, and stay
+        // resting on live accounts until they drain — so they must still be
+        // findable, or main-app reads "not found" and retires a live order as a
+        // phantom. That userref is NOT evidence of identity: parseInt stops at
+        // the first non-hex char, so every `D-*` id collapses to 13 and every
+        // `CMB-*` to 12. Hence the same rule as before — one candidate is an
+        // answer, several are a refusal (`ambiguousUserrefMatch`). A row that
+        // carries some OTHER cl_ord_id is definitively not the order asked
+        // about and is excluded, so a new order can never be reached this way.
         const userref = newClientOrderId
           ? parseInt(newClientOrderId.substring(0, 8), 16)
           : undefined
-
-        const orders = result.result.open || {}
-        // Collect every candidate before answering. A userref match is NOT
-        // evidence of identity: `parseInt(id.substring(0,8), 16)` stops at the
-        // first non-hex char, so every `D-*` client id collapses to userref 13
-        // and every `CMB-*` to 12. Returning from inside the loop therefore
-        // answered "whichever Gainium order this account happens to list
-        // first", dressed as an exact resolution — and `cancelOrder()` below
-        // feeds that orderId straight to `cancelOrder({txid})`, so a cancel
-        // aimed at order A cancelled order B and the bot engine copied B's
-        // txid onto A's row (163 prod Kraken txids each claimed by 2+ order
-        // rows, 117 of them across more than one bot).
-        const matches = Object.entries(orders).filter(
-          ([, orderData]) =>
-            orderData.userref?.toString() === userref?.toString(),
-        )
+        const matches = exact.length
+          ? exact
+          : Object.entries(orders).filter(
+              ([, orderData]) =>
+                !orderData.cl_ord_id &&
+                orderData.userref?.toString() === userref?.toString(),
+            )
         if (matches.length > 1) {
           return this.ambiguousUserrefMatch(
             newClientOrderId,
@@ -2599,33 +2639,57 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               )) || timeProfile
             timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
-            // Convert client order ID to userref (same way as in submitOrder)
+            const clOrdId = newClientOrderId
+              ? this.krakenClOrdId(newClientOrderId)
+              : undefined
             const userref = newClientOrderId
               ? parseInt(newClientOrderId.substring(0, 8), 16)
               : undefined
 
-            const closedResult = await this.spotClient!.getClosedOrders({
-              userref,
-            })
-
-            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
-            if (!closedResult.result || closedResult.error?.length) {
-              throw new Error(
-                closedResult.error?.[0] || 'Failed to get closed orders',
-              )
+            // Filtered server-side, unlike the open-orders scan: ClosedOrders
+            // is paginated (50 rows a page), so an unfiltered read would simply
+            // miss an order that has since been buried by newer ones.
+            const fetchClosed = async (params: {
+              cl_ord_id?: string
+              userref?: number
+            }) => {
+              const res = await this.spotClient!.getClosedOrders(params)
+              if (!res.result || res.error?.length) {
+                throw new Error(res.error?.[0] || 'Failed to get closed orders')
+              }
+              return Object.entries(res.result.closed || {})
             }
 
-            // Find order by client order ID (userref) in closed orders.
-            // Same collision, same rule as the open-orders scan above: one
-            // candidate is an answer, several are a refusal. `getClosedOrders`
-            // is already FILTERED by userref here, so on a colliding id every
-            // row it returns is a candidate.
-            const closedOrders = closedResult.result.closed || {}
-            const closedMatches = Object.entries(closedOrders).filter(
-              ([, orderData]) =>
-                orderData.userref?.toString() === userref?.toString(),
-            )
+            // The exact answer first. The re-check on the row's own cl_ord_id
+            // is not redundant with the filter: a Kraken deployment that
+            // ignored an unrecognised parameter would return every closed
+            // order, and trusting the filter alone would resolve an arbitrary
+            // one — exactly the failure this change removes.
+            const exactClosed = clOrdId
+              ? (await fetchClosed({ cl_ord_id: clOrdId })).filter(
+                  ([, orderData]) => orderData.cl_ord_id === clOrdId,
+                )
+              : []
+
+            // LEGACY ONLY, and one extra venue call — paid only when the exact
+            // lookup found nothing, and only until pre-cl_ord_id orders drain.
+            // Same rule as the open-orders scan: one candidate is an answer,
+            // several are a refusal, and a row carrying some other cl_ord_id is
+            // not a candidate at all. Skipped outright when the derived userref
+            // is NaN (every `GRID-*` id — parseInt('GRID-RO-', 16) has no hex
+            // digit to read): Kraken was sent `userref: null` for those, so the
+            // legacy filter has never matched one and the call is pure cost.
+            const closedMatches = exactClosed.length
+              ? exactClosed
+              : Number.isFinite(userref)
+                ? (await fetchClosed({ userref })).filter(
+                    ([, orderData]) =>
+                      !orderData.cl_ord_id &&
+                      orderData.userref?.toString() === userref?.toString(),
+                  )
+                : []
+
+            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
             if (closedMatches.length > 1) {
               return this.ambiguousUserrefMatch(
                 newClientOrderId,
@@ -2696,7 +2760,17 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       return this.returnBad(timeProfile)(new Error('Client order ID required'))
     }
 
-    // First get the order to find its exchange ID
+    // Resolve first, then cancel by the venue txid — deliberately NOT a direct
+    // `cancelOrder({ cl_ord_id })`, which would save this round trip. The spot
+    // cancel's CommonOrder carries the txid in `orderId`, and main-app's
+    // `cancelOrderOnExchange` copies every field of that response onto the
+    // order row it holds (`core/src/bot/main.ts`), `orderId` included — that
+    // write is the exact mechanism that left 163 Kraken txids each claimed by
+    // two order rows. A cl_ord_id cancel returns only `{count}`, so it would
+    // have to invent the txid it reports back. `getOrder` is now exact
+    // (cl_ord_id, see krakenClOrdId), so the txid this resolves to is the right
+    // one; a legacy userref-only order still resolves through the fallback
+    // scan and is likewise cancelled by its real txid.
     const orderResult = await this.getOrder(
       { symbol, newClientOrderId },
       timeProfile,

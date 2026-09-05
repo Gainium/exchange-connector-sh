@@ -262,9 +262,19 @@ describe('kraken spot getOrder by client order id (userref)', () => {
     before(async () => {
       res = await ask(ex)
     })
+    // Still open -> closed, still one open-orders read. The closed leg is now
+    // two calls rather than one: the exact `cl_ord_id` filter, then the legacy
+    // `userref` filter that runs only because the first found nothing (spec
+    // `003.kraken-spot-native-cl-ord-id.md` §4.6/§5.2). Paid on a genuine miss,
+    // and only until pre-cl_ord_id orders drain off live accounts.
     check(
-      'still falls through open -> closed, unchanged',
-      () => calls.getOpenOrders + calls.getClosedOrders,
+      'still reads the open list exactly once',
+      () => calls.getOpenOrders,
+      1,
+    )
+    check(
+      'then falls through to closed: cl_ord_id first, then legacy userref',
+      () => calls.getClosedOrders,
       2,
     )
     check('and reports not found', () => res.status, StatusEnum.notok)

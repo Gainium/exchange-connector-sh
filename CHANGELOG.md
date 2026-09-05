@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.20] - 2026-09-05
+
+### Fixed
+
+- Kraken spot orders are now addressed by Kraken's native `cl_ord_id` instead of
+  a derived `userref`, so an order can finally be resolved and cancelled by the
+  client order id it was placed with. The old encoding,
+  `userref = parseInt(clientOrderId.substring(0, 8), 16)`, stops at the first
+  non-hex character: every `D-*` Gainium id collapsed to 13, every `CMB-*` to
+  12, and every `GRID-*` to `NaN` — sent to Kraken as `userref: null`, so grid
+  orders carried no client identifier at all and never resolved, even one at a
+  time. 1.20.19 stopped the resulting collision from resolving to an arbitrary
+  order; this makes the lookup work. `submitOrder` now sends
+  `cl_ord_id: sha256(clientOrderId).slice(0, 32)` (Kraken's short-UUID form —
+  deterministic, so every call site recomputes it with nothing stored, and
+  injective, so two client ids cannot collide) and drops `userref`, which is
+  mutually exclusive with it on AddOrder. `getOrder` matches the `cl_ord_id`
+  Kraken returns on each open-order row, and asks `getClosedOrders` to filter by
+  it. Orders placed before this change carry only a `userref` and stay resting
+  on live accounts until they drain, so the userref scan remains as a fallback —
+  unchanged, ambiguity refusal and all — and now ignores rows carrying some
+  other `cl_ord_id`. `cancelOrder` still resolves through `getOrder` and cancels
+  by the venue txid rather than by `cl_ord_id` directly: the txid it reports
+  back is copied onto the caller's order row, and that write is what left 163
+  Kraken txids each claimed by two order rows.
+
 ## [1.20.19] - 2026-09-05
 
 ### Fixed

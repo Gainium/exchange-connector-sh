@@ -1964,6 +1964,42 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * The answer when a client-order-id lookup matched more than one Kraken spot
+   * order. Kraken's open/closed order payloads carry no client order id, so
+   * there is nothing left to disambiguate with: the only honest answers are
+   * "exactly one match, here it is" and this.
+   *
+   * `returnBad`, not `throw`, on purpose. A throw in the open-orders scan is
+   * caught below and re-asked as a closed-orders lookup, which collides in
+   * exactly the same way, and `handleKrakenErrors` would then spend its retry
+   * ladder re-deriving a verdict that is deterministic.
+   *
+   * The wording is load-bearing and is asserted by
+   * `ambiguous-userref.spec.ts`: it must match none of main-app's
+   * `unknownOrderMessages` (`core/src/bot/main.ts:200`) and must not satisfy
+   * `isDefinitiveOrderNotFound` (`:403`) — say "not found" here and
+   * `cancelOrderOnExchange` routes the refusal to `_handleUnknownOrder`, which
+   * retires a live order as a phantom. An ambiguity is "the call did not
+   * succeed", never "the venue says this order does not exist".
+   */
+  private ambiguousUserrefMatch(
+    clientOrderId: string,
+    userref: number | undefined,
+    count: number,
+    list: 'open' | 'closed',
+    timeProfile: TimeProfile,
+  ): BaseReturn<CommonOrder> {
+    return this.returnBad(timeProfile)(
+      new Error(
+        `Ambiguous order lookup: client order id ${clientOrderId} maps to ` +
+          `Kraken userref ${userref}, which matches ${count} ${list} orders. ` +
+          `Kraken spot cannot resolve a client order id; refusing to guess. ` +
+          `Address this order by its txid.`,
+      ),
+    )
+  }
+
+  /**
    * One QueryOrders row -> `CommonOrder`. Shared by the single-txid lookup and
    * the batch below so the two can never drift: they read the same endpoint and
    * must produce the same order.
@@ -2500,26 +2536,49 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           : undefined
 
         const orders = result.result.open || {}
-        for (const [orderId, orderData] of Object.entries(orders)) {
-          if (orderData.userref?.toString() === userref?.toString()) {
-            return this.returnGood<CommonOrder>(timeProfile)(
-              this.convertOrder({
-                orderId,
-                symbol: await this.normalizeSymbol(
-                  orderData.descr?.pair || symbol,
-                ),
-                clientOrderId: newClientOrderId,
-                fee: orderData.fee,
-                oflags: orderData.oflags,
-                price: orderData.descr?.price || '0',
-                origQty: orderData.vol || '0',
-                executedQty: orderData.vol_exec || '0',
-                status: orderData.status || 'NEW',
-                type: orderData.descr?.ordertype || 'limit',
-                side: orderData.descr?.type?.toUpperCase() || 'BUY',
-              }),
-            )
-          }
+        // Collect every candidate before answering. A userref match is NOT
+        // evidence of identity: `parseInt(id.substring(0,8), 16)` stops at the
+        // first non-hex char, so every `D-*` client id collapses to userref 13
+        // and every `CMB-*` to 12. Returning from inside the loop therefore
+        // answered "whichever Gainium order this account happens to list
+        // first", dressed as an exact resolution — and `cancelOrder()` below
+        // feeds that orderId straight to `cancelOrder({txid})`, so a cancel
+        // aimed at order A cancelled order B and the bot engine copied B's
+        // txid onto A's row (163 prod Kraken txids each claimed by 2+ order
+        // rows, 117 of them across more than one bot).
+        const matches = Object.entries(orders).filter(
+          ([, orderData]) =>
+            orderData.userref?.toString() === userref?.toString(),
+        )
+        if (matches.length > 1) {
+          return this.ambiguousUserrefMatch(
+            newClientOrderId,
+            userref,
+            matches.length,
+            'open',
+            timeProfile,
+          )
+        }
+        const found = matches[0]
+        if (found) {
+          const [orderId, orderData] = found
+          return this.returnGood<CommonOrder>(timeProfile)(
+            this.convertOrder({
+              orderId,
+              symbol: await this.normalizeSymbol(
+                orderData.descr?.pair || symbol,
+              ),
+              clientOrderId: newClientOrderId,
+              fee: orderData.fee,
+              oflags: orderData.oflags,
+              price: orderData.descr?.price || '0',
+              origQty: orderData.vol || '0',
+              executedQty: orderData.vol_exec || '0',
+              status: orderData.status || 'NEW',
+              type: orderData.descr?.ordertype || 'limit',
+              side: orderData.descr?.type?.toUpperCase() || 'BUY',
+            }),
+          )
         }
 
         throw new Error('Order not found in open orders')
@@ -2557,33 +2616,50 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               )
             }
 
-            // Find order by client order ID (userref) in closed orders
+            // Find order by client order ID (userref) in closed orders.
+            // Same collision, same rule as the open-orders scan above: one
+            // candidate is an answer, several are a refusal. `getClosedOrders`
+            // is already FILTERED by userref here, so on a colliding id every
+            // row it returns is a candidate.
             const closedOrders = closedResult.result.closed || {}
-            for (const [orderId, orderData] of Object.entries(closedOrders)) {
-              if (orderData.userref?.toString() === userref?.toString()) {
-                return this.returnGood<CommonOrder>(timeProfile)(
-                  this.convertOrder({
-                    orderId,
-                    symbol: await this.normalizeSymbol(
-                      orderData.descr?.pair || symbol,
-                    ),
-                    clientOrderId: newClientOrderId,
-                    fee: orderData.fee,
-                    oflags: orderData.oflags,
-                    // avg executed price when filled (descr.price is '0'
-                    // for market orders), limit price otherwise
-                    price:
-                      +(orderData.price || 0) > 0
-                        ? orderData.price
-                        : orderData.descr?.price || '0',
-                    origQty: orderData.vol || '0',
-                    executedQty: orderData.vol_exec || '0',
-                    status: orderData.status || 'FILLED',
-                    type: orderData.descr?.ordertype || 'limit',
-                    side: orderData.descr?.type?.toUpperCase() || 'BUY',
-                  }),
-                )
-              }
+            const closedMatches = Object.entries(closedOrders).filter(
+              ([, orderData]) =>
+                orderData.userref?.toString() === userref?.toString(),
+            )
+            if (closedMatches.length > 1) {
+              return this.ambiguousUserrefMatch(
+                newClientOrderId,
+                userref,
+                closedMatches.length,
+                'closed',
+                timeProfile,
+              )
+            }
+            const closedFound = closedMatches[0]
+            if (closedFound) {
+              const [orderId, orderData] = closedFound
+              return this.returnGood<CommonOrder>(timeProfile)(
+                this.convertOrder({
+                  orderId,
+                  symbol: await this.normalizeSymbol(
+                    orderData.descr?.pair || symbol,
+                  ),
+                  clientOrderId: newClientOrderId,
+                  fee: orderData.fee,
+                  oflags: orderData.oflags,
+                  // avg executed price when filled (descr.price is '0'
+                  // for market orders), limit price otherwise
+                  price:
+                    +(orderData.price || 0) > 0
+                      ? orderData.price
+                      : orderData.descr?.price || '0',
+                  origQty: orderData.vol || '0',
+                  executedQty: orderData.vol_exec || '0',
+                  status: orderData.status || 'FILLED',
+                  type: orderData.descr?.ordertype || 'limit',
+                  side: orderData.descr?.type?.toUpperCase() || 'BUY',
+                }),
+              )
             }
 
             throw new Error('Order not found in history')

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.19] - 2026-09-05
+
+### Fixed
+
+- Kraken spot: a client-order-id lookup that matches several orders is now
+  refused instead of resolving to an arbitrary one. Kraken has no
+  client-order-id lookup, so `getOrder` encodes the id as
+  `userref = parseInt(id.substring(0, 8), 16)` — which stops at the first
+  non-hex char, collapsing every `D-*` Gainium id to userref 13 and every
+  `CMB-*` to 12. Both userref scans returned the first entry that matched, so
+  the answer was whichever Gainium order the account happened to list first,
+  presented as an exact resolution. `cancelOrder` feeds that `orderId` straight
+  to `cancelOrder({txid})`, so a cancel aimed at one order cancelled another,
+  and the caller then stored the wrong txid on the order it holds. A userref
+  match is not evidence of identity and is no longer treated as one: one
+  candidate resolves as before, several are reported as an ambiguity worded so
+  it can never be mistaken for the venue saying the order does not exist.
+
 ## [1.20.18] - 2026-09-03
 
 ### Fixed

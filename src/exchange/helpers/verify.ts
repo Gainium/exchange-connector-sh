@@ -300,6 +300,16 @@ const verifyHyperliquid = async (
     undefined,
     subaccount,
   )
+  // Hyperliquid's credential is a raw secp256k1 private key, and the checks
+  // below it are *info* requests keyed on the public address — they never
+  // touch the secret. A key the SDK cannot sign with therefore verified green
+  // and then failed on every order, cancel and leverage change the user's bots
+  // attempted, with an opaque "unsupported wallet for signing typed data"
+  // (Claus #551). Prove the secret can sign before accepting the connection.
+  const signable = await client.checkSigningKey()
+  if (!signable.ok) {
+    return { status: false, reason: signable.reason ?? '' }
+  }
   // Guard against the common onboarding mistake of entering the Hyperliquid
   // API/agent wallet address instead of the main account address. HL executes
   // orders (signed by the agent key) on the master, but every info request

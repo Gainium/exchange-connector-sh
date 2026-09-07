@@ -1019,6 +1019,55 @@ const hlAddressLooksValid = (key: unknown): boolean =>
 /** Marker for "this connection can never talk to HL as configured". */
 const HL_BAD_ADDRESS_CODE = 4220
 
+/**
+ * The SDK's own rejection when the `wallet` it was handed is none of the four
+ * shapes it understands (viem account, ethers v5/v6 signer, or a secp256k1
+ * private-key string). Lowercased because `handleHyperliquidErrors` lowercases
+ * every message before it leaves the connector — this is the exact substring
+ * that reaches bot logs and the bot-error rules that match on them, so it must
+ * stay verbatim inside whatever text we return.
+ *
+ * @see https://github.com/nktkas/hyperliquid — `signing/_signTypedData/mod.ts`
+ */
+const HL_UNSUPPORTED_WALLET = 'unsupported wallet for signing typed data'
+
+/**
+ * What the user must go and paste, said once and reused everywhere.
+ *
+ * Kept short on purpose: main-app truncates a quoted connector reason at 300
+ * characters (`core/src/exchange/verifyFailureMessage.ts`), and the actionable
+ * half must survive that.
+ */
+const HL_SIGNING_KEY_HELP =
+  `Enter the 64-character private key shown when you created the ` +
+  `Hyperliquid API wallet, with no spaces or line breaks — not your wallet ` +
+  `address and not your seed phrase.`
+
+/**
+ * A Hyperliquid credential is a raw secp256k1 private key, and the SDK accepts
+ * it only as `0x` + 64 hex (or bare 64 hex). Everything else — a trailing
+ * newline from a password manager, a wrapped paste, an uppercase `0X` prefix —
+ * makes it fall through every branch of the SDK's wallet dispatch and throw
+ * {@link HL_UNSUPPORTED_WALLET} at *signing* time only.
+ *
+ * That is the worst possible place to find out: info requests (balance,
+ * positions, open orders) never sign, so the connection verifies fine and
+ * looks healthy, and the credential fails for the first time when a live bot
+ * tries to place, cancel or set leverage (Claus #551).
+ *
+ * So normalize the shapes that are a valid key wearing extra characters:
+ * strip all whitespace and re-prefix a `0x`/`0X`/bare 64-hex body. Anything
+ * that is not 64 hex characters underneath is returned trimmed and unchanged —
+ * it is not a key, and quietly reshaping it would only move the failure.
+ */
+const HL_PRIVATE_KEY_RE = /^(?:0[xX])?([0-9a-fA-F]{64})$/
+const normalizeHlPrivateKey = (secret: unknown): string => {
+  const raw = `${secret ?? ''}`
+  const compact = raw.replace(/\s+/g, '')
+  const m = HL_PRIVATE_KEY_RE.exec(compact)
+  return m ? `0x${m[1]}` : raw.trim()
+}
+
 /** Best-effort Retry-After (ms) from an HL 429, capped so we never stall long. */
 const hlRetryAfterMs = (err: unknown): number | undefined => {
   const resp = (err as { response?: { headers?: unknown } })?.response
@@ -1236,6 +1285,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   protected futures?: Futures
   private demo = process.env.HYPERLIQUIDENV === 'demo'
   private code?: string
+  /** {@link normalizeHlPrivateKey} of `secret` — what actually signs. */
+  private signingKey: string
   constructor(
     futures: Futures,
     key: string,
@@ -1248,18 +1299,22 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     _subaccount?: boolean,
   ) {
     super({ key, secret, passphrase, subaccount: `${_subaccount}` === 'true' })
+    // A key wearing whitespace or an uppercase `0X` is a valid key the SDK
+    // cannot see; normalize once here so every signer built from this instance
+    // (and the nonce bucket keyed off it) agrees. See normalizeHlPrivateKey.
+    this.signingKey = normalizeHlPrivateKey(secret)
     this.infoClient = new hl.InfoClient({
       transport: new hl.HttpTransport({ isTestnet: this.demo }),
     })
     this.exchangeClient = new hl.ExchangeClient({
       transport: new hl.HttpTransport({ isTestnet: this.demo }),
-      wallet: this.secret as `0x${string}`,
+      wallet: this.signingKey as `0x${string}`,
       isTestnet: this.demo,
       // Per-signer monotonic nonce shared across all in-process clients. The SDK
       // default is per-client, but this connector builds a fresh client per
       // request, so concurrent same-signer actions would otherwise collide on
       // the same Date.now() nonce → "duplicate nonce". See ./nonce.ts.
-      nonceManager: makeSharedNonce(this.secret as string),
+      nonceManager: makeSharedNonce(this.signingKey),
     })
     this.retry = 10
     this.retryErrors = ['429']
@@ -1332,6 +1387,42 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * Can the stored secret actually sign? Answered with the SDK's own
+   * `getWalletAddress`, i.e. the exact dispatch that decides whether an order
+   * gets signed or throws {@link HL_UNSUPPORTED_WALLET} — so this cannot drift
+   * from runtime behaviour.
+   *
+   * Verification never used to touch the secret at all: `getAccountRole` and
+   * `getBalance` are *info* requests keyed on the public address, so a
+   * credential that could never sign anything verified green and then failed
+   * on every order, cancel and leverage change a live bot attempted
+   * (Claus #551 — five DCA bots on one connection, all three call classes).
+   * Failing here instead turns a permanent, silent trading outage into a
+   * rejected connection with an instruction.
+   */
+  async checkSigningKey(): Promise<{ ok: boolean; reason?: string }> {
+    if (!`${this.secret ?? ''}`.trim()) {
+      return {
+        ok: false,
+        reason: `Hyperliquid API wallet private key is missing. ${HL_SIGNING_KEY_HELP}`,
+      }
+    }
+    try {
+      await getWalletAddress(this.signingKey as `0x${string}`)
+      return { ok: true }
+    } catch {
+      // Deliberately quotes the SDK's own wording so this reads as the same
+      // fault as the runtime failure it prevents (and matches the same rule).
+      return {
+        ok: false,
+        reason:
+          `This Hyperliquid API wallet private key cannot sign ` +
+          `(${HL_UNSUPPORTED_WALLET}). ${HL_SIGNING_KEY_HELP}`,
+      }
+    }
+  }
+
+  /**
    * Hyperliquid account role for this connection's address, per HL's own
    * `userRole`. Used at verify time to catch the common onboarding mistake of
    * pasting an **API/agent wallet** address in place of the main account:
@@ -1377,7 +1468,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
   override async getKeyPermissions(): Promise<KeyPermissions> {
     let signer: string
     try {
-      signer = await getWalletAddress(this.secret as `0x${string}`)
+      signer = await getWalletAddress(this.signingKey as `0x${string}`)
     } catch (e) {
       return unknownPermissions(
         `Hyperliquid signer address underivable: ${(e as Error)?.message ?? e}`,
@@ -3403,7 +3494,17 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
           )
         }
       } else {
-        const message = msg
+        // The SDK's wallet-dispatch rejection is bare ("unsupported wallet for
+        // signing typed data") and reached the user's bot log verbatim, saying
+        // nothing about which credential is wrong or what to do (Claus #551).
+        // Append the instruction, keeping the SDK substring first and intact so
+        // existing bot-error rules keyed on it still match.
+        const message =
+          msg.indexOf(HL_UNSUPPORTED_WALLET) !== -1
+            ? `${msg} — the saved Hyperliquid API wallet private key is not a ` +
+              `usable signing key, so no order, cancel or leverage change can ` +
+              `be sent. Re-enter it on the Exchanges page. ${HL_SIGNING_KEY_HELP}`
+            : msg
         return this.returnBad(timeProfile)(new Error(message))
       }
     }

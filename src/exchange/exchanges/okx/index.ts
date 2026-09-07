@@ -87,6 +87,15 @@ export const timeIntervalMap = {
 const candleMaxSize = 300
 
 /**
+ * Floor between two X-Perp instrument refreshes triggered by a cache MISS
+ * (see `ensureXperpMap`). Long enough that a symbol OKX genuinely does not
+ * serve costs at most one extra instruments fetch per window, short enough
+ * that a newly listed X-Perp resolves on the next call instead of waiting out
+ * the 1h map cache.
+ */
+const XPERP_MISS_RETRY_MS = 5 * 60 * 1000
+
+/**
  * Backoff for OKX `50011 Too many requests`.
  *
  * This used to be `(attempts + 1) * 10000` — a **20 second** first retry. Two
@@ -137,6 +146,8 @@ class OKXExchange extends AbstractExchange implements Exchange {
    */
   private xperpMap = new Map<string, string>()
   private xperpMapLoaded = 0
+  /** Last refresh triggered by a cache MISS (see {@link ensureXperpMap}). */
+  private xperpMapMissLoaded = 0
 
   /**
    * In-flight de-duplication for `GET /api/v5/account/config`.
@@ -793,9 +804,24 @@ class OKXExchange extends AbstractExchange implements Exchange {
     if (!this.isEuPerp && !(symbolHint && this.isXperpPair(symbolHint))) {
       return
     }
-    const fresh = +new Date() - this.xperpMapLoaded < 60 * 60 * 1000
-    if (this.xperpMap.size && fresh && !force) {
+    const now = +new Date()
+    const fresh = now - this.xperpMapLoaded < 60 * 60 * 1000
+    // A map that is fresh but does NOT hold the instFamily we are about to
+    // translate is worthless for this call: `updateSymbol` falls through to
+    // `?? s` and hands OKX the bare instFamily, which it rejects with 51001
+    // ("Instrument ID ... doesn't exist"). That is what the hourly funding
+    // cron logged for a whole X-Perp symbol at a time, and it repeats every
+    // run until the 1h cache happens to expire. Refresh on the miss instead —
+    // rate-limited, so an instrument OKX genuinely does not serve cannot turn
+    // every call into an instruments fetch.
+    const missing =
+      !!symbolHint && !this.xperpMap.has(this.clearSymbol(symbolHint))
+    const missRetryable = now - this.xperpMapMissLoaded >= XPERP_MISS_RETRY_MS
+    if (this.xperpMap.size && fresh && !force && !(missing && missRetryable)) {
       return
+    }
+    if (missing) {
+      this.xperpMapMissLoaded = now
     }
     const res = await this.client
       .getInstruments({ instType: 'FUTURES' })

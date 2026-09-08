@@ -23,10 +23,22 @@ import { createHash } from 'crypto'
 import { Futures, StatusEnum } from '../../types'
 import KrakenExchange from './index'
 
-/** Three live client-id families, one per §1.2 row of the spec. */
+/**
+ * Three live client-id families, one per §1.2 row of the spec. These are the
+ * LEGACY 35-character shape — still resting on live accounts, still encoded.
+ */
 const DCA_A = 'D-RO-o54rqRLIW9rTGgeSaVaepKlstZBZpY'
 const DCA_B = 'D-BO-2hZJUI42yQT8IiRDrXtOACvRR9hlVF'
 const GRID = 'GRID-RO-roa6DwlXK15XEWuphyR6c4aejKj'
+
+/**
+ * The NEW shape (§4.9): what main-app generates for a Kraken spot bot since its
+ * spec 010 — inside Kraken's 18-character free-text budget, so it is sent
+ * verbatim and the id on the order row IS the id Kraken holds. `GRID-STAB` is
+ * the longest prefix in the codebase, so this is the tightest case.
+ */
+const NEW_DCA = 'D-RO-Ab3xK9pQ'
+const NEW_GRID = 'GRID-STAB-zT5628'
 
 /** The expected encoding, written out independently of the implementation. */
 const enc = (id: string) =>
@@ -319,6 +331,264 @@ describe('kraken spot native cl_ord_id', () => {
       'never resolves to an order that carries a different cl_ord_id',
       () => res.data?.orderId !== 'ONEWWWW-2222-BBBBBB',
       true,
+    )
+  })
+})
+
+/**
+ * §4.9 — the three-way discriminator.
+ *
+ * `cl_ord_id` above solved "Kraken cannot resolve our client id" by encoding it,
+ * which works but leaves the database holding an id the venue does not know.
+ * main-app now generates Kraken spot ids inside Kraken's 18-character free-text
+ * budget (its `specs/010.kraken-spot-client-order-id-length.md`), so the
+ * connector reads the SHAPE of the incoming id and picks a path:
+ *
+ *   txid            -> QueryOrders                          (§4.8, unchanged)
+ *   <=18-char text  -> cl_ord_id verbatim                    (§4.9, new)
+ *   ~35-char legacy -> sha32 cl_ord_id + userref fallback    (§4.6, unchanged)
+ */
+describe('kraken spot free-text cl_ord_id (§4.9)', () => {
+  describe('the discriminator itself', () => {
+    const ex: any = new KrakenExchange(Futures.null, '', '')
+    check(
+      'a new short id is free text',
+      () => ex.isKrakenFreeTextClOrdId(NEW_GRID),
+      true,
+    )
+    check(
+      'exactly 18 characters is still free text',
+      () => ex.isKrakenFreeTextClOrdId('A'.repeat(18)),
+      true,
+    )
+    check(
+      '19 is not — it would be rejected by Kraken',
+      () => ex.isKrakenFreeTextClOrdId('A'.repeat(19)),
+      false,
+    )
+    check(
+      'a legacy 35-char id is not',
+      () => ex.isKrakenFreeTextClOrdId(DCA_A),
+      false,
+    )
+    check(
+      'and non-ascii is not, however short',
+      () => ex.isKrakenFreeTextClOrdId('D-RO-é'),
+      false,
+    )
+    check(
+      'a free-text id is sent as itself — no encoding to re-derive',
+      () => ex.krakenClOrdId(NEW_GRID),
+      NEW_GRID,
+    )
+    check(
+      'a legacy id is still encoded',
+      () => ex.krakenClOrdId(DCA_A),
+      enc(DCA_A),
+    )
+  })
+
+  describe('submitOrder sends the id verbatim', () => {
+    const { ex, sent } = makeExchange({
+      'OAAAAA-11111-AAAAAA': row(NEW_GRID, null, '76.95'),
+    })
+    before(async () => {
+      await ex.openOrder({
+        symbol: 'ETHEUR',
+        side: 'BUY',
+        type: 'LIMIT',
+        quantity: 1,
+        price: 76.95,
+        newClientOrderId: NEW_GRID,
+      })
+    })
+    check(
+      'the cl_ord_id on the wire IS our client order id',
+      () => sent.find((s) => s.method === 'submitOrder')?.params.cl_ord_id,
+      NEW_GRID,
+    )
+    check(
+      'and still no userref — the two are mutually exclusive (§4.2)',
+      () =>
+        Object.prototype.hasOwnProperty.call(
+          sent.find((s) => s.method === 'submitOrder')?.params || {},
+          'userref',
+        ),
+      false,
+    )
+  })
+
+  describe('getOrder resolves it off the row Kraken returns', () => {
+    const { ex } = makeExchange({
+      'OZZZZZ-99999-ZZZZZZ': row(NEW_DCA, null, '2500.00'),
+      'ONK6O3-BF63X-24VAON': row(NEW_GRID, null, '76.95'),
+    })
+    let res: any
+    before(async () => {
+      res = await ask(ex, NEW_GRID)
+    })
+    check('resolves', () => res.status, StatusEnum.ok)
+    check('to its order', () => res.data?.orderId, 'ONK6O3-BF63X-24VAON')
+    check('echoing our own id back', () => res.data?.clientOrderId, NEW_GRID)
+  })
+
+  describe('a free-text id is NEVER resolved through a derived userref', () => {
+    // The collision does not go away just because the id got shorter:
+    // parseInt('D-RO-Ab3', 16) is still 13, the same value every legacy `D-*`
+    // order on the account carries. A new id can only exist on an order that
+    // carries a cl_ord_id, so the legacy scan could only ever hand back
+    // somebody else's order — it must not run at all.
+    const { ex, sent } = makeExchange({
+      'OLEGACY-1111-AAAAAA': row(null, 13, '2403.51'),
+    })
+    let res: any
+    before(async () => {
+      res = await ask(ex, NEW_DCA)
+    })
+    check('does not resolve', () => res.status, StatusEnum.notok)
+    check(
+      'and never asks ClosedOrders to filter by userref',
+      () =>
+        sent.filter(
+          (s) =>
+            s.method === 'getClosedOrders' && s.params.userref !== undefined,
+        ).length,
+      0,
+    )
+  })
+
+  describe('legacy and new orders coexist on one account (§4.6 + §4.9)', () => {
+    const { ex } = makeExchange({
+      'OLEGACY-1111-AAAAAA': row(null, 13, '2403.51'),
+      'ONEWWWW-2222-BBBBBB': row(NEW_DCA, null, '2500.00'),
+    })
+    let legacyRes: any
+    let newRes: any
+    before(async () => {
+      legacyRes = await ask(ex, DCA_A)
+      newRes = await ask(ex, NEW_DCA)
+    })
+    check(
+      'the legacy id resolves to the legacy order',
+      () => [legacyRes.status, legacyRes.data?.orderId],
+      [StatusEnum.ok, 'OLEGACY-1111-AAAAAA'],
+    )
+    check(
+      'the new id resolves to the new order',
+      () => [newRes.status, newRes.data?.orderId],
+      [StatusEnum.ok, 'ONEWWWW-2222-BBBBBB'],
+    )
+  })
+
+  describe('closed orders are asked for the id itself', () => {
+    const { ex, sent } = makeExchange(
+      {},
+      {
+        'OCCCCC-33333-CCCCCC': row(NEW_GRID, null, '76.95', 'closed'),
+        'ODDDDD-44444-DDDDDD': row(NEW_DCA, null, '2500.00', 'closed'),
+      },
+    )
+    let res: any
+    before(async () => {
+      res = await ask(ex, NEW_GRID)
+    })
+    check(
+      'filtered server-side by our own client order id',
+      () => sent.find((s) => s.method === 'getClosedOrders')?.params.cl_ord_id,
+      NEW_GRID,
+    )
+    check(
+      'resolves to the right closed order, with its fill',
+      () => [res.status, res.data?.orderId, res.data?.executedQty],
+      [StatusEnum.ok, 'OCCCCC-33333-CCCCCC', '1.0'],
+    )
+    check(
+      'in one call — no second candidate is paid for on a hit',
+      () => sent.filter((s) => s.method === 'getClosedOrders').length,
+      1,
+    )
+  })
+
+  describe('an order placed across a split deploy still resolves', () => {
+    // main-app and the connector deploy separately. An order submitted by the
+    // new main-app while the PREVIOUS connector was still running was hashed on
+    // the way out, so Kraken holds sha32(shortId) for it. Without the second
+    // candidate that order becomes unresolvable the moment this code goes live,
+    // getOrder answers "Order not found in history", and main-app reads that as
+    // a venue denial and retires a live order as a phantom.
+    const { ex, sent } = makeExchange(
+      { 'OSPLIT1-1111-AAAAAA': row(enc(NEW_DCA), null, '2403.51') },
+      { 'OSPLIT2-2222-BBBBBB': row(enc(NEW_GRID), null, '76.95', 'closed') },
+    )
+    let open: any
+    let closed: any
+    before(async () => {
+      open = await ask(ex, NEW_DCA)
+      closed = await ask(ex, NEW_GRID)
+    })
+    check(
+      'the resting one resolves off the encoded row',
+      () => [open.status, open.data?.orderId],
+      [StatusEnum.ok, 'OSPLIT1-1111-AAAAAA'],
+    )
+    check(
+      'and the filled one too, after the verbatim filter misses',
+      () => [closed.status, closed.data?.orderId],
+      [StatusEnum.ok, 'OSPLIT2-2222-BBBBBB'],
+    )
+    check(
+      'which is what the second ClosedOrders call buys — verbatim, then sha32',
+      () =>
+        sent
+          .filter((s) => s.method === 'getClosedOrders')
+          .map((s) => s.params.cl_ord_id),
+      // The resting one never gets here: the open-orders scan is unfiltered, so
+      // matching the encoded row costs nothing extra there.
+      [NEW_GRID, enc(NEW_GRID)],
+    )
+  })
+
+  describe('cancel still goes out by the real venue txid (§4.7)', () => {
+    const { ex, sent } = makeExchange({
+      'ONK6O3-BF63X-24VAON': row(NEW_GRID, null, '76.95'),
+    })
+    let cancelled: any
+    before(async () => {
+      cancelled = await ex.cancelOrder({
+        symbol: 'ETHEUR',
+        newClientOrderId: NEW_GRID,
+      })
+    })
+    check('the cancel succeeds', () => cancelled.status, StatusEnum.ok)
+    check(
+      'addressed by txid, not by cl_ord_id',
+      () => sent.find((s) => s.method === 'cancelOrder')?.params,
+      { txid: 'ONK6O3-BF63X-24VAON' },
+    )
+    check(
+      'and reports that txid back, so main-app stores a truthful orderId',
+      () => cancelled.data?.orderId,
+      'ONK6O3-BF63X-24VAON',
+    )
+  })
+
+  describe('the txid path is untouched (§4.8)', () => {
+    const { ex, sent } = makeExchange({
+      'ONK6O3-BF63X-24VAON': row(NEW_GRID, null, '76.95'),
+    })
+    let res: any
+    before(async () => {
+      res = await ask(ex, 'ONK6O3-BF63X-24VAON')
+    })
+    check(
+      'a txid still resolves through QueryOrders',
+      () => [res.status, res.data?.orderId],
+      [StatusEnum.ok, 'ONK6O3-BF63X-24VAON'],
+    )
+    check(
+      'and never touches the open-orders scan',
+      () => sent.filter((s) => s.method === 'getOpenOrders').length,
+      0,
     )
   })
 })

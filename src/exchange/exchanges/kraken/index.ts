@@ -428,6 +428,18 @@ const KRAKEN_TRADE_VOLUME_CHUNK = 50
 const KRAKEN_QUERY_ORDERS_MAX = 50
 
 /**
+ * Kraken's ceiling on the FREE-TEXT form of `cl_ord_id`, in characters.
+ *
+ * Kraken accepts a client order id as a long UUID (8-4-4-4-12 hex), a short
+ * UUID (32 hex, no dashes), or "free format ascii text up to 18 characters".
+ * Only the last one can carry an id we chose, so this length is what separates
+ * an id that can be sent verbatim from one that has to be encoded — and it is
+ * the same budget main-app generates Kraken spot ids inside
+ * (`main-app core/src/bot/main.ts` `KRAKEN_CL_ORD_ID_MAX_LENGTH`, spec 010).
+ */
+const KRAKEN_FREE_TEXT_CL_ORD_ID_MAX = 18
+
+/**
  * How many times `checkLimits` will wait and re-ask the budget before letting
  * the call through anyway. Each wait is the limiter's own estimate of when the
  * counter admits it, so the normal case resolves on the first retry; the
@@ -1962,28 +1974,89 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * Is this id already legal as Kraken's FREE-TEXT `cl_ord_id`?
+   *
+   * "Free format ascii text up to 18 characters". main-app now generates Kraken
+   * spot client order ids inside that budget
+   * (`main-app core/src/bot/main.ts` `getOrderId`, spec 010), e.g.
+   * `GRID-STAB-zT5628` — so from those callers the id needs no encoding at all
+   * and the id on the Gainium order row IS the id Kraken holds.
+   *
+   * This is the discriminator between the new form and the ~35-character legacy
+   * one, and it is a property of the id itself, so nothing has to be stored and
+   * the two populations can coexist indefinitely. Callers check
+   * {@link KrakenExchange#isKrakenSpotTxid} first, so a txid never reaches here.
+   */
+  private isKrakenFreeTextClOrdId(id: string): boolean {
+    return (
+      id.length > 0 &&
+      id.length <= KRAKEN_FREE_TEXT_CL_ORD_ID_MAX &&
+      // ASCII printable, which is all "free format ascii text" can be. Gainium
+      // ids are `[A-Za-z0-9-]`; the guard is here for anything else a caller
+      // hands us, so a byte Kraken would reject is encoded instead of sent.
+      /^[\x20-\x7e]+$/.test(id)
+    )
+  }
+
+  /**
    * A Gainium client order id as Kraken's native `cl_ord_id`.
    *
    * Kraken accepts exactly three forms: a long UUID (8-4-4-4-12 hex), a SHORT
-   * UUID (32 hex, no dashes), or free ASCII text of at most 18 characters. A
-   * Gainium client order id is ~35 mixed-case alphanumerics
-   * (`D-RO-o54rqRLIW9rTGgeSaVaepKlstZBZpY`) and is none of the three, so it
-   * cannot be passed through — it has to be encoded.
+   * UUID (32 hex, no dashes), or free ASCII text of at most 18 characters.
    *
-   * sha256 of the WHOLE id, first 32 hex chars: the short-UUID form.
-   * Deterministic, so submitOrder, getOrder and cancelOrder all recompute the
-   * same value with nothing stored and no mapping to keep in sync. 128 bits,
-   * so two client ids do not collide.
+   * - **New ids pass through verbatim.** main-app generates Kraken spot ids
+   *   inside the 18-character free-text budget, so the id is sent as-is. That is
+   *   the whole point of the pair of changes: the DB id and the venue id are one
+   *   string, so an order can be addressed at Kraken — by us, by an operator, by
+   *   any future caller — without re-deriving anything.
+   * - **Legacy ids are encoded.** A pre-spec-010 id is ~35 mixed-case
+   *   alphanumerics (`D-RO-o54rqRLIW9rTGgeSaVaepKlstZBZpY`) and is none of the
+   *   three forms, so it becomes sha256 of the WHOLE id, first 32 hex chars —
+   *   the short-UUID form. Deterministic, so submitOrder, getOrder and
+   *   cancelOrder all recompute the same value with nothing stored; 128 bits, so
+   *   two client ids do not collide.
    *
-   * Truncating the client id to 18 characters would also satisfy Kraken and is
-   * deliberately NOT done: `D-RO-` plus 13 characters is not unique across a
-   * bot's orders, and a non-injective encoding is the entire defect this
-   * replaces (`userref = parseInt(id.substring(0,8), 16)` collapsed every `D-*`
-   * id to 13, every `CMB-*` to 12 and every `GRID-*` to NaN). See
+   * Truncating a legacy id to 18 characters instead is deliberately NOT done:
+   * `D-RO-` plus 13 characters is not unique across a bot's orders, and a
+   * non-injective encoding is the entire defect this replaces
+   * (`userref = parseInt(id.substring(0,8), 16)` collapsed every `D-*` id to 13,
+   * every `CMB-*` to 12 and every `GRID-*` to NaN). See
    * `specs/003.kraken-spot-native-cl-ord-id.md`.
    */
   private krakenClOrdId(clientOrderId: string): string {
+    if (this.isKrakenFreeTextClOrdId(clientOrderId)) {
+      return clientOrderId
+    }
+    return this.krakenShortUuidClOrdId(clientOrderId)
+  }
+
+  /** The short-UUID encoding itself, so its one other caller cannot drift. */
+  private krakenShortUuidClOrdId(clientOrderId: string): string {
     return createHash('sha256').update(clientOrderId).digest('hex').slice(0, 32)
+  }
+
+  /**
+   * Every `cl_ord_id` an order placed under THIS client id could be carrying,
+   * most likely first.
+   *
+   * One value for a legacy id (the sha32 encoding). Two for a new free-text id:
+   * the id itself, and its sha32 encoding — because main-app and the connector
+   * deploy separately, and an order submitted by the new main-app while the old
+   * connector was still running was hashed on the way out. Without the second
+   * candidate that order becomes unresolvable the moment this code goes live,
+   * `getOrder` answers "Order not found in history", and main-app reads that as
+   * a venue denial and retires a live order as a phantom. One extra ClosedOrders
+   * call on a miss is the price; the open-orders scan is unfiltered, so there it
+   * costs nothing.
+   */
+  private krakenClOrdIdCandidates(clientOrderId: string): string[] {
+    if (!clientOrderId) {
+      return []
+    }
+    if (!this.isKrakenFreeTextClOrdId(clientOrderId)) {
+      return [this.krakenClOrdId(clientOrderId)]
+    }
+    return [clientOrderId, this.krakenShortUuidClOrdId(clientOrderId)]
   }
 
   /**
@@ -2558,38 +2631,48 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
 
         const orders = result.result.open || {}
-        const clOrdId = newClientOrderId
-          ? this.krakenClOrdId(newClientOrderId)
-          : undefined
+        const clOrdIds = this.krakenClOrdIdCandidates(newClientOrderId)
 
         // The exact answer: Kraken carries our own client order id back on
         // every row, so identity is read, not inferred.
-        const exact = clOrdId
+        const exact = clOrdIds.length
           ? Object.entries(orders).filter(
-              ([, orderData]) => orderData.cl_ord_id === clOrdId,
+              ([, orderData]) =>
+                !!orderData.cl_ord_id && clOrdIds.includes(orderData.cl_ord_id),
             )
           : []
 
-        // LEGACY ONLY. Orders placed before the cl_ord_id switch carry a
-        // `userref = parseInt(id.substring(0,8), 16)` and nothing else, and stay
-        // resting on live accounts until they drain — so they must still be
-        // findable, or main-app reads "not found" and retires a live order as a
-        // phantom. That userref is NOT evidence of identity: parseInt stops at
-        // the first non-hex char, so every `D-*` id collapses to 13 and every
-        // `CMB-*` to 12. Hence the same rule as before — one candidate is an
-        // answer, several are a refusal (`ambiguousUserrefMatch`). A row that
-        // carries some OTHER cl_ord_id is definitively not the order asked
-        // about and is excluded, so a new order can never be reached this way.
-        const userref = newClientOrderId
+        // LEGACY ONLY, and only for a LEGACY-SHAPED id. Orders placed before the
+        // cl_ord_id switch carry a `userref = parseInt(id.substring(0,8), 16)`
+        // and nothing else, and stay resting on live accounts until they drain —
+        // so they must still be findable, or main-app reads "not found" and
+        // retires a live order as a phantom. That userref is NOT evidence of
+        // identity: parseInt stops at the first non-hex char, so every `D-*` id
+        // collapses to 13 and every `CMB-*` to 12. Hence the same rule as before
+        // — one candidate is an answer, several are a refusal
+        // (`ambiguousUserrefMatch`). A row that carries some OTHER cl_ord_id is
+        // definitively not the order asked about and is excluded, so a new order
+        // can never be reached this way.
+        //
+        // A free-text id is never asked this question. It can only exist on an
+        // order placed after spec 010, which therefore carries a cl_ord_id and is
+        // resolved above or not at all — and its own derived userref collides in
+        // exactly the same way (`D-RO-xxxxxx` also reads as 13), so running the
+        // scan for it could only ever return somebody else's order.
+        const legacyShaped =
+          !!newClientOrderId && !this.isKrakenFreeTextClOrdId(newClientOrderId)
+        const userref = legacyShaped
           ? parseInt(newClientOrderId.substring(0, 8), 16)
           : undefined
         const matches = exact.length
           ? exact
-          : Object.entries(orders).filter(
-              ([, orderData]) =>
-                !orderData.cl_ord_id &&
-                orderData.userref?.toString() === userref?.toString(),
-            )
+          : legacyShaped
+            ? Object.entries(orders).filter(
+                ([, orderData]) =>
+                  !orderData.cl_ord_id &&
+                  orderData.userref?.toString() === userref?.toString(),
+              )
+            : []
         if (matches.length > 1) {
           return this.ambiguousUserrefMatch(
             newClientOrderId,
@@ -2639,10 +2722,13 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               )) || timeProfile
             timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
-            const clOrdId = newClientOrderId
-              ? this.krakenClOrdId(newClientOrderId)
-              : undefined
-            const userref = newClientOrderId
+            const clOrdIds = this.krakenClOrdIdCandidates(newClientOrderId)
+            // Legacy-shaped ids only — see the open-orders scan for why a
+            // free-text id must never be resolved through a derived userref.
+            const legacyShaped =
+              !!newClientOrderId &&
+              !this.isKrakenFreeTextClOrdId(newClientOrderId)
+            const userref = legacyShaped
               ? parseInt(newClientOrderId.substring(0, 8), 16)
               : undefined
 
@@ -2665,11 +2751,21 @@ class KrakenExchange extends AbstractExchange implements Exchange {
             // ignored an unrecognised parameter would return every closed
             // order, and trusting the filter alone would resolve an arbitrary
             // one — exactly the failure this change removes.
-            const exactClosed = clOrdId
-              ? (await fetchClosed({ cl_ord_id: clOrdId })).filter(
-                  ([, orderData]) => orderData.cl_ord_id === clOrdId,
-                )
-              : []
+            //
+            // A free-text id has a second candidate (its sha32 encoding, for an
+            // order submitted while the previous connector was still running —
+            // see `krakenClOrdIdCandidates`). ClosedOrders filters server-side
+            // and takes one `cl_ord_id`, so the candidates are asked in order and
+            // the second is paid for only when the first missed.
+            let exactClosed: Awaited<ReturnType<typeof fetchClosed>> = []
+            for (const candidate of clOrdIds) {
+              exactClosed = (
+                await fetchClosed({ cl_ord_id: candidate })
+              ).filter(([, orderData]) => orderData.cl_ord_id === candidate)
+              if (exactClosed.length) {
+                break
+              }
+            }
 
             // LEGACY ONLY, and one extra venue call — paid only when the exact
             // lookup found nothing, and only until pre-cl_ord_id orders drain.

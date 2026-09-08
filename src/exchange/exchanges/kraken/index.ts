@@ -36,6 +36,11 @@ import {
 } from '../../../kraken-custom'
 import limitHelper from './limit'
 import { krakenLadderFee, krakenOrderFee } from './fees'
+import {
+  aggregateCandles,
+  krakenSpotCandleSource,
+  krakenSpotWindowIsUnreachable,
+} from './candles'
 import { Logger } from '@nestjs/common'
 import { createHash } from 'crypto'
 import { sleep } from '../../../utils/sleepUtils'
@@ -135,20 +140,11 @@ const KRAKEN_XSTOCK_ETFS = new Set<string>([
   'BITX',
 ])
 
-// Interval mapping for Kraken
-const intervalMap: { [x in ExchangeIntervals]: number } = {
-  '1m': 1,
-  '3m': 3,
-  '5m': 5,
-  '15m': 15,
-  '30m': 30,
-  '1h': 60,
-  '2h': 120,
-  '4h': 240,
-  '8h': 480,
-  '1d': 1440,
-  '1w': 10080,
-}
+// Interval mapping for Kraken spot lives in `./candles`
+// (`krakenSpotCandleSource`). It used to be a bare `interval -> minutes` map
+// here, which read like a capability map but was only a unit conversion: three
+// of its eleven entries (3m/2h/8h -> 3/120/480) are values /0/public/OHLC
+// rejects outright. See bug #709.
 
 /**
  * Singleton class to manage Kraken symbol mappings
@@ -4007,8 +4003,6 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     count?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
-    const intervalMinutes = intervalMap[interval]
-
     if (this.usdm) {
       if (!this.derivativesClient) {
         return this.errorClient(timeProfile)
@@ -4067,6 +4061,37 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       return this.errorClient(timeProfile)
     }
 
+    // `intervalMap` is a unit conversion, not a statement of what Kraken spot
+    // serves: it maps 3m/2h/8h to 3/120/480, none of which /0/public/OHLC
+    // accepts, so those three were rejected with `EGeneral:Invalid arguments`
+    // for every symbol and every window (bug #709). Kraken can still produce
+    // those bars — each is an exact multiple of a supported interval — so ask
+    // for the base it does serve and aggregate up.
+    const source = krakenSpotCandleSource(interval)
+    if (!source) {
+      // Unreachable with today's ExchangeIntervals, and deliberately so: a
+      // twelfth interval must fail here, once, rather than as a venue rejection
+      // repeated per window across every egress node. Returning before the
+      // request also keeps it out of `handleKrakenErrors`' retry ladder.
+      return this.returnBad(timeProfile)(
+        new KrakenError(
+          `Kraken spot does not support the ${interval} candle interval`,
+          '400',
+        ),
+      )
+    }
+
+    // Kraken always answers with the ~720 most recent candles — `since` cannot
+    // page backwards — so a window that ends before that horizon is guaranteed
+    // to filter down to nothing below. It used to cost one public
+    // (per-egress-IP) request per window, per node, per caller retry to learn
+    // that, which is the budget `EGeneral:Too many requests` is the exhaustion
+    // of. Answer it from here instead, with the same empty OK the request
+    // would have produced.
+    if (krakenSpotWindowIsUnreachable(to, source.baseMinutes, Date.now())) {
+      return this.returnGood<CandleResponse[]>(timeProfile)([])
+    }
+
     timeProfile =
       (await this.checkLimits('getCandles', symbol, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
@@ -4074,7 +4099,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     return this.spotClient
       .getCandles({
         pair: await this.toKrakenSymbol(symbol),
-        interval: intervalMinutes as
+        interval: source.baseMinutes as
           1 | 5 | 15 | 30 | 60 | 240 | 1440 | 10080 | 21600,
         since: from ? Math.floor(from / 1000) : undefined,
         ...this.xstockParams(symbol),
@@ -4101,6 +4126,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           close: candle[4],
           volume: candle[6],
         }))
+
+        // Roll the base interval up to the one that was asked for. No-op
+        // (bucketMs 0) for the eight intervals Kraken serves natively, so their
+        // response is byte-identical to before. Done BEFORE the range filter so
+        // a bar is built from every base candle Kraken returned for it.
+        candles = aggregateCandles(candles, source.bucketMs)
 
         // Filter by time range if specified
         if (from) {

@@ -50,6 +50,7 @@ import {
   CoinbaseFees,
   CreateOrderResponse,
   CurrentApiKeyPermissions,
+  OrderListQueryParam,
 } from 'coinbase-advanced-node'
 import limitHelper from './limit'
 import { normalizeSidedOrderFee } from '../../helpers/orderFee'
@@ -82,6 +83,32 @@ const coinbaseAuthError = (e: unknown): Error => {
   const message = parts.join(' ').trim() || safeStringify(e)
   return new Error(message.length > 300 ? `${message.slice(0, 300)}…` : message)
 }
+
+/**
+ * Rows per page when listing orders.
+ *
+ * This has to be sent explicitly: `coinbase-advanced-node`'s `getOrders`
+ * substitutes `limit = 25` whenever the caller omits one, so an unpaginated
+ * caller silently gets 25 orders and no indication that there were more. 250
+ * is the page size `getBalance` already uses against Coinbase in this file.
+ */
+const ORDER_PAGE_SIZE = 250
+
+/**
+ * Hard ceiling on pages walked in one listing call (= 5 000 orders).
+ *
+ * A venue that keeps saying `has_next` — through a bug or a bad cursor — must
+ * not be able to hold this method open indefinitely.
+ */
+const MAX_ORDER_PAGES = 20
+
+/**
+ * `getOrders` forwards its whole query object into the request's query string,
+ * so `cursor` does reach Coinbase; the SDK's published `OrderListQueryParam`
+ * simply never declared the field. Naming the widening once, here, keeps the
+ * cast off the call site.
+ */
+type OrderPageQuery = OrderListQueryParam & { cursor?: string }
 
 class CoinbaseError extends Error {}
 
@@ -483,9 +510,10 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
   ) {
     timeProfile =
       (await this.checkLimits('private', timeProfile)) || timeProfile
-    const input: { product_id?: string; order_status: OrderStatus[] } = {
+    const input: OrderPageQuery = {
       product_id: symbol,
       order_status: [OrderStatus.OPEN],
+      limit: ORDER_PAGE_SIZE,
     }
     if (!symbol) {
       delete input.product_id
@@ -495,16 +523,54 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
       this.client.rest.order.getOrders(input),
     )
       .then(async (orders) => {
+        // Coinbase returns open orders one page at a time. Follow
+        // `has_next`/`cursor` to the end, the way `getBalance` does below —
+        // otherwise an account with more resting orders than one page reports
+        // only its first page, with no error to say so. Keyed by order id so a
+        // cursor that fails to advance cannot double-count a page.
+        const byId = new Map<string, Order>()
+        for (const o of orders.data) {
+          byId.set(o.order_id, o)
+        }
+        let pagination = orders.pagination
+        const requested = new Set<string>()
+        let pages = 1
+        while (
+          pagination?.has_next &&
+          pagination.cursor &&
+          !requested.has(pagination.cursor) &&
+          pages < MAX_ORDER_PAGES
+        ) {
+          const cursor = pagination.cursor
+          requested.add(cursor)
+          pages++
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          timeProfile =
+            (await this.checkLimits('private', timeProfile)) || timeProfile
+          timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+          const pageQuery: OrderPageQuery = { ...input, cursor }
+          const page = await this.callWithTimeout<PaginatedData<Order>>(() =>
+            this.client.rest.order.getOrders(pageQuery),
+          )
+          if (!page.data.length) {
+            break
+          }
+          for (const o of page.data) {
+            byId.set(o.order_id, o)
+          }
+          pagination = page.pagination
+        }
+        const allOrders = [...byId.values()]
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         const convertedOrders: CommonOrder[] = []
         if (returnOrders) {
-          for (const o of orders.data) {
+          for (const o of allOrders) {
             const data = await this.convertOrder(o)
             convertedOrders.push(data)
           }
           return this.returnGood<CommonOrder[]>(timeProfile)(convertedOrders)
         }
-        return this.returnGood<number>(timeProfile)(orders.data.length)
+        return this.returnGood<number>(timeProfile)(allOrders.length)
       })
       .catch(
         this.handleCoinbaseErrors<BaseReturn<CommonOrder[] | number>>(

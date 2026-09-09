@@ -351,13 +351,40 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         if (get.code === '00000') {
           const data = get.data as FuturesAssets[]
           data.map((d) => {
-            const available = +d.available
-            const margin =
-              +(d as any).isolatedMargin + +(d as any).crossedMargin
+            // `free` and `locked` are a PARTITION of the coin's wallet
+            // balance — every consumer renders `free + locked` as the account
+            // total — so they have to be derived from that balance, not from
+            // `available`. Bitget's `available` is not net of the margin
+            // backing a CROSSED position (in cross mode the whole balance
+            // backs it, so it keeps counting as available); reading it as
+            // `free` and adding the position margin as `locked` counted that
+            // margin twice. `accountEquity` is documented as equity
+            // *including* unrealized PnL, so equity - unrealizedPL is the
+            // wallet balance — the same figure Bybit anchors on.
+            const num = (v: unknown) => {
+              const n = parseFloat(`${v ?? ''}`)
+              return Number.isFinite(n) ? n : 0
+            }
+            const equityBased = num(d.accountEquity) - num(d.unrealizedPL)
+            // Product types that omit the equity fields fall back to the
+            // venue's own two-term split; reporting 0 would read as an
+            // emptied account.
+            const walletBalance =
+              equityBased > 0 ? equityBased : num(d.available) + num(d.locked)
+            // Order-frozen funds plus whatever is committed to positions, in
+            // either margin mode. Clamped so `free` cannot go negative and
+            // the partition stays exact.
+            const committed = Math.min(
+              Math.max(
+                num(d.locked) + num(d.isolatedMargin) + num(d.crossedMargin),
+                0,
+              ),
+              walletBalance,
+            )
             res.push({
               asset: d.marginCoin,
-              free: available,
-              locked: margin,
+              free: walletBalance - committed,
+              locked: committed,
             })
           })
         } else {

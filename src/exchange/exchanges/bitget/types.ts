@@ -58,6 +58,10 @@ export type FuturesAssets = {
   btcEquity: string
   crossedRiskRate: string
   unrealizedPL: string
+  /** Margin committed to isolated-margin positions. Not sent by every product type. */
+  isolatedMargin?: string
+  /** Margin committed to crossed-margin positions. Not sent by every product type. */
+  crossedMargin?: string
   coupon: string
   unionTotalMagin: string
   unionAvailable: string

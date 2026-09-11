@@ -348,7 +348,12 @@ class BybitExchange extends AbstractExchange implements Exchange {
       const coins = new Set(allPairs.data.map((p) => p.quoteAsset.name))
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       for (const coin of coins) {
-        await this.client
+        // A settle coin that fails must fail the WHOLE read: returning the
+        // coins that did answer would hand the caller a short list stamped OK,
+        // and a missing symbol reads as a closed position. `symbol` is passed
+        // to the handler (undefined here) so its retry re-enters this branch
+        // instead of taking the TimeProfile as a symbol.
+        const failed = await this.client
           .getPositionInfo({ category, limit: 200, settleCoin: coin })
           .then(async (result) => {
             if (result.retMsg === 'OK') {
@@ -357,8 +362,24 @@ class BybitExchange extends AbstractExchange implements Exchange {
               )) {
                 data.push(await this.convertPosition(p))
               }
+              return null
             }
+            return this.handleBybitErrors<BaseReturn<PositionInfo[]>>(
+              this.futures_getPositions,
+              symbol,
+              this.endProfilerTime(timeProfile, 'exchange'),
+            )(new BybitError(result.retMsg, result.retCode))
           })
+          .catch(
+            this.handleBybitErrors<BaseReturn<PositionInfo[]>>(
+              this.futures_getPositions,
+              symbol,
+              this.endProfilerTime(timeProfile, 'exchange'),
+            ),
+          )
+        if (failed) {
+          return failed
+        }
       }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       return this.returnGood<PositionInfo[]>(timeProfile)(data)

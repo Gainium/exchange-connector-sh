@@ -53,6 +53,7 @@ import {
   OrderListQueryParam,
 } from 'coinbase-advanced-node'
 import limitHelper from './limit'
+import { unstatedOrderFields, unreadableOrderPayload } from './orderPayload'
 import { normalizeSidedOrderFee } from '../../helpers/orderFee'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
@@ -419,7 +420,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
             )
           }
           return this.returnGood<CommonOrder>(timeProfile)(
-            await this.convertOrder(order),
+            await this.convertOrder(order, newClientOrderId),
           )
         }
         return this.handleCoinbaseErrors(
@@ -714,7 +715,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
           }
         }
         return this.returnGood<CommonOrder>(timeProfile)(
-          await this.convertOrder(res),
+          await this.convertOrder(res, newClientOrderId),
         )
       })
       .catch(
@@ -1005,7 +1006,32 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
    * @param {boolean} needFills is needed to query fills
    * @returns {Promise<CommonOrder>} Common order result
    */
-  private async convertOrder(order?: Order): Promise<CommonOrder> {
+  private async convertOrder(
+    order?: Order,
+    askedFor?: string,
+  ): Promise<CommonOrder> {
+    // Spec `008`. Everything below substitutes a default for whatever the
+    // payload omits — `order_type` becomes `MARKET`, `side` becomes `BUY`, a
+    // missing `created_time` becomes `new Date(undefined)` — and the caller
+    // wraps the result in `returnGood`. So a payload that says `FILLED` and
+    // nothing else came back as a confident, fully formed FILLED MARKET BUY
+    // order, and the bot engine persisted that stamp over live order rows of
+    // every kind, including take-profits that had been placed SELL LIMIT.
+    //
+    // `status: OK` means "here is the venue's answer" (`BaseReturn`, the
+    // platform's most load-bearing contract) and no consumer has a second
+    // source to check it against. A payload that does not say what the order
+    // IS is not an answer about it — refuse, and let the caller's reconcile
+    // ask again, which is what it is built to do.
+    const unstated = unstatedOrderFields(order)
+    if (unstated.length) {
+      throw new CoinbaseError(
+        unreadableOrderPayload(
+          askedFor ?? order?.order_id ?? 'order',
+          unstated,
+        ),
+      )
+    }
     const orderStatus = (): OrderStatusType => {
       const { status, completion_percentage } = order
       if ([OrderStatus.OPEN, OrderStatus.PENDING].includes(status)) {

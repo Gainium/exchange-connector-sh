@@ -42,6 +42,7 @@ import { normalizeOrderFee } from '../../helpers/orderFee'
 import { bitgetSpotFeeDetail } from './fees'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
+import { keyFingerprint } from '../../../utils/keyFingerprint'
 import {
   FuturesAssets,
   FuturesSubmitOrderResponse,
@@ -2640,7 +2641,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             Logger.log(
               `Bitget Too many visits wait ${time}s ${timeProfile.attempts} ${
                 cb.name
-              } ${this.key}`,
+              } key#${keyFingerprint(this.key)}`,
             )
             await sleep(time)
           }
@@ -2650,7 +2651,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
               Logger.log(
                 `Bitget too many requests wait ${time}ms ${
                   timeProfile.attempts
-                } ${cb.name} ${this.key}`,
+                } ${cb.name} key#${keyFingerprint(this.key)}`,
               )
             }
             await sleep(time)
@@ -2660,7 +2661,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             Logger.log(
               `Bitget 403 block wait ${time}s ${timeProfile.attempts} ${
                 cb.name
-              } ${this.key}`,
+              } key#${keyFingerprint(this.key)}`,
             )
             await sleep(time)
           }

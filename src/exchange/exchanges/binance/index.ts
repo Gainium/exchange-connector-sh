@@ -61,6 +61,7 @@ import {
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { safeStringify } from '../../../utils/redact'
+import { keyFingerprint } from '../../../utils/keyFingerprint'
 
 export enum HttpMethod {
   GET = 'GET',
@@ -3091,7 +3092,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           }
           if (e.code === -1015) {
             const time = this.coinm ? 61000 : 11000
-            Logger.warn(`Too many new order ${this.key}, sleep ${time / 1000}s`)
+            Logger.warn(
+              `Too many new order key#${keyFingerprint(this.key)}, sleep ${time / 1000}s`,
+            )
             await sleep(time)
           }
           if (e.code === -1008) {

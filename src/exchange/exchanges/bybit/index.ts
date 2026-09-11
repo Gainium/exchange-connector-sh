@@ -57,6 +57,7 @@ import {
 } from '../../helpers/orderFee'
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
+import { keyFingerprint } from '../../../utils/keyFingerprint'
 
 class BybitError extends Error {
   code: number
@@ -1989,7 +1990,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
             Logger.log(
               `Bybit Too many visits wait ${time}s ${timeProfile.attempts} ${
                 cb.name
-              } ${this.key}`,
+              } key#${keyFingerprint(this.key)}`,
             )
             await sleep(time)
           }

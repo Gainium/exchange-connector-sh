@@ -170,4 +170,30 @@ describe('kraken rate-limit', () => {
       'NOTOK',
     )
   })
+
+  // A nonce rejection is safe to re-sign, but every rejected attempt is also a
+  // strike toward Kraken locking the key. The generic 10-attempt ladder turned a
+  // burst of out-of-order arrivals into dozens of strikes on one key.
+  describe('nonce rejections retry a few times, not the full ladder', () => {
+    let once: { calls: number; waits: number[]; res: any }
+    let sustained: { calls: number; waits: number[]; res: any }
+
+    before(async () => {
+      once = await drive('EAPI:Invalid nonce', 1)
+      sustained = await drive('EAPI:Invalid nonce', 99)
+    })
+
+    expect('a one-off nonce rejection is still retried', () => once.calls, 2)
+    expect('and the retry succeeds', () => once.res?.status, 'OK')
+    expect(
+      'repeated nonce rejections cap at 3 attempts',
+      () => sustained.calls,
+      3,
+    )
+    expect(
+      'gives up as NOTOK rather than looping',
+      () => sustained.res?.status,
+      'NOTOK',
+    )
+  })
 })

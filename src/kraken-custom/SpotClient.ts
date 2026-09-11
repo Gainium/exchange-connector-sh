@@ -1,6 +1,6 @@
 import { SpotClient as SpotClientBase } from '@siebly/kraken-api'
 import { Method } from 'axios'
-import { nextKrakenNonce } from './nonce'
+import { inKrakenKeyOrder, nextKrakenNonce } from './nonce'
 
 export function neverGuard(x: any, msg: string): Error {
   return new Error(`Unhandled value exception "${x}", ${msg}`)
@@ -109,6 +109,28 @@ export class SpotClient extends SpotClientBase {
     networkOptions?: ConstructorParameters<typeof SpotClientBase>[1],
   ) {
     super(restClientOptions, networkOptions)
+  }
+
+  /**
+   * Private calls on one key are signed and sent one at a time — see
+   * `inKrakenKeyOrder`. The nonce is assigned while signing, inside
+   * `super._call`, so the whole call is what has to be ordered. Public calls
+   * carry no nonce and go straight through.
+   */
+  async _call(
+    method: Method,
+    endpoint: string,
+    params?: any,
+    isPublicApi?: boolean,
+  ) {
+    //@ts-expect-error reading private base field
+    const apiKey: string | undefined = this.apiKey
+    //@ts-expect-error calling private base method
+    const call = () => super._call(method, endpoint, params, isPublicApi)
+    if (isPublicApi || !apiKey || this.getClientType() !== 'main') {
+      return call()
+    }
+    return inKrakenKeyOrder(apiKey, call)
   }
 
   override async signRequest<T = any>(

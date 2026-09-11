@@ -255,24 +255,26 @@ describe('kraken outage-backoff', () => {
   })
 
   describe('ordinary transients', () => {
-    let nonce: { calls: number; waits: number[] }
+    // Not a nonce rejection: those are capped at 3 attempts, because every
+    // rejected attempt is a strike toward a key lockout (specs/010).
+    let timeout: { calls: number; waits: number[] }
     before(async () => {
-      nonce = await drive(
-        Object.assign(new Error('EAPI:Invalid nonce'), {
-          body: { error: ['EAPI:Invalid nonce'] },
+      timeout = await drive(
+        Object.assign(new Error('EService:Timeout'), {
+          body: { error: ['EService:Timeout'] },
         }),
         99,
       )
     })
     expect(
       'ordinary transients keep the full 10-attempt ladder',
-      () => nonce.calls,
+      () => timeout.calls,
       10,
     )
     // `attempts` starts at 1 (getEmptyTimeProfile), so the ramp opens at 2s.
     expect(
       'ordinary transients keep the 2s→10s exponential ramp',
-      () => nonce.waits.join(','),
+      () => timeout.waits.join(','),
       '2000,4000,8000,10000,10000,10000,10000,10000,10000',
     )
   })

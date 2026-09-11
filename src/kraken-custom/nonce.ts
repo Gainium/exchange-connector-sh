@@ -59,6 +59,56 @@ export function nextKrakenNonce(apiKey: string | undefined): string {
 }
 
 /**
+ * How long one request may hold its key's place in line before the next
+ * request on that key is let through anyway. A private spot call normally
+ * answers in well under a second; this only matters for a stalled request.
+ */
+export const KRAKEN_KEY_HOLD_MS = 10_000
+
+const tailByApiKey = new Map<string, Promise<void>>()
+
+/**
+ * Run `send` once every earlier request on `apiKey` has been answered.
+ *
+ * A unique, increasing nonce is not enough. Kraken judges nonce order on
+ * ARRIVAL, so two requests signed a millisecond apart and dispatched together
+ * can land reversed, and the earlier nonce is rejected with
+ * `EAPI:Invalid nonce` — enough of those and Kraken locks the key. Signing and
+ * dispatching one request at a time per key closes that within this process,
+ * so `send` must do both: the nonce is assigned inside it.
+ *
+ * The place in line is released when `send` settles, or after `maxHoldMs` so a
+ * request that never answers cannot stall the key. If a request released that
+ * way answers later it may itself be rejected; the retry in `kraken/index.ts`
+ * covers it. Different keys never wait on each other.
+ */
+export async function inKrakenKeyOrder<T>(
+  apiKey: string | undefined,
+  send: () => Promise<T>,
+  maxHoldMs = KRAKEN_KEY_HOLD_MS,
+): Promise<T> {
+  const key = apiKey ?? ''
+  const previous = tailByApiKey.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const turn = new Promise<void>((resolve) => (release = resolve))
+  const tail = previous.then(() => turn)
+  tailByApiKey.set(key, tail)
+
+  await previous
+  const timer = setTimeout(release, maxHoldMs)
+  timer.unref?.()
+  try {
+    return await send()
+  } finally {
+    clearTimeout(timer)
+    release()
+    if (tailByApiKey.get(key) === tail) {
+      tailByApiKey.delete(key)
+    }
+  }
+}
+
+/**
  * The nonce the *rejected* request actually carried, for the error log.
  *
  * Without it an `EAPI:Invalid nonce` line is undiagnosable: the two mechanisms

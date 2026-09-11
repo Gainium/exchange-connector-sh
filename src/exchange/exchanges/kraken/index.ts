@@ -804,9 +804,20 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       // penalty; the caller's own loop retries later, by which time the
       // lockout has expired on its own.
       const isLockout = matches(['EGeneral:Temporary lockout'])
+      // A nonce rejection happens before execution, so re-signing is safe — but
+      // each rejected attempt is also a strike toward the lockout above. The
+      // 10-attempt ladder let one burst of out-of-order arrivals put dozens of
+      // strikes on a single key. Requests on one key are now signed and sent in
+      // order (`inKrakenKeyOrder`), so what is left is rare and a few attempts
+      // clear it.
+      const isNonce = matches([
+        'EAPI:Invalid nonce',
+        'invalid nonce',
+        'duplicate nonce',
+      ])
       const maxAttempts = isLockout
         ? 0
-        : isRateLimit || isProviderOutage
+        : isRateLimit || isProviderOutage || isNonce
           ? 3
           : this.retry
 

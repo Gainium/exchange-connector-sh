@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.25] - 2026-09-12
+
+### Fixed
+
+- Private Kraken spot requests on one API key are now signed and sent one at a time. Kraken accepts a signed request only if its nonce is higher than the last one it accepted for that key, and it judges that when the request arrives. Requests signed a moment apart but sent together could arrive in the opposite order, so Kraken rejected the earlier ones as invalid nonces — and after enough of those it temporarily locks the key, which stops every bot trading on it until the lockout expires. A request that has not answered within ten seconds no longer holds up the requests behind it, requests on different keys still run side by side, and public requests are unaffected.
+- A Kraken nonce rejection is now retried at most three times instead of ten. Each rejected attempt counts toward Kraken's temporary lockout, so the longer retry ladder could turn a short burst of rejections into a lockout.
+
 ## [1.20.22] - 2026-09-05
 
 ### Fixed

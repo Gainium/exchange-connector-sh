@@ -1,11 +1,17 @@
-import { NestFactory } from '@nestjs/core'
+import { HttpAdapterHost, NestFactory } from '@nestjs/core'
 import { AppModule } from './app.module'
 import 'dotenv/config'
 import { Logger } from '@nestjs/common'
 import { isAdminConfigEnabled, startAdminConfigSync } from './utils/adminConfig'
+import { RedactingExceptionFilter } from './utils/redactingExceptionFilter'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule)
+  // Nest logs an unhandled exception as the raw object, and an exchange SDK
+  // error carries the credentials of the request that failed.
+  app.useGlobalFilters(
+    new RedactingExceptionFilter(app.get(HttpAdapterHost).httpAdapter),
+  )
 
   // Self-hosted only — admin-sh pushes enabled-exchanges config into
   // Redis and we filter routing accordingly. Cloud builds leave the

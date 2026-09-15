@@ -27,6 +27,8 @@ import {
   clearAccountModeCache,
   convertUtaAssets,
   convertUtaOrder,
+  aggregateCandles,
+  realityBaseInterval,
   realityGranularity,
   setRealitySymbols,
 } from './uta'
@@ -380,18 +382,61 @@ describe('bitget UTA — conversions', () => {
     )
   })
 
-  it('Reality candles map onto the granularities Bitget serves for them', () => {
+  it('Reality candles come from a UTC-aligned native interval', () => {
     eq(
-      'map',
+      'base',
       [
         ExchangeIntervals.oneM,
+        ExchangeIntervals.threeM,
         ExchangeIntervals.thirtyM,
         ExchangeIntervals.twoH,
+        ExchangeIntervals.fourH,
         ExchangeIntervals.eightH,
         ExchangeIntervals.oneD,
         ExchangeIntervals.oneW,
-      ].map(realityGranularity),
-      ['1min', '15min', '1h', '4h', '1day', '1week'],
+      ].map((i) => [realityBaseInterval(i), realityGranularity(i)]),
+      [
+        ['1m', '1min'],
+        ['1m', '1min'],
+        ['15m', '15min'],
+        ['1h', '1h'],
+        ['4h', '4h'],
+        ['4h', '4h'],
+        ['4h', '4h'],
+        ['4h', '4h'],
+      ],
+    )
+  })
+
+  it('aggregates 4h candles into UTC days and Monday weeks', () => {
+    const H4 = 4 * 60 * 60 * 1000
+    // Monday 2026-09-14 00:00 UTC
+    const monday = Date.UTC(2026, 8, 14)
+    const bars = [...Array(18).keys()].map((k) => ({
+      time: monday - 2 * H4 + k * H4, // starts Sunday 16:00 (mid-day)
+      open: `${100 + k}`,
+      high: `${110 + k}`,
+      low: `${90 + k}`,
+      close: `${101 + k}`,
+      volume: '1',
+    }))
+    const days = aggregateCandles(bars, 24 * 60 * 60 * 1000)
+    const DAY = 24 * 60 * 60 * 1000
+    // Sunday 16:00–24:00 is a partial first day and is dropped.
+    eq(
+      'days',
+      days.map((d) => [d.time, d.open, d.high, d.low, d.close, d.volume]),
+      [
+        [monday, '102', '117', '92', '108', '6'],
+        [monday + DAY, '108', '123', '98', '114', '6'],
+        [monday + 2 * DAY, '114', '127', '104', '118', '4'],
+      ],
+    )
+    const weeks = aggregateCandles(bars, 7 * 24 * 60 * 60 * 1000, true)
+    eq(
+      'week start',
+      weeks.map((w) => w.time),
+      [monday],
     )
   })
 })

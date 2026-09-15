@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Bitget spot candles for Reality stock tokens are requested at the granularities Bitget serves for them (1m, 5m, 15m, 1h, 4h, 1d, 1w). The daily and weekly candles previously requested are rejected for these pairs.
+- Bitget spot candles for Reality stock tokens are served at every interval. Bitget only offers them at a few granularities, and its daily and weekly ones start at 16:00 UTC rather than midnight, so the connector reads the finest matching UTC-aligned granularity and combines it into the requested interval — days start at midnight UTC and weeks on Monday, as for every other pair. Previously the daily and weekly requests were rejected for these pairs.
 
 ### Known limitations
 

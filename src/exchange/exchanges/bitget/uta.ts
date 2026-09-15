@@ -1,4 +1,5 @@
 import {
+  CandleResponse,
   CommonOrder,
   ExchangeIntervals,
   FreeAsset,
@@ -117,34 +118,82 @@ export const getRealitySymbols = (): Set<string> | undefined => {
 }
 
 /**
- * Reality candles exist only at 1min/5min/15min/1h/4h/1day/1week; every other
- * classic granularity (30min, 6Hutc, 1Dutc, 1Wutc) is a 400. Intervals without
- * their own granularity are served from the next finer one, the same way
- * classic already serves 2h from 1h.
+ * Reality candles exist only at 1min/5min/15min/1h/4h/1day/1week (every other
+ * classic granularity is a 400), and their `1day`/`1week` buckets start at
+ * 16:00 UTC — not the UTC midnight every other Bitget pair is served at
+ * (`1Dutc`). A request is therefore served from the native interval that
+ * divides it evenly and is itself UTC-aligned, and aggregated up
+ * (`aggregateCandles`) when the two differ. 4h buckets are UTC-aligned.
  */
-export const realityGranularity = (interval: ExchangeIntervals): string => {
+export const realityBaseInterval = (
+  interval: ExchangeIntervals,
+): ExchangeIntervals => {
   switch (interval) {
     case ExchangeIntervals.oneM:
     case ExchangeIntervals.threeM:
-      return '1min'
+      return ExchangeIntervals.oneM
     case ExchangeIntervals.fiveM:
-      return '5min'
+      return ExchangeIntervals.fiveM
     case ExchangeIntervals.fifteenM:
     case ExchangeIntervals.thirtyM:
-      return '15min'
+      return ExchangeIntervals.fifteenM
     case ExchangeIntervals.oneH:
     case ExchangeIntervals.twoH:
-      return '1h'
-    case ExchangeIntervals.fourH:
-    case ExchangeIntervals.eightH:
-      return '4h'
-    case ExchangeIntervals.oneD:
-      return '1day'
-    case ExchangeIntervals.oneW:
-      return '1week'
+      return ExchangeIntervals.oneH
     default:
-      return '1h'
+      // 4h, 8h, 1d, 1w
+      return ExchangeIntervals.fourH
   }
+}
+
+/** The Bitget granularity for a native Reality interval. */
+export const realityGranularity = (interval: ExchangeIntervals): string =>
+  ({
+    [ExchangeIntervals.oneM]: '1min',
+    [ExchangeIntervals.fiveM]: '5min',
+    [ExchangeIntervals.fifteenM]: '15min',
+    [ExchangeIntervals.oneH]: '1h',
+    [ExchangeIntervals.fourH]: '4h',
+  })[realityBaseInterval(interval)]
+
+/** 1970-01-01 was a Thursday; weeks start on Monday, 4 days later. */
+const WEEK_ALIGN_MS = 4 * 24 * 60 * 60 * 1000
+
+/**
+ * Candles of a finer interval merged into `stepMs` buckets aligned to UTC
+ * (weeks to Monday 00:00 UTC). Input need not be sorted or deduplicated;
+ * the last bucket may be partial, as a live candle is.
+ */
+export const aggregateCandles = (
+  candles: CandleResponse[],
+  stepMs: number,
+  weekly = false,
+): CandleResponse[] => {
+  const offset = weekly ? WEEK_ALIGN_MS : 0
+  const seen = new Set<number>()
+  const sorted = [...candles]
+    .filter((c) => (seen.has(c.time) ? false : (seen.add(c.time), true)))
+    .sort((a, b) => a.time - b.time)
+  const buckets = new Map<number, CandleResponse>()
+  for (const c of sorted) {
+    const time = Math.floor((c.time - offset) / stepMs) * stepMs + offset
+    const b = buckets.get(time)
+    if (!b) {
+      buckets.set(time, { ...c, time })
+      continue
+    }
+    b.high = `${Math.max(+b.high, +c.high)}`
+    b.low = `${Math.min(+b.low, +c.low)}`
+    b.close = c.close
+    b.volume = `${(+b.volume || 0) + (+c.volume || 0)}`
+  }
+  const result = [...buckets.values()]
+  // A range that starts mid-bucket leaves the first bucket without its open;
+  // drop it rather than report a truncated candle as a whole one.
+  if (result.length > 1 && sorted[0].time !== result[0].time) {
+    result.shift()
+  }
+  return result
 }
 
 export type UtaCategory = 'SPOT' | 'USDT-FUTURES' | 'USDC-FUTURES'

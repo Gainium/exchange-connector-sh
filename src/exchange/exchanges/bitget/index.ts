@@ -44,6 +44,8 @@ import {
   getCachedAccountMode,
   getRealitySymbols,
   isUnifiedModeRefusal,
+  aggregateCandles,
+  realityBaseInterval,
   realityGranularity,
   setCachedAccountMode,
   setRealitySymbols,
@@ -2789,10 +2791,29 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     // drives — by ~5x.
     const recentMaxSize = 1000
     const historicMaxSize = 200
+    const reality = await this.isRealitySymbol(symbol)
+    if (reality && realityBaseInterval(interval) !== interval) {
+      const base = await this.spot_getCandles(
+        symbol,
+        realityBaseInterval(interval),
+        from,
+        to,
+        countData,
+        timeProfile,
+      )
+      if (base.status === StatusEnum.notok) {
+        return base
+      }
+      return this.returnGood<CandleResponse[]>(base.timeProfile)(
+        aggregateCandles(
+          base.data,
+          timeIntervalMap[interval],
+          interval === ExchangeIntervals.oneW,
+        ),
+      )
+    }
     const granularity = (
-      (await this.isRealitySymbol(symbol))
-        ? realityGranularity(interval)
-        : this.convertInterval(interval)
+      reality ? realityGranularity(interval) : this.convertInterval(interval)
     ) as SpotKlineInterval
     const step = timeIntervalMap[interval]
     const lookbackMs = this.getSpotIntervalLookbackMs(interval)

@@ -26,8 +26,29 @@ import {
 } from '../../types'
 import {
   parseBitgetAccountInfo,
+  parseBitgetUtaAccountInfo,
   unknownPermissions,
 } from '../../helpers/keyPermissions'
+import {
+  BitgetAccountMode,
+  REALITY_NEEDS_UTA,
+  UTA_COINM_UNSUPPORTED,
+  UtaAsset,
+  UtaCategory,
+  UtaOrder,
+  UtaPosition,
+  accountModeFromSettings,
+  convertUtaAssets,
+  convertUtaOrder,
+  convertUtaPosition,
+  getCachedAccountMode,
+  getRealitySymbols,
+  isUnifiedModeRefusal,
+  realityGranularity,
+  setCachedAccountMode,
+  setRealitySymbols,
+  utaFuturesCategory,
+} from './uta'
 import {
   RestClientV2 as BitgetClient,
   FuturesKlineInterval,
@@ -146,7 +167,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     return this.returnBad(timeProfile)(new Error('Futures type missed'))
   }
 
-  async getUid(timeProfile = this.getEmptyTimeProfile()) {
+  async classic_getUid(timeProfile = this.getEmptyTimeProfile()) {
     timeProfile =
       (await this.checkLimits('getSpotAccount', 0, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
@@ -161,13 +182,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       })
       .catch(
         this.handleBitgetErrors(
-          this.getUid,
+          this.classic_getUid,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
   }
 
-  async getAffiliate(
+  async classic_getAffiliate(
     uid: string | number,
     timeProfile = this.getEmptyTimeProfile(),
   ) {
@@ -185,10 +206,569 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       })
       .catch(
         this.handleBitgetErrors(
-          this.getAffiliate,
+          this.classic_getAffiliate,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
+  }
+
+  /**
+   * Which of Bitget's two private APIs this key's account answers to — see
+   * `uta.ts`. Asked once per key per process and cached.
+   *
+   * A classic account is refused by the v3 settings endpoint with a Bitget
+   * business error, which settles it. A transport failure settles nothing, so
+   * it is not cached: the classic path runs, and if the account is in fact
+   * unified, the classic refusal flips it (`byAccountMode`).
+   */
+  private async accountMode(
+    timeProfile?: TimeProfile,
+  ): Promise<BitgetAccountMode> {
+    if (!this.key || this.demo) {
+      return 'classic'
+    }
+    const cached = getCachedAccountMode(this.key)
+    if (cached) {
+      return cached
+    }
+    try {
+      await this.checkLimits('getAccountSettingsV3', 20, timeProfile)
+      const res = await this.orderClient.getAccountSettingsV3()
+      const mode = accountModeFromSettings(res?.data) ?? 'classic'
+      setCachedAccountMode(this.key, mode)
+      return mode
+    } catch (e) {
+      if ((e as { body?: { code?: string } })?.body?.code) {
+        setCachedAccountMode(this.key, 'classic')
+      }
+      return 'classic'
+    }
+  }
+
+  private async byAccountMode<T>(
+    classic: () => Promise<BaseReturn<T>>,
+    uta: () => Promise<BaseReturn<T>>,
+  ): Promise<BaseReturn<T>> {
+    if ((await this.accountMode()) === 'uta') {
+      return uta()
+    }
+    const res = await classic()
+    // A classic refusal means nothing was accepted (an order included), so
+    // re-sending through v3 cannot act twice.
+    if (
+      res.status === StatusEnum.notok &&
+      isUnifiedModeRefusal(res.reason) &&
+      this.key &&
+      !this.demo
+    ) {
+      Logger.log(
+        `Bitget key#${keyFingerprint(this.key)} is a Unified Trading Account, switching to v3`,
+      )
+      setCachedAccountMode(this.key, 'uta')
+      return uta()
+    }
+    return res
+  }
+
+  private utaCategory(symbol: string): UtaCategory {
+    return this.futures ? utaFuturesCategory(symbol) : 'SPOT'
+  }
+
+  private get utaCategories(): UtaCategory[] {
+    return this.futures ? ['USDT-FUTURES', 'USDC-FUTURES'] : ['SPOT']
+  }
+
+  /**
+   * One v3 request with the adapter's usual limiter, profiler and retry
+   * policy. The custom client throws on any code other than `00000`, so `map`
+   * only ever sees a successful body.
+   */
+  private async utaRequest<T>(
+    limit: string,
+    request: () => Promise<{ data?: any }>,
+    map: (data: any) => T | Promise<T>,
+    timeProfile: TimeProfile,
+  ): Promise<BaseReturn<T>> {
+    if (this.coinm) {
+      return this.returnBad(timeProfile)(new Error(UTA_COINM_UNSUPPORTED))
+    }
+    timeProfile = (await this.checkLimits(limit, 0, timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    try {
+      const result = await request()
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      return this.returnGood<T>(timeProfile)(await map(result?.data))
+    } catch (e) {
+      // A retryable failure repeats this request only, never the steps of
+      // the caller that already succeeded.
+      return this.handleBitgetErrors<BaseReturn<T>>(
+        this.utaRequest,
+        limit,
+        request,
+        map,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(e)
+    }
+  }
+
+  async uta_getUid(timeProfile = this.getEmptyTimeProfile()) {
+    return this.utaRequest<number | string>(
+      'getAccountInfoV3',
+      () => this.orderClient.getAccountInfoV3(),
+      (data) => data?.userId ?? -1,
+      timeProfile,
+    )
+  }
+
+  async uta_getAffiliate(
+    uid: string | number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ) {
+    return this.utaRequest<boolean>(
+      'getAccountInfoV3',
+      () => this.orderClient.getAccountInfoV3(),
+      (data) => `${data?.inviterId}` === `${uid}`,
+      timeProfile,
+    )
+  }
+
+  async uta_getApiPermission(timeProfile = this.getEmptyTimeProfile()) {
+    return this.utaRequest<boolean>(
+      'getAccountInfoV3',
+      () => this.orderClient.getAccountInfoV3(),
+      (data) =>
+        Array.isArray(data?.permissions) &&
+        data.permissions.includes('uta_trade') &&
+        data.permType !== 'read-only',
+      timeProfile,
+    )
+  }
+
+  async uta_getBalance(timeProfile = this.getEmptyTimeProfile()) {
+    return this.utaRequest<FreeAsset>(
+      'getAccountAssetsV3',
+      () => this.orderClient.getAccountAssetsV3(),
+      // Futures reports only its margin coins, as the classic product-type
+      // accounts did; spot reports every coin held.
+      (data) =>
+        convertUtaAssets(
+          (data?.assets ?? []) as UtaAsset[],
+          this.futures ? ['USDT', 'USDC'] : undefined,
+        ),
+      timeProfile,
+    )
+  }
+
+  async uta_openOrder(
+    order: {
+      symbol: string
+      side: OrderTypes
+      quantity: number
+      price: number
+      newClientOrderId?: string
+      type?: OrderTypeT
+      reduceOnly?: boolean
+      positionSide?: PositionSide
+      marginType?: MarginType
+    },
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<CommonOrder>> {
+    const limit = order.type === 'LIMIT'
+    // Spot market buys are sized in the quote coin, exactly as on classic;
+    // main-app already sends them that way.
+    const options: Record<string, string> = {
+      category: this.utaCategory(order.symbol),
+      symbol: order.symbol,
+      qty: this.convertNumberToString(order.quantity),
+      side: order.side === 'BUY' ? 'buy' : 'sell',
+      orderType: limit ? 'limit' : 'market',
+    }
+    if (limit) {
+      options.price = this.convertNumberToString(order.price)
+      options.timeInForce = 'gtc'
+    }
+    if (order.newClientOrderId) {
+      options.clientOid = order.newClientOrderId
+    }
+    if (this.futures) {
+      options.marginMode =
+        order.marginType === MarginType.ISOLATED ? 'isolated' : 'crossed'
+      // Hedge mode names the position the order acts on; `side` stays the
+      // direction of the order itself (close long = sell + long).
+      if (
+        order.positionSide === PositionSide.LONG ||
+        order.positionSide === PositionSide.SHORT
+      ) {
+        options.posSide =
+          order.positionSide === PositionSide.LONG ? 'long' : 'short'
+      } else if (order.reduceOnly) {
+        options.reduceOnly = 'yes'
+      }
+    }
+    const placed = await this.utaRequest<{ clientOid?: string }>(
+      'utaPlaceOrder',
+      () => this.orderClient.placeOrderV3(options),
+      (data) => data ?? {},
+      timeProfile,
+    )
+    if (placed.status === StatusEnum.notok) {
+      return placed
+    }
+    if (!limit) {
+      await sleep(1000)
+    }
+    return this.uta_getOrder(
+      {
+        symbol: order.symbol,
+        newClientOrderId: placed.data.clientOid || order.newClientOrderId,
+      },
+      placed.timeProfile,
+    )
+  }
+
+  async uta_getOrder(
+    data: { symbol: string; newClientOrderId?: string; orderId?: string },
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<CommonOrder>> {
+    const res = await this.utaRequest<CommonOrder>(
+      'utaGetOrder',
+      () =>
+        this.orderClient.getOrderInfoV3(
+          data.orderId
+            ? { orderId: data.orderId }
+            : { clientOid: data.newClientOrderId },
+        ),
+      (order) => convertUtaOrder(order as UtaOrder),
+      timeProfile,
+    )
+    // An order just accepted can take a moment to become queryable.
+    if (
+      res.status === StatusEnum.notok &&
+      /not exist|not found|cannot be found/i.test(`${res.reason}`) &&
+      res.timeProfile.attempts < 3
+    ) {
+      await sleep(1000)
+      res.timeProfile.attempts++
+      return this.uta_getOrder(data, res.timeProfile)
+    }
+    return res
+  }
+
+  async uta_cancelOrder(
+    order: { symbol: string; newClientOrderId?: string; orderId?: string },
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<CommonOrder>> {
+    const cancelled = await this.utaRequest<{ orderId?: string }>(
+      'utaCancelOrder',
+      () =>
+        this.orderClient.cancelOrderV3({
+          category: this.utaCategory(order.symbol),
+          ...(order.orderId
+            ? { orderId: order.orderId }
+            : { clientOid: order.newClientOrderId }),
+        }),
+      (data) => data ?? {},
+      timeProfile,
+    )
+    if (cancelled.status === StatusEnum.notok) {
+      return cancelled
+    }
+    return this.uta_getOrder(order, cancelled.timeProfile)
+  }
+
+  async uta_getAllOpenOrders(
+    symbol?: string,
+    returnOrders = false,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<CommonOrder[]> | BaseReturn<number>> {
+    const categories = symbol ? [this.utaCategory(symbol)] : this.utaCategories
+    const orders: CommonOrder[] = []
+    const pageSize = 100
+    for (const category of categories) {
+      let cursor: string | undefined
+      // 400 open orders per product line is Bitget's own cap.
+      for (let page = 0; page < 5; page++) {
+        const res = await this.utaRequest<{
+          list: UtaOrder[]
+          cursor?: string
+        }>(
+          'utaGetOpenOrders',
+          () =>
+            this.orderClient.getUnfilledOrdersV3({
+              category,
+              symbol,
+              limit: `${pageSize}`,
+              cursor,
+            }),
+          (data) => ({
+            list: (Array.isArray(data)
+              ? data
+              : (data?.list ?? [])) as UtaOrder[],
+            cursor: data?.cursor,
+          }),
+          timeProfile,
+        )
+        if (res.status === StatusEnum.notok) {
+          return res
+        }
+        timeProfile = res.timeProfile
+        orders.push(...res.data.list.map(convertUtaOrder))
+        if (res.data.list.length < pageSize || !res.data.cursor) {
+          break
+        }
+        cursor = res.data.cursor
+      }
+    }
+    return returnOrders
+      ? this.returnGood<CommonOrder[]>(timeProfile)(orders)
+      : this.returnGood<number>(timeProfile)(orders.length)
+  }
+
+  async uta_getUserFees(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<UserFee>> {
+    return this.utaRequest<UserFee>(
+      'utaGetFeeRate',
+      () =>
+        this.orderClient.getFeeRateV3({
+          symbol,
+          category: this.utaCategory(symbol),
+        }),
+      (data) => ({ maker: +data?.makerFeeRate, taker: +data?.takerFeeRate }),
+      timeProfile,
+    )
+  }
+
+  /**
+   * One all-symbol fee call per category instead of the classic per-symbol
+   * fan-out. Pairs the venue leaves out keep the listed rate, as classic did
+   * for a failed lookup.
+   */
+  async uta_getAllUserFees(): Promise<
+    BaseReturn<(UserFee & { pair: string })[]>
+  > {
+    const info = await this.getAllExchangeInfo()
+    if (info.status === StatusEnum.notok) {
+      return info
+    }
+    const rates = new Map<string, UserFee>()
+    let timeProfile = info.timeProfile
+    for (const category of this.utaCategories) {
+      const res = await this.utaRequest<
+        { symbol: string; makerFeeRate: string; takerFeeRate: string }[]
+      >(
+        'utaGetAllFeeRates',
+        () => this.orderClient.getAllFeeRatesV3({ category }),
+        (data) => (Array.isArray(data) ? data : []),
+        timeProfile,
+      )
+      if (res.status === StatusEnum.notok) {
+        return res
+      }
+      timeProfile = res.timeProfile
+      for (const r of res.data) {
+        rates.set(r.symbol, { maker: +r.makerFeeRate, taker: +r.takerFeeRate })
+      }
+    }
+    return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
+      (
+        info.data as (ExchangeInfo & {
+          pair: string
+          makerFee?: number
+          takerFee?: number
+        })[]
+      ).map((p) => ({
+        pair: p.pair,
+        ...(rates.get(p.pair) ?? { maker: p.makerFee, taker: p.takerFee }),
+      })),
+    )
+  }
+
+  /**
+   * Unified leverage is kept per margin mode, and the mode is chosen per order
+   * (`uta_openOrder` sends `marginMode`), so both are set: cross is the answer,
+   * isolated is set alongside it so an isolated order opens at the same
+   * leverage.
+   */
+  async uta_changeLeverage(
+    symbol: string,
+    leverage: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<number>> {
+    const category = this.utaCategory(symbol)
+    const res = await this.utaRequest<number>(
+      'utaSetLeverage',
+      () =>
+        this.orderClient.setLeverageV3({
+          category,
+          symbol,
+          leverage: `${leverage}`,
+          marginMode: 'crossed',
+        }),
+      () => leverage,
+      timeProfile,
+    )
+    if (res.status === StatusEnum.notok) {
+      return res
+    }
+    for (const posSide of ['long', 'short'] as const) {
+      try {
+        await this.checkLimits('utaSetLeverage', 0)
+        await this.orderClient.setLeverageV3({
+          category,
+          symbol,
+          leverage: `${leverage}`,
+          marginMode: 'isolated',
+          posSide,
+        })
+      } catch (e) {
+        Logger.warn(
+          `Bitget UTA isolated ${posSide} leverage for ${symbol} not set: ${
+            (e as { body?: { msg?: string } })?.body?.msg ??
+            (e as Error)?.message
+          }`,
+        )
+      }
+    }
+    return res
+  }
+
+  /** There is no account-level margin mode on UTA to switch; see above. */
+  async uta_changeMarginType(
+    _symbol: string,
+    margin: MarginType,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<MarginType>> {
+    if (this.coinm) {
+      return this.returnBad(timeProfile)(new Error(UTA_COINM_UNSUPPORTED))
+    }
+    return this.returnGood<MarginType>(timeProfile)(margin)
+  }
+
+  async uta_getHedge(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<boolean>> {
+    return this.utaRequest<boolean>(
+      'getAccountSettingsV3',
+      () => this.orderClient.getAccountSettingsV3(),
+      (data) => data?.holdMode === 'hedge_mode',
+      timeProfile,
+    )
+  }
+
+  async uta_setHedge(
+    value: boolean,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<boolean>> {
+    return this.utaRequest<boolean>(
+      'utaSetHoldMode',
+      () =>
+        this.orderClient.setHoldModeV3({
+          holdMode: value ? 'hedge_mode' : 'one_way_mode',
+        }),
+      () => value,
+      timeProfile,
+    )
+  }
+
+  async uta_getPositions(
+    symbol?: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<PositionInfo[]>> {
+    const positions: PositionInfo[] = []
+    const categories = symbol ? [this.utaCategory(symbol)] : this.utaCategories
+    for (const category of categories) {
+      const res = await this.utaRequest<PositionInfo[]>(
+        'utaGetPositions',
+        () => this.orderClient.getCurrentPositionsV3({ category, symbol }),
+        (data) =>
+          ((Array.isArray(data) ? data : (data?.list ?? [])) as UtaPosition[])
+            .filter((p) => +p.total !== 0)
+            .map(convertUtaPosition),
+        timeProfile,
+      )
+      if (res.status === StatusEnum.notok) {
+        return res
+      }
+      timeProfile = res.timeProfile
+      positions.push(...res.data)
+    }
+    return this.returnGood<PositionInfo[]>(timeProfile)(positions)
+  }
+
+  async getUid() {
+    return this.byAccountMode<number | string>(
+      () => this.classic_getUid(),
+      () => this.uta_getUid(),
+    )
+  }
+
+  async getAffiliate(uid: string | number) {
+    return this.byAccountMode<boolean>(
+      () => this.classic_getAffiliate(uid),
+      () => this.uta_getAffiliate(uid),
+    )
+  }
+
+  async getApiPermission(): Promise<BaseReturn<boolean>> {
+    return this.byAccountMode<boolean>(
+      () => this.classic_getApiPermission(),
+      () => this.uta_getApiPermission(),
+    )
+  }
+
+  async futures_changeLeverage(
+    symbol: string,
+    leverage: number,
+  ): Promise<BaseReturn<number>> {
+    return this.byAccountMode<number>(
+      () => this.classic_futures_changeLeverage(symbol, leverage),
+      () => this.uta_changeLeverage(symbol, leverage),
+    )
+  }
+
+  async futures_changeMarginType(
+    symbol: string,
+    margin: MarginType,
+    leverage: number,
+  ): Promise<BaseReturn<MarginType>> {
+    return this.byAccountMode<MarginType>(
+      () => this.classic_futures_changeMarginType(symbol, margin, leverage),
+      () => this.uta_changeMarginType(symbol, margin),
+    )
+  }
+
+  async futures_getHedge(symbol?: string): Promise<BaseReturn<boolean>> {
+    if (!this.futures) {
+      return this.errorFutures(this.getEmptyTimeProfile())
+    }
+    return this.byAccountMode<boolean>(
+      () => this.classic_futures_getHedge(symbol),
+      () => this.uta_getHedge(),
+    )
+  }
+
+  async futures_setHedge(value: boolean): Promise<BaseReturn<boolean>> {
+    if (!this.futures) {
+      return this.errorFutures(this.getEmptyTimeProfile())
+    }
+    return this.byAccountMode<boolean>(
+      () => this.classic_futures_setHedge(value),
+      () => this.uta_setHedge(value),
+    )
+  }
+
+  async futures_getPositions(
+    symbol?: string,
+  ): Promise<BaseReturn<PositionInfo[]>> {
+    if (!this.futures) {
+      return this.errorFutures(this.getEmptyTimeProfile())
+    }
+    return this.byAccountMode<PositionInfo[]>(
+      () => this.classic_futures_getPositions(symbol),
+      () => this.uta_getPositions(symbol),
+    )
   }
 
   get productTypes() {
@@ -234,7 +814,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             : symbol.replace(/USD?\w+/gm, '')
   }
 
-  async futures_changeLeverage(
+  async classic_futures_changeLeverage(
     symbol: string,
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
@@ -288,7 +868,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             })
             .catch(
               this.handleBitgetErrors(
-                this.futures_changeLeverage,
+                this.classic_futures_changeLeverage,
                 symbol,
                 leverage,
                 this.endProfilerTime(timeProfile, 'exchange'),
@@ -310,7 +890,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             return this.returnGood<number>(timeProfile)(leverage)
           }
           return this.handleBitgetErrors(
-            this.futures_changeLeverage,
+            this.classic_futures_changeLeverage,
             symbol,
             leverage,
             this.endProfilerTime(timeProfile, 'exchange'),
@@ -318,7 +898,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         })
         .catch(
           this.handleBitgetErrors(
-            this.futures_changeLeverage,
+            this.classic_futures_changeLeverage,
             symbol,
             leverage,
             this.endProfilerTime(timeProfile, 'exchange'),
@@ -326,7 +906,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         )
     } catch (e) {
       this.handleBitgetErrors(
-        this.futures_changeLeverage,
+        this.classic_futures_changeLeverage,
         symbol,
         leverage,
         this.endProfilerTime(timeProfile, 'exchange'),
@@ -855,7 +1435,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     )
   }
 
-  async futures_getPositions(
+  async classic_futures_getPositions(
     symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<PositionInfo[]>> {
@@ -881,14 +1461,14 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           data.map((o) => res.push(this.convertPosition(o)))
         } else {
           return this.handleBitgetErrors(
-            this.futures_getPositions,
+            this.classic_futures_getPositions,
             symbol,
             this.endProfilerTime(timeProfile, 'exchange'),
           )(new BitgetError(result.msg, +result.code))
         }
       } catch (e) {
         return this.handleBitgetErrors(
-          this.futures_getPositions,
+          this.classic_futures_getPositions,
           symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         )(new BitgetError(e?.body?.msg ?? e.message, 0))
@@ -1071,7 +1651,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     return this.returnGood<AllPricesResponse[]>(timeProfile)(res)
   }
 
-  async futures_changeMarginType(
+  async classic_futures_changeMarginType(
     symbol: string,
     margin: MarginType,
     leverage: number,
@@ -1101,7 +1681,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           return this.returnGood<MarginType>(timeProfile)(margin)
         }
         return this.handleBitgetErrors(
-          this.futures_changeMarginType,
+          this.classic_futures_changeMarginType,
           symbol,
           margin,
           leverage,
@@ -1110,7 +1690,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       })
       .catch(
         this.handleBitgetErrors(
-          this.futures_changeMarginType,
+          this.classic_futures_changeMarginType,
           symbol,
           margin,
           leverage,
@@ -1119,7 +1699,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       )
   }
 
-  async futures_getHedge(
+  async classic_futures_getHedge(
     symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
@@ -1156,21 +1736,21 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           )
         }
         return this.handleBitgetErrors(
-          this.futures_getHedge,
+          this.classic_futures_getHedge,
           symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         )(new BitgetError(result.msg, +result.code))
       })
       .catch(
         this.handleBitgetErrors(
-          this.futures_getHedge,
+          this.classic_futures_getHedge,
           symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
   }
 
-  async futures_setHedge(
+  async classic_futures_setHedge(
     value: boolean,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
@@ -1190,14 +1770,14 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.code !== '00000') {
           return this.handleBitgetErrors(
-            this.futures_setHedge,
+            this.classic_futures_setHedge,
             value,
             this.endProfilerTime(timeProfile, 'exchange'),
           )(new BitgetError(result.msg, +result.code))
         }
       } catch (e) {
         return this.handleBitgetErrors(
-          this.futures_setHedge,
+          this.classic_futures_setHedge,
           value,
           this.endProfilerTime(timeProfile, 'exchange'),
         )(new BitgetError(e?.body?.msg ?? e.message, 0))
@@ -1231,6 +1811,20 @@ class BitgetExchange extends AbstractExchange implements Exchange {
    * recognise. See parseBitgetAccountInfo.
    */
   override async getKeyPermissions(): Promise<KeyPermissions> {
+    if ((await this.accountMode()) === 'uta') {
+      return this.orderClient
+        .getAccountInfoV3()
+        .then(
+          (result) =>
+            parseBitgetUtaAccountInfo(result?.data) ??
+            unknownPermissions('Unrecognised Bitget UTA account info response'),
+        )
+        .catch((e) =>
+          unknownPermissions(
+            `Bitget UTA account info failed: ${e?.body?.msg ?? e?.message ?? e}`,
+          ),
+        )
+    }
     return this.client
       .getSpotAccount()
       .then(
@@ -1243,7 +1837,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       )
   }
 
-  async getApiPermission(
+  async classic_getApiPermission(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<boolean>> {
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
@@ -1262,7 +1856,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       })
       .catch(
         this.handleBitgetErrors(
-          this.getApiPermission,
+          this.classic_getApiPermission,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -1301,10 +1895,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     symbol: string
     newClientOrderId?: string
   }): Promise<BaseReturn<CommonOrder>> {
-    if (this.futures) {
-      return await this.futures_cancelOrder({ symbol, newClientOrderId })
-    }
-    return await this.spot_cancelOrder({ symbol, newClientOrderId })
+    return this.byAccountMode(
+      () =>
+        this.futures
+          ? this.futures_cancelOrder({ symbol, newClientOrderId })
+          : this.spot_cancelOrder({ symbol, newClientOrderId }),
+      () => this.uta_cancelOrder({ symbol, newClientOrderId }),
+    )
   }
 
   /** Cancel order
@@ -1353,10 +1950,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     symbol: string
     orderId: string
   }): Promise<BaseReturn<CommonOrder>> {
-    if (this.futures) {
-      return await this.futures_cancelOrderByOrderIdAndSymbol(order)
-    }
-    return await this.spot_cancelOrderByOrderIdAndSymbol(order)
+    return this.byAccountMode(
+      () =>
+        this.futures
+          ? this.futures_cancelOrderByOrderIdAndSymbol(order)
+          : this.spot_cancelOrderByOrderIdAndSymbol(order),
+      () => this.uta_cancelOrder(order),
+    )
   }
 
   async spot_cancelOrderByOrderIdAndSymbol(
@@ -1439,6 +2039,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         category: liveCategory,
       })
       if (res?.code === '00000' && Array.isArray(res.data)) {
+        if (liveCategory === 'SPOT') {
+          setRealitySymbols(
+            res.data
+              .filter((d) => `${d?.isReality}`.toLowerCase() === 'yes')
+              .map((d) => d.symbol),
+          )
+        }
         for (const d of res.data) {
           const st = d?.symbolType
           if (
@@ -1452,11 +2059,23 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         }
       }
     } catch (e) {
+      if (liveCategory === 'SPOT') {
+        setRealitySymbols(null)
+      }
       Logger.warn(
         `bitget v3 instruments ${liveCategory} failed: ${(e as Error)?.message}`,
       )
     }
     return map
+  }
+
+  private async isRealitySymbol(symbol: string): Promise<boolean> {
+    const cached = getRealitySymbols()
+    if (cached) {
+      return cached.has(symbol)
+    }
+    await this.bitgetAssetClassMap('SPOT')
+    return !!getRealitySymbols()?.has(symbol)
   }
 
   async futures_getAllExchangeInfo(
@@ -1587,13 +2206,16 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           >(timeProfile)(
             data
               .filter((d) => d.status === 'online')
-              // Bitget SPOT tokenized stocks (reality tokens rTSLA/rAAPL/…,
-              // v3 `symbolType: stock`) are NOT tradeable through Bitget's API
-              // yet, so we exclude them here rather than surface untradeable
-              // pairs. Re-enable by removing this filter once Bitget supports
-              // API trading for reality stocks. (Metals like PAXG/XAUT are
-              // ordinary spot tokens and stay.)
-              .filter((d) => assetClassMap.get(d.symbol) !== 'stock')
+              // Reality stock tokens (rAAPL/rTSLA/…) are API-tradeable from a
+              // Unified Trading Account since 2026-09-03 and are listed. Other
+              // spot rows Bitget classes as `stock` (pre-IPO tokens) are still
+              // not known to be API-tradeable and stay out. Metals like
+              // PAXG/XAUT are ordinary spot tokens and stay.
+              .filter(
+                (d) =>
+                  assetClassMap.get(d.symbol) !== 'stock' ||
+                  !!getRealitySymbols()?.has(d.symbol),
+              )
               .map((d) => {
                 const p = prices?.data?.find(
                   (p) => p.pair === `${d.quoteCoin}USDT`,
@@ -1659,10 +2281,16 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     symbol?: string,
     returnOrders?: boolean,
   ): Promise<BaseReturn<CommonOrder[]> | BaseReturn<number>> {
-    if (this.futures) {
-      return await this.futures_getAllOpenOrders(symbol, returnOrders)
-    }
-    return await this.spot_getAllOpenOrders(symbol, returnOrders)
+    return this.byAccountMode<CommonOrder[] | number>(
+      () =>
+        this.futures
+          ? this.futures_getAllOpenOrders(symbol, returnOrders)
+          : this.spot_getAllOpenOrders(symbol, returnOrders),
+      () =>
+        this.uta_getAllOpenOrders(symbol, returnOrders) as Promise<
+          BaseReturn<CommonOrder[] | number>
+        >,
+    ) as Promise<BaseReturn<CommonOrder[]> | BaseReturn<number>>
   }
 
   /** Get all open orders for given pair
@@ -1719,10 +2347,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   }
 
   async getAllUserFees(): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
-    if (this.futures) {
-      return await this.futures_getAllUserFees()
-    }
-    return await this.spot_getAllUserFees()
+    return this.byAccountMode(
+      () =>
+        this.futures
+          ? this.futures_getAllUserFees()
+          : this.spot_getAllUserFees(),
+      () => this.uta_getAllUserFees(),
+    )
   }
 
   /** Get user fee for all pairs
@@ -1763,10 +2394,10 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   }
 
   async getBalance(): Promise<BaseReturn<FreeAsset>> {
-    if (this.futures) {
-      return await this.futures_getBalance()
-    }
-    return await this.spot_getBalance()
+    return this.byAccountMode(
+      () => (this.futures ? this.futures_getBalance() : this.spot_getBalance()),
+      () => this.uta_getBalance(),
+    )
   }
 
   /** Bybit get balance
@@ -1844,10 +2475,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     symbol: string
     newClientOrderId: string
   }): Promise<BaseReturn<CommonOrder>> {
-    if (this.futures) {
-      return await this.futures_getOrder({ symbol, newClientOrderId })
-    }
-    return await this.spot_getOrder({ symbol, newClientOrderId })
+    return this.byAccountMode(
+      () =>
+        this.futures
+          ? this.futures_getOrder({ symbol, newClientOrderId })
+          : this.spot_getOrder({ symbol, newClientOrderId }),
+      () => this.uta_getOrder({ symbol, newClientOrderId }),
+    )
   }
 
   async spot_getOrder(
@@ -1906,10 +2540,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       )
   }
   async getUserFees(symbol: string): Promise<BaseReturn<UserFee>> {
-    if (this.futures) {
-      return await this.futures_getUserFees(symbol)
-    }
-    return await this.spot_getUserFees(symbol)
+    return this.byAccountMode(
+      () =>
+        this.futures
+          ? this.futures_getUserFees(symbol)
+          : this.spot_getUserFees(symbol),
+      () => this.uta_getUserFees(symbol),
+    )
   }
   /** Get user fee for given pair
    * @param {string} _symbol symbol to look for
@@ -1990,10 +2627,26 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     positionSide?: PositionSide
     marginType?: MarginType
   }): Promise<BaseReturn<CommonOrder>> {
-    if (this.futures) {
-      return await this.futures_openOrder(order)
-    }
-    return await this.spot_openOrder(order)
+    return this.byAccountMode(
+      async () => {
+        if (this.futures) {
+          return this.futures_openOrder(order)
+        }
+        // Only a key known to be classic gets the explanation up front; an
+        // undetermined one tries classic, whose refusal routes a unified
+        // account to v3.
+        if (
+          getCachedAccountMode(this.key) === 'classic' &&
+          (await this.isRealitySymbol(order.symbol))
+        ) {
+          return this.returnBad(this.getEmptyTimeProfile())(
+            new Error(REALITY_NEEDS_UTA),
+          )
+        }
+        return this.spot_openOrder(order)
+      },
+      () => this.uta_openOrder(order),
+    )
   }
 
   /** Open order function
@@ -2136,7 +2789,11 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     // drives — by ~5x.
     const recentMaxSize = 1000
     const historicMaxSize = 200
-    const granularity = this.convertInterval(interval) as SpotKlineInterval
+    const granularity = (
+      (await this.isRealitySymbol(symbol))
+        ? realityGranularity(interval)
+        : this.convertInterval(interval)
+    ) as SpotKlineInterval
     const step = timeIntervalMap[interval]
     const lookbackMs = this.getSpotIntervalLookbackMs(interval)
 

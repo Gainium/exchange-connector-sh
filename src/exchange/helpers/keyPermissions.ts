@@ -89,9 +89,7 @@ const ipState = (
   if (!Array.isArray(ips)) {
     return { ipRestricted: 'unknown' }
   }
-  const bound = ips
-    .map((i) => `${i}`.trim())
-    .filter((i) => i && i !== '*')
+  const bound = ips.map((i) => `${i}`.trim()).filter((i) => i && i !== '*')
   return bound.length
     ? { ipRestricted: 'yes', ips: bound }
     : { ipRestricted: 'unknown', ips: bound }
@@ -341,6 +339,50 @@ export const parseBitgetAccountInfo = (
     transfer,
     ...ipState(ips),
     detail: `authorities=${tokens.join(',')}`,
+    checkedAt: +new Date(),
+  }
+}
+
+// GET /api/v3/account/info (Unified Trading Account). Unlike the classic
+// authority codes, this vocabulary is published: `uta_mgt`, `uta_trade`,
+// `withdraw`, `copy_futures_position`, `copy_futures_order`. Withdrawal is
+// therefore decidable. Transfer is not: Bitget does not say which permission
+// its unified transfer endpoints require, and `uta_mgt` (account management)
+// is the plausible one, so a key carrying it resolves to `unknown`.
+const BITGET_UTA_PERMISSIONS = [
+  'uta_mgt',
+  'uta_trade',
+  'withdraw',
+  'copy_futures_position',
+  'copy_futures_order',
+]
+
+export const parseBitgetUtaAccountInfo = (
+  data: unknown,
+): KeyPermissions | null => {
+  const d = data as Record<string, unknown> | null
+  if (!d || typeof d !== 'object' || !Array.isArray(d.permissions)) {
+    return null
+  }
+  const tokens = (d.permissions as unknown[])
+    .map((a) => `${a}`.trim().toLowerCase())
+    .filter(Boolean)
+  const known = tokens.every((t) => BITGET_UTA_PERMISSIONS.includes(t))
+  const ips =
+    typeof d.ips === 'string'
+      ? d.ips
+          .split(',')
+          .map((i) => i.trim())
+          .filter(Boolean)
+      : undefined
+  return {
+    withdraw: tokens.includes('withdraw') ? 'yes' : known ? 'no' : 'unknown',
+    transfer:
+      known && !tokens.includes('uta_mgt') && !tokens.includes('withdraw')
+        ? 'no'
+        : 'unknown',
+    ...ipState(ips),
+    detail: `permissions=${tokens.join(',')}`,
     checkedAt: +new Date(),
   }
 }

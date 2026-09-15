@@ -226,6 +226,91 @@ export class RestClientV2 extends BaseRestClient {
     return this.get(`/api/v3/market/instruments`, params)
   }
 
+  /**
+   *
+   * Unified Trading Account (UTA) — v3 private endpoints.
+   *
+   * An account in unified mode is refused by every classic v2 private
+   * endpoint ("you are in unified account mode, and the classic account api
+   * is not supported"), and a classic account cannot use these. The adapter
+   * picks one family per key; see `bitget/uta.ts`.
+   *
+   */
+
+  getAccountInfoV3(): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/account/info`)
+  }
+
+  getAccountSettingsV3(): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/account/settings`)
+  }
+
+  getAccountAssetsV3(): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/account/assets`)
+  }
+
+  getFeeRateV3(params: {
+    symbol: string
+    category: string
+  }): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/account/fee-rate`, params)
+  }
+
+  getAllFeeRatesV3(params: { category: string }): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/account/all-fee-rate`, params)
+  }
+
+  setLeverageV3(params: {
+    category: string
+    symbol: string
+    leverage: string
+    marginMode?: 'crossed' | 'isolated'
+    posSide?: 'long' | 'short'
+  }): Promise<APIResponse<any>> {
+    return this.postPrivate(`/api/v3/account/set-leverage`, params)
+  }
+
+  setHoldModeV3(params: {
+    holdMode: 'one_way_mode' | 'hedge_mode'
+  }): Promise<APIResponse<any>> {
+    return this.postPrivate(`/api/v3/account/set-hold-mode`, params)
+  }
+
+  getCurrentPositionsV3(params: {
+    category: string
+    symbol?: string
+  }): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/position/current-position`, params)
+  }
+
+  placeOrderV3(params: object): Promise<APIResponse<any>> {
+    return this.postPrivate(`/api/v3/trade/place-order`, params)
+  }
+
+  cancelOrderV3(params: {
+    category: string
+    orderId?: string
+    clientOid?: string
+  }): Promise<APIResponse<any>> {
+    return this.postPrivate(`/api/v3/trade/cancel-order`, params)
+  }
+
+  getOrderInfoV3(params: {
+    orderId?: string
+    clientOid?: string
+  }): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/trade/order-info`, params)
+  }
+
+  getUnfilledOrdersV3(params: {
+    category: string
+    symbol?: string
+    limit?: string
+    cursor?: string
+  }): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v3/trade/unfilled-orders`, params)
+  }
+
   getSpotFundNetFlowData(params: object): Promise<APIResponse<any>> {
     return this.get(`/api/v2/spot/market/fund-net-flow`, params)
   }

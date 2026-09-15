@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] - 2026-09-15
+
+### Added
+
+- Bitget Unified Trading Accounts are supported. Bitget runs two account systems, and an account in unified mode is refused by every endpoint of the classic API the connector used, so a unified account could not trade at all. The connector now checks which system each API key's account is in and sends that key's private calls — balances, orders, cancels, order status, open orders, fees, leverage, position mode, positions and key checks — to the matching API. Classic accounts are unaffected. Market data is shared by both systems and is unchanged.
+- Bitget Reality stock tokens (tokenized US stocks such as rAAPL) are listed on Bitget spot, classed as stocks. Bitget only allows them to be traded from a Unified Trading Account; a classic account that picks one gets an explanation instead of an order attempt.
+
+### Fixed
+
+- Bitget spot candles for Reality stock tokens are requested at the granularities Bitget serves for them (1m, 5m, 15m, 1h, 4h, 1d, 1w). The daily and weekly candles previously requested are rejected for these pairs.
+
+### Known limitations
+
+- Bitget COIN-M futures are not supported for Unified Trading Accounts. The unified COIN-M line is a separate product with different contract symbols and order sizing, so its orders are refused with an explanation rather than routed to it.
+
 ## [1.20.25] - 2026-09-12
 
 ### Fixed

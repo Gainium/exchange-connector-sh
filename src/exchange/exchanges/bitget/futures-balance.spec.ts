@@ -34,8 +34,32 @@ function stubAccounts(rows: AccountRow[]) {
   const ex = new BitgetExchange(Futures.usdm, 'k', 's', 'p') as any
   ex.checkLimits = async () => undefined
   ex.client = {
-    getFuturesAccountAssets: async ({ productType }: { productType: string }) =>
+    getFuturesAccountAssets: async ({
+      productType,
+    }: {
+      productType: string
+    }) =>
       productType === 'USDT-FUTURES'
+        ? { code: '00000', msg: 'success', data: rows }
+        : { code: '00000', msg: 'success', data: [] },
+  }
+  return ex
+}
+
+/**
+ * The same thing for a COIN-M (inverse) connector: its only product type is
+ * COIN-FUTURES and its margin coin is the BASE asset, not the quote currency.
+ */
+function stubCoinmAccounts(rows: AccountRow[]) {
+  const ex = new BitgetExchange(Futures.coinm, 'k', 's', 'p') as any
+  ex.checkLimits = async () => undefined
+  ex.client = {
+    getFuturesAccountAssets: async ({
+      productType,
+    }: {
+      productType: string
+    }) =>
+      productType === 'COIN-FUTURES'
         ? { code: '00000', msg: 'success', data: rows }
         : { code: '00000', msg: 'success', data: [] },
   }
@@ -44,6 +68,9 @@ function stubAccounts(rows: AccountRow[]) {
 
 const usdt = (r: { asset: string; free: number; locked: number }[]) =>
   r.find((b) => b.asset === 'USDT')
+
+const btc = (r: { asset: string; free: number; locked: number }[]) =>
+  r.find((b) => b.asset === 'BTC')
 
 /** Rounded to 8dp — the fixtures are exact, this only absorbs FP noise. */
 const near = (a: number, b: number) => Math.abs(a - b) < 1e-8
@@ -85,6 +112,34 @@ const ISOLATED: AccountRow = {
   crossedMargin: '0',
   isolatedMargin: '4000',
 }
+
+/**
+ * Spec 011 §2.1 — a COIN-FUTURES (inverse) account, shaped like the reported
+ * one. The contracts are USD-quoted, so the venue reports their open PnL in
+ * USD while every balance field stays in the margin coin:
+ *
+ *   accountEquity  0.00736611 BTC   (~$580)
+ *   unrealizedPL  -0.1689     USD   (a 17-cent loss on ~$4 of committed margin)
+ *   locked         0.00005992 BTC   (venue-frozen)
+ *   available      0.00730619 BTC   = accountEquity - locked
+ */
+const COINM_LOSS: AccountRow = {
+  marginCoin: 'BTC',
+  locked: '0.00005992',
+  available: '0.00730619',
+  crossedMaxAvailable: '0.00730619',
+  isolatedMaxAvailable: '0.00730619',
+  maxTransferOut: '0.00730619',
+  accountEquity: '0.00736611',
+  usdtEquity: '569.99',
+  btcEquity: '0.00736611',
+  unrealizedPL: '-0.1689',
+  crossedMargin: '0',
+  isolatedMargin: '0',
+}
+
+/** The same account with the position in profit instead of in loss. */
+const COINM_PROFIT: AccountRow = { ...COINM_LOSS, unrealizedPL: '0.0034' }
 
 /** Nothing open: the venue's own idle-account shape (§2.3). */
 const FLAT: AccountRow = {
@@ -171,6 +226,54 @@ describe('bitget futures_getBalance — free + locked is the wallet balance', ()
       throw new Error(`non-finite balance: free=${b.free} locked=${b.locked}`)
     }
     check('free', b.free, 5000)
+    check('locked', b.locked, 0)
+  })
+
+  // --- spec 011: COIN-M (inverse) -------------------------------------------
+  // `unrealizedPL` is quoted in the CONTRACTS' currency, which on COIN-FUTURES
+  // is USD, not the margin coin. Subtracting it from a coin-denominated
+  // `accountEquity` moves the balance by ~1 whole coin per 1 USD of open PnL.
+
+  it('011 §1.1 coin-m: a USD open loss does not inflate the coin balance', async () => {
+    const ex = stubCoinmAccounts([COINM_LOSS])
+    const res = await ex.futures_getBalance()
+    if (res.status !== StatusEnum.ok) {
+      throw new Error(`expected OK, got ${res.status} ${res.reason}`)
+    }
+    const b = btc(res.data)
+    if (!b) throw new Error('no BTC row returned')
+    // The defect: before the fix this is 0.00736611 - (-0.1689) = 0.17626611,
+    // i.e. 23.9x the BTC the venue holds — the number the reporter's bot then
+    // took 9.6% of.
+    check('free + locked', b.free + b.locked, 0.00736611)
+    check('locked', b.locked, 0.00005992)
+    check('free', b.free, 0.00730619)
+  })
+
+  it('011 §1.1 coin-m: a USD open profit does not shrink the coin balance', async () => {
+    const ex = stubCoinmAccounts([COINM_PROFIT])
+    const res = await ex.futures_getBalance()
+    const b = btc(res.data)
+    if (!b) throw new Error('no BTC row returned')
+    // Before the fix: 0.00736611 - 0.0034 = 0.00396611, 46% of the balance
+    // gone. The error runs both ways, it just isn't the direction that opens
+    // oversized deals.
+    check('free + locked', b.free + b.locked, 0.00736611)
+  })
+
+  it('011 §3 coin-m with nothing open is unchanged', async () => {
+    const ex = stubCoinmAccounts([
+      {
+        ...COINM_LOSS,
+        unrealizedPL: '0',
+        locked: '0',
+        available: '0.00736611',
+      },
+    ])
+    const res = await ex.futures_getBalance()
+    const b = btc(res.data)
+    if (!b) throw new Error('no BTC row returned')
+    check('free', b.free, 0.00736611)
     check('locked', b.locked, 0)
   })
 

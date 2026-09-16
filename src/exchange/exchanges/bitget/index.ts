@@ -361,11 +361,26 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             // margin twice. `accountEquity` is documented as equity
             // *including* unrealized PnL, so equity - unrealizedPL is the
             // wallet balance — the same figure Bybit anchors on.
+            //
+            // That subtraction is only legal when the margin coin IS the
+            // contracts' quote currency, i.e. on the LINEAR product types
+            // (USDT-FUTURES / USDC-FUTURES). On COIN-FUTURES the contracts are
+            // USD-quoted inverse contracts: every balance field stays in the
+            // margin coin but `unrealizedPL` comes back in the contracts'
+            // currency, so subtracting it moves the balance by ~1 whole coin
+            // per 1 USD of open PnL. Inverse therefore anchors on
+            // `accountEquity` alone — the only account-wide figure the venue
+            // quotes in the margin coin, and the same account-equity anchor
+            // `kucoin` uses. The total is then equity rather than wallet
+            // balance, differing by the position's PnL *in coin terms*, and no
+            // cross-currency term is read at all.
             const num = (v: unknown) => {
               const n = parseFloat(`${v ?? ''}`)
               return Number.isFinite(n) ? n : 0
             }
-            const equityBased = num(d.accountEquity) - num(d.unrealizedPL)
+            const equityBased = this.coinm
+              ? num(d.accountEquity)
+              : num(d.accountEquity) - num(d.unrealizedPL)
             // Product types that omit the equity fields fall back to the
             // venue's own two-term split; reporting 0 would read as an
             // emptied account.

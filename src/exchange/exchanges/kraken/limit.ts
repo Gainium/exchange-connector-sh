@@ -220,19 +220,19 @@ class KrakenLimits {
   }
 
   /**
-   * Check and wait for REST API rate limit. When `accountKey` is provided and
-   * per-account limits are enabled, the budget is tracked for that key alone;
-   * otherwise it falls back to the process-wide global counter. The mutex key
-   * is scoped to the account so distinct accounts don't serialize each other.
+   * The REST budget's verdict for one call: 0 if it may go now, else how long to
+   * wait. `commit` decides whether the cost is actually spent — a probe reads
+   * the same arithmetic without taking a token. Decay is applied either way;
+   * decay is clock accounting, not spending.
+   *
+   * Synchronous and un-decorated on purpose: `addOrderCall` has to decide across
+   * BOTH budgets without yielding, and the mutex is not reentrant.
    */
-  @IdMute(
-    mutex,
-    (accountKey?: string) => `krakenRest:${accountKey ?? 'global'}`,
-  )
-  async checkRestLimit(
-    accountKey?: string,
-    cost: number = REST_CALL_COST,
-  ): Promise<number> {
+  private restVerdict(
+    accountKey: string | undefined,
+    cost: number,
+    commit: boolean,
+  ): number {
     if (perAccountEnabled() && accountKey) {
       const s = getRestState(accountKey)
       applyRestDecayState(s)
@@ -242,7 +242,7 @@ class KrakenLimits {
         const excess = predictedCounter - tier.max
         return Math.ceil((excess / tier.decay) * 1000) + 100 // +100ms buffer
       }
-      s.restCounter = predictedCounter
+      if (commit) s.restCounter = predictedCounter
       return 0
     }
 
@@ -252,24 +252,21 @@ class KrakenLimits {
       const excess = predictedCounter - REST_MAX_COUNTER
       return Math.ceil((excess / REST_DECAY_RATE) * 1000) + 100 // +100ms buffer
     }
-    restCounter = predictedCounter
+    if (commit) restCounter = predictedCounter
     return 0
   }
 
   /**
-   * Check and wait for matching engine rate limit (per pair, and per account
+   * The matching-engine budget's verdict for one call (per pair, and per account
    * when enabled — Kraken's matching-engine limits are per pair *per account*).
+   * Same `commit` semantics as `restVerdict`.
    */
-  @IdMute(
-    mutex,
-    (accountKey: string | undefined, pair: string) =>
-      `krakenPair:${accountKey ?? 'global'}:${pair}`,
-  )
-  async checkMatchingEngineLimit(
+  private engineVerdict(
     accountKey: string | undefined,
     pair: string,
-    cost: number = ADD_ORDER_COST,
-  ): Promise<number> {
+    cost: number,
+    commit: boolean,
+  ): number {
     if (perAccountEnabled() && accountKey) {
       const p = getPairState(`${accountKey}|${pair}`)
       applyPairDecayState(p)
@@ -278,8 +275,10 @@ class KrakenLimits {
         const excess = predictedCounter - MATCHING_ENGINE_THRESHOLD
         return Math.ceil((excess / MATCHING_ENGINE_DECAY_RATE) * 1000) + 100
       }
-      p.counter = predictedCounter
-      p.lastUpdate = Date.now()
+      if (commit) {
+        p.counter = predictedCounter
+        p.lastUpdate = Date.now()
+      }
       return 0
     }
 
@@ -300,11 +299,30 @@ class KrakenLimits {
       return waitTime
     }
 
-    pairData.counter = predictedCounter
-    pairData.lastUpdate = Date.now()
-    pairCounters.set(pair, pairData)
+    if (commit) {
+      pairData.counter = predictedCounter
+      pairData.lastUpdate = Date.now()
+      pairCounters.set(pair, pairData)
+    }
 
     return 0
+  }
+
+  /**
+   * Check and wait for REST API rate limit. When `accountKey` is provided and
+   * per-account limits are enabled, the budget is tracked for that key alone;
+   * otherwise it falls back to the process-wide global counter. The mutex key
+   * is scoped to the account so distinct accounts don't serialize each other.
+   */
+  @IdMute(
+    mutex,
+    (accountKey?: string) => `krakenRest:${accountKey ?? 'global'}`,
+  )
+  async checkRestLimit(
+    accountKey?: string,
+    cost: number = REST_CALL_COST,
+  ): Promise<number> {
+    return this.restVerdict(accountKey, cost, true)
   }
 
   /**
@@ -319,8 +337,29 @@ class KrakenLimits {
   }
 
   /**
-   * Add an order-related call (matching engine).
+   * Add an order-related call. Kraken meters it against TWO budgets — the
+   * per-key REST counter and the per-pair matching-engine counter — and the
+   * call only reaches the venue when both admit.
+   *
+   * So the two are spent together or not at all. Asking each in turn and
+   * letting whichever admits charge itself meant a call the caller was told to
+   * DEFER still took a token in the other bucket; `checkLimits` re-asks until
+   * the budget admits it (index.ts), so that token was taken again on every
+   * attempt. Measured on the shipped module, one sent call cost 1.70 REST
+   * tokens on the cancel path and 2.00 matching-engine charges on the add path
+   * — surplus load Kraken never saw, paced against a bucket that refills at
+   * 0.33-0.5/s.
+   *
+   * Probe, then commit, with no `await` in between: the decision is atomic
+   * under this method's own mutex, so nothing can take the last token between
+   * the two. The mutex key is the account's REST key — plain REST calls share
+   * that bucket and must serialise against this.
    */
+  @IdMute(
+    mutex,
+    (_pair: string, _type: string, accountKey?: string) =>
+      `krakenRest:${accountKey ?? 'global'}`,
+  )
   async addOrderCall(
     pair: string,
     type: 'add' | 'cancel' | 'amend',
@@ -333,15 +372,15 @@ class KrakenLimits {
           ? CANCEL_ORDER_COST
           : AMEND_ORDER_COST
 
-    // Check both REST and matching engine limits
-    const restWait = await this.checkRestLimit(accountKey, REST_CALL_COST)
-    const engineWait = await this.checkMatchingEngineLimit(
-      accountKey,
-      pair,
-      cost,
-    )
+    const restWait = this.restVerdict(accountKey, REST_CALL_COST, false)
+    const engineWait = this.engineVerdict(accountKey, pair, cost, false)
+    if (restWait > 0 || engineWait > 0) {
+      return Math.max(restWait, engineWait)
+    }
 
-    return Math.max(restWait, engineWait)
+    this.restVerdict(accountKey, REST_CALL_COST, true)
+    this.engineVerdict(accountKey, pair, cost, true)
+    return 0
   }
 
   /**
@@ -423,4 +462,10 @@ export default {
   noteRateLimited: limits.noteRateLimited.bind(limits),
 }
 
-export { ADD_ORDER_COST, CANCEL_ORDER_COST, AMEND_ORDER_COST }
+export {
+  ADD_ORDER_COST,
+  CANCEL_ORDER_COST,
+  AMEND_ORDER_COST,
+  REST_MAX_COUNTER,
+  MATCHING_ENGINE_THRESHOLD,
+}

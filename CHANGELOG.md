@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.1] - 2026-09-18
+
+### Fixed
+
+- Kraken order placements and cancellations are no longer paced more slowly than Kraken itself requires. Kraken meters an order call against two separate budgets — one for the account's API calls and one for the trading pair — and only sends the call when both allow it. The connector charged whichever budget had room even when the other one did not, and because a call that has to wait is asked again once the budget frees up, the same call was charged repeatedly for a request it had not yet sent. The two budgets are now spent together, and only when the call is actually sent, so a burst of orders on one pair — building a grid, or cancelling one after a deal closes — is spaced only as far apart as Kraken's own limits require.
+
 ## [1.21.0] - 2026-09-15
 
 ### Added

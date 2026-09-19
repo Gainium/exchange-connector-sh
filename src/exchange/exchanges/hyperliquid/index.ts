@@ -2139,8 +2139,14 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               // a maker rebate) and the token it took it in (`feeToken`, USDC
               // for perps but not universally). This costs no extra request —
               // the fills were already fetched above for the price.
+              // `feeToken` is HL's raw token name (UAVAX); alias it to the
+              // ticker the pair is listed under (AVAX), or consumers can't
+              // tell a base-asset fee from a third-asset one.
               fee = normalizeOrderFees(
-                fills.map((f) => ({ amount: f.fee, asset: f.feeToken })),
+                fills.map((f) => ({
+                  amount: f.fee,
+                  asset: aliasToken(f.feeToken),
+                })),
               )
             }
             timeProfile = this.endProfilerTime(timeProfile, 'exchange')

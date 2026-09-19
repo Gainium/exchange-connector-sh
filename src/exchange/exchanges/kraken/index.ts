@@ -2885,10 +2885,127 @@ class KrakenExchange extends AbstractExchange implements Exchange {
 
     const orderId = orderResult.data.orderId
 
+    if (!this.usdm) {
+      // The order we just read IS the order about to be cancelled, and Kraken
+      // spot's cancel reply cannot describe it (see `spotCancelByTxid`). Hand
+      // it down so the report is the real order rather than a synthesised one,
+      // at no extra cost — the alternative is a second private call on an
+      // account whose whole REST budget is 20 tokens at 0.5/s.
+      return this.spotCancelByTxid(
+        { symbol, orderId: orderId.toString() },
+        orderResult.data,
+        timeProfile,
+      )
+    }
+
     return this.cancelOrderByOrderIdAndSymbol(
       { symbol, orderId: orderId.toString() },
       timeProfile,
     )
+  }
+
+  /**
+   * Cancel a Kraken SPOT order by txid and report what was cancelled.
+   *
+   * Kraken spot's REST cancel answers `{count}` and nothing else, so the
+   * `CommonOrder` this has to return cannot come from the cancel reply. It used
+   * to be invented — `price: '0'`, `origQty: '0'`, `executedQty: '0'`,
+   * `type: 'LIMIT'`, `side: 'BUY'` — and main-app's `cancelOrderOnExchange`
+   * copies every field of the answer onto the order row it holds
+   * (`Object.keys(order)` loop, excluding only `clientOrderId`, `origQty` and
+   * `origPrice`). So a SELL limit resting at 565.72 was persisted as a BUY at 0,
+   * and a partial fill on a cancelled order as no fill at all — on a large share
+   * of Kraken spot cancels, including take profits on long spot deals, which
+   * cannot be BUYs at all. Spec `013`.
+   *
+   * `lastSeen` is the order as the caller read it moments ago. `cancelOrder`
+   * always has it (it resolves the txid through `getOrder` first); the
+   * by-orderId entry never does, and pays one QueryOrders token to re-read
+   * after the cancel.
+   *
+   * `status` is `CANCELED` regardless: a successful cancel is the only thing
+   * actually observed here. Whether a cancelled-with-fills order should be
+   * promoted to FILLED is the engine's decision — `setFilledInsteadOfCanceled`
+   * and the `promotePartialToFilled` opt-out — and reporting a re-read's
+   * `closed` as FILLED would additionally make main-app's terminal cancel fail
+   * with "Order was not canceled on exchange".
+   */
+  private async spotCancelByTxid(
+    order: {
+      symbol: string
+      orderId: string
+    },
+    lastSeen: CommonOrder | undefined,
+    timeProfile: TimeProfile,
+  ): Promise<BaseReturn<CommonOrder>> {
+    const { symbol, orderId } = order
+
+    if (!this.spotClient) {
+      return this.errorClient(timeProfile)
+    }
+
+    timeProfile =
+      (await this.checkLimits('cancelOrder', symbol, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+    return this.spotClient
+      .cancelOrder({
+        txid: orderId,
+      })
+      .then(async (result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+        if (!result.result || result.error?.length) {
+          throw new Error(result.error?.[0] || 'Failed to cancel order')
+        }
+
+        // Only asked when the caller had nothing: QueryOrders is exact and
+        // covers a closed order, so it reads the cancelled order back
+        // whichever way the cancel went.
+        const settled =
+          lastSeen ??
+          (await this.querySpotOrderByTxid(
+            orderId,
+            symbol,
+            '',
+            timeProfile,
+          ).then((lookup) =>
+            lookup.kind === 'found' ? lookup.order.data : undefined,
+          ))
+
+        if (!settled) {
+          // Nothing could be established — the venue denied the txid, or the
+          // re-read failed. The cancel still succeeded and must still be
+          // reported as one (a refusal sends `cancelOrderOnExchange` down its
+          // unknown-order ladder and retires a live order), so say what we
+          // know and OMIT what we do not: main-app copies a field only when
+          // the response HAS it, so an absent `price`/`executedQty`/`type`/
+          // `side` leaves the row's own value alone. Asserting `'0'` is what
+          // this whole method exists to stop doing. Spec `013` §4.3.
+          return this.returnGood<CommonOrder>(timeProfile)({
+            symbol,
+            orderId,
+            clientOrderId: '',
+            transactTime: Date.now(),
+            updateTime: Date.now(),
+            status: 'CANCELED',
+          } as unknown as CommonOrder)
+        }
+
+        return this.returnGood<CommonOrder>(timeProfile)({
+          ...settled,
+          orderId,
+          status: 'CANCELED',
+        })
+      })
+      .catch(
+        this.handleKrakenErrors(
+          this.cancelOrderByOrderIdAndSymbol,
+          order,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async cancelOrderByOrderIdAndSymbol(
@@ -2971,47 +3088,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         )
     }
 
-    if (!this.spotClient) {
-      return this.errorClient(timeProfile)
-    }
-
-    timeProfile =
-      (await this.checkLimits('cancelOrder', symbol, timeProfile)) ||
-      timeProfile
-    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-
-    return this.spotClient
-      .cancelOrder({
-        txid: orderId,
-      })
-      .then((result) => {
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-
-        if (!result.result || result.error?.length) {
-          throw new Error(result.error?.[0] || 'Failed to cancel order')
-        }
-
-        return this.returnGood<CommonOrder>(timeProfile)(
-          this.convertOrder({
-            orderId,
-            symbol,
-            clientOrderId: '',
-            price: '0',
-            origQty: '0',
-            executedQty: '0',
-            status: 'CANCELED',
-            type: 'LIMIT',
-            side: 'BUY',
-          }),
-        )
-      })
-      .catch(
-        this.handleKrakenErrors(
-          this.cancelOrderByOrderIdAndSymbol,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
-      )
+    // Nothing was read before this cancel — this entry point is addressed by
+    // txid alone (main-app's terminal cancel) — so the helper re-reads the
+    // order afterwards instead of inventing it.
+    return this.spotCancelByTxid({ symbol, orderId }, undefined, timeProfile)
   }
 
   async getAllOpenOrders(

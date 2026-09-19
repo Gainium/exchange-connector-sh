@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.3] - 2026-09-19
+
+### Fixed
+
+- A cancelled Kraken spot order is now reported as the order it actually was. Kraken's spot cancel reply says only how many orders it cancelled and nothing about them, so the connector filled in the rest itself — always a buy, always a limit, always at a price of zero, and always as having traded nothing. Those values were then written onto the stored order, so a cancelled sell order was recorded as a buy at no price, and a cancelled order that had already partly traded was recorded as having traded nothing at all. The connector now reports the order as it read it immediately before cancelling — its real price, side, type, size and the quantity it had traded — and looks the order up again after the cancel on the one path that had not read it first. When neither is possible it reports the cancellation without asserting anything it could not establish, leaving the stored order's own values in place.
+
 ## [1.21.2] - 2026-09-19
 
 ### Fixed

@@ -21,6 +21,7 @@ import {
 } from '../../types'
 import BitgetExchange from './index'
 import {
+  COINM_PERP_NEEDS_UTA,
   REALITY_NEEDS_UTA,
   UTA_COINM_UNSUPPORTED,
   UTA_MISSING_PERMISSIONS,
@@ -301,11 +302,23 @@ describe('bitget UTA — orders', () => {
     eq('not placed', placed, false)
   })
 
-  it('COIN-M on a unified account is refused, not routed to _CM contracts', async () => {
-    const ex = stub(Futures.coinm, { ...unified })
+  // Superseded by spec 014: the unified line now carries the inverse
+  // perpetuals, and an inverse account's balance is read from it like any
+  // other. Only the classic delivery contracts stay off it.
+  it('a unified inverse account reads its margin coins from v3', async () => {
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      getAccountAssetsV3: async () => ({
+        data: {
+          assets: [
+            { coin: 'BTC', balance: '0.5', available: '0.25', locked: '0.25' },
+          ],
+        },
+      }),
+    })
     const res = await ex.getBalance()
-    eq('status', res.status, StatusEnum.notok)
-    eq('reason', res.reason, UTA_COINM_UNSUPPORTED)
+    eq('status', res.status, StatusEnum.ok)
+    eq('assets', res.data, [{ asset: 'BTC', free: 0.25, locked: 0.25 }])
   })
 })
 
@@ -580,5 +593,298 @@ describe('bitget UTA — fees', () => {
     const res = await ex.getAllUserFees()
     eq('status', res.status, StatusEnum.notok)
     eq('reason', res.reason, UTA_MISSING_PERMISSIONS)
+  })
+})
+
+/**
+ * Spec 014 — Bitget's inverse perpetuals live only on the unified line, under
+ * a `_CM` name, sized in whole 1-USD contracts. The platform keeps its own
+ * name and its own unit (the base coin) on both sides of that boundary.
+ */
+describe('bitget UTA — inverse perpetuals', () => {
+  beforeEach(() => clearAccountModeCache())
+
+  const perpInstrument = {
+    symbol: 'BTCUSD_CM',
+    category: 'COIN-FUTURES',
+    baseCoin: 'BTC',
+    quoteCoin: 'USD',
+    symbolType: 'crypto',
+    type: 'perpetual',
+    status: 'online',
+    minOrderQty: '1',
+    minOrderAmount: '5',
+    pricePrecision: '1',
+    priceMultiplier: '0.1',
+    quantityPrecision: '0',
+    makerFeeRate: '0.0002',
+    takerFeeRate: '0.0006',
+    sellLimitPriceRatio: '0.05',
+    buyLimitPriceRatio: '0.05',
+    maxProductOrderNum: '400',
+    maxSymbolOrderNum: '',
+    minLeverage: '1',
+    maxLeverage: '125',
+  }
+
+  const deliveryContract = {
+    symbol: 'BTCUSDU26',
+    symbolStatus: 'normal',
+    baseCoin: 'BTC',
+    quoteCoin: 'USD',
+    minTradeNum: '0.001',
+    volumePlace: '3',
+    sizeMultiplier: '0.001',
+    minTradeUSDT: '5',
+    maxSymbolOrderNum: '200',
+    pricePlace: '1',
+    priceEndStep: '1',
+    minLever: '1',
+    maxLever: '50',
+    makerFeeRate: '0.0002',
+    takerFeeRate: '0.0006',
+    sellLimitPriceRatio: '0.05',
+    buyLimitPriceRatio: '0.05',
+    supportMarginCoins: ['BTC'],
+  }
+
+  const perpOrder = (o: Record<string, unknown> = {}) => ({
+    orderId: '9',
+    clientOid: 'c9',
+    category: 'COIN-FUTURES',
+    symbol: 'BTCUSD_CM',
+    orderType: 'limit',
+    side: 'buy',
+    price: '80000',
+    qty: '800',
+    cumExecQty: '0',
+    cumExecValue: '0',
+    avgPrice: '0',
+    orderStatus: 'live',
+    holdMode: 'one_way_mode',
+    feeDetail: [],
+    createdTime: '1789900000000',
+    updatedTime: '1789900001000',
+    ...o,
+  })
+
+  it('lists inverse perpetuals from v3 beside the classic delivery contracts', async () => {
+    const ex = stub(
+      Futures.coinm,
+      {
+        getInstrumentsV3: async () => ({
+          code: '00000',
+          data: [
+            perpInstrument,
+            { ...perpInstrument, symbol: 'OLDUSD_CM', status: 'offline' },
+          ],
+        }),
+      },
+      {
+        getFuturesContractConfig: async () => ({
+          code: '00000',
+          data: [deliveryContract],
+        }),
+      },
+    )
+    const res = await ex.getAllExchangeInfo()
+    eq('status', res.status, StatusEnum.ok)
+    eq(
+      'pairs',
+      res.data.map((p: any) => p.pair),
+      ['BTCUSDU26', 'BTCUSD'],
+    )
+    const perp = res.data[1]
+    eq('margined in the coin', perp.marginCoins, ['BTC'])
+    eq('venue minimum notional', perp.quoteAsset.minAmount, 5)
+    eq('price step', perp.priceMultiplier.decimals, 0.1)
+  })
+
+  it('sends a perpetual as _CM, sized in whole 1-USD contracts', async () => {
+    let placed: Record<string, string> = {}
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      placeOrderV3: async (o: Record<string, string>) => {
+        placed = o
+        return { data: { clientOid: 'c9' } }
+      },
+      getOrderInfoV3: async () => ({ data: perpOrder() }),
+    })
+    const res = await ex.openOrder({
+      symbol: 'BTCUSD',
+      side: 'BUY',
+      quantity: 0.01,
+      price: 80000,
+      type: 'LIMIT',
+      newClientOrderId: 'c9',
+    })
+    eq('category', placed.category, 'COIN-FUTURES')
+    eq('venue symbol', placed.symbol, 'BTCUSD_CM')
+    eq('contracts', placed.qty, '800')
+    eq('status', res.status, StatusEnum.ok)
+    // and the answer comes back in the platform's own name and unit
+    eq('pair', res.data.symbol, 'BTCUSD')
+    eq('base quantity', res.data.origQty, '0.01')
+  })
+
+  it('a market order with no price of its own is sized from the venue', async () => {
+    let placed: Record<string, string> = {}
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      getTickersV3: async () => ({
+        code: '00000',
+        data: [{ symbol: 'BTCUSD_CM', lastPrice: '50000' }],
+      }),
+      placeOrderV3: async (o: Record<string, string>) => {
+        placed = o
+        return { data: { clientOid: 'c9' } }
+      },
+      getOrderInfoV3: async () => ({
+        data: perpOrder({ orderType: 'market', price: '0', qty: '500' }),
+      }),
+    })
+    const res = await ex.openOrder({
+      symbol: 'BTCUSD',
+      side: 'SELL',
+      quantity: 0.01,
+      price: 0,
+      type: 'MARKET',
+      newClientOrderId: 'c9',
+    })
+    eq('contracts', placed.qty, '500')
+    eq('status', res.status, StatusEnum.ok)
+  })
+
+  it('reads quantity back in base, from whichever unit the venue agrees with', async () => {
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      // the venue's own figures say this qty is the base coin:
+      // 0.01 * 80000 === 800
+      getOrderInfoV3: async () => ({
+        data: perpOrder({
+          qty: '0.01',
+          cumExecQty: '0.01',
+          cumExecValue: '800',
+          avgPrice: '80000',
+          orderStatus: 'filled',
+        }),
+      }),
+    })
+    const res = await ex.getOrder({ symbol: 'BTCUSD', orderId: '9' })
+    eq('left alone', res.data.executedQty, '0.01')
+    eq('pair', res.data.symbol, 'BTCUSD')
+
+    const contracts = stub(Futures.coinm, {
+      ...unified,
+      // and here they say it is contracts: 800 / 80000 === 0.01
+      getOrderInfoV3: async () => ({
+        data: perpOrder({
+          qty: '800',
+          cumExecQty: '800',
+          cumExecValue: '0.01',
+          avgPrice: '80000',
+          orderStatus: 'filled',
+        }),
+      }),
+    })
+    const res2 = await contracts.getOrder({ symbol: 'BTCUSD', orderId: '9' })
+    eq('converted', res2.data.executedQty, '0.01')
+    eq('traded notional', res2.data.cummulativeQuoteQty, '800')
+  })
+
+  it('positions come back in the base coin, under the platform name', async () => {
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      getCurrentPositionsV3: async () => ({
+        data: [
+          {
+            symbol: 'BTCUSD_CM',
+            posSide: 'long',
+            holdMode: 'one_way_mode',
+            marginMode: 'crossed',
+            positionBalance: '0.01',
+            total: '800',
+            leverage: '10',
+            avgPrice: '80000',
+            unrealisedPnl: '0.0001',
+            updatedTime: '1789900001000',
+          },
+        ],
+      }),
+    })
+    const res = await ex.futures_getPositions('BTCUSD')
+    eq('pair', res.data[0].symbol, 'BTCUSD')
+    eq('size in base', res.data[0].positionAmt, '0.01')
+  })
+
+  it('a delivery contract stays off the unified line', async () => {
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      placeOrderV3: async () => {
+        throw new Error('the delivery contract must never be sent to v3')
+      },
+    })
+    const res = await ex.openOrder({
+      symbol: 'BTCUSDU26',
+      side: 'BUY',
+      quantity: 0.01,
+      price: 80000,
+      type: 'LIMIT',
+    })
+    eq('status', res.status, StatusEnum.notok)
+    eq('reason', res.reason, UTA_COINM_UNSUPPORTED)
+  })
+
+  it('a classic key is told the perpetual needs a unified account', async () => {
+    const ex = stub(
+      Futures.coinm,
+      {
+        getAccountSettingsV3: async () => {
+          throw bitgetError('40085', 'not a unified account')
+        },
+      },
+      {
+        placeFuturesOrder: async () => {
+          throw new Error('classic cannot carry a perpetual any more')
+        },
+      },
+    )
+    const res = await ex.openOrder({
+      symbol: 'BTCUSD',
+      side: 'BUY',
+      quantity: 0.01,
+      price: 80000,
+      type: 'LIMIT',
+    })
+    eq('status', res.status, StatusEnum.notok)
+    eq('reason', res.reason, COINM_PERP_NEEDS_UTA)
+  })
+
+  it('candles come from v3, on the UTC-aligned granularity', async () => {
+    const asked: Record<string, string>[] = []
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      getCandlesV3: async (params: Record<string, string>) => {
+        asked.push(params)
+        return {
+          code: '00000',
+          data: [
+            ['1789862400000', '80000', '81000', '79000', '80500', '1', '2'],
+          ],
+        }
+      },
+    })
+    const res = await ex.getCandles('BTCUSD', ExchangeIntervals.oneD)
+    eq('symbol', asked[0].symbol, 'BTCUSD_CM')
+    eq('granularity', asked[0].interval, '1Dutc')
+    eq('category', asked[0].category, 'COIN-FUTURES')
+    eq('candle', res.data[0], {
+      time: 1789862400000,
+      open: '80000',
+      high: '81000',
+      low: '79000',
+      close: '80500',
+      volume: '2',
+    })
   })
 })

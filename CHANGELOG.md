@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] - 2026-09-20
+
+### Added
+
+- Bitget's inverse perpetuals are listed and tradeable again. The venue moved them off the classic API onto its unified one, where they carry a `_CM` name and are sized in whole 1-USD contracts; the classic listing kept only the two quarterly delivery contracts, which is all a coin-margined connection could still see. The perpetuals are now listed from the unified API under the names they have always had, with their prices and candles read from there as well, and orders, positions, fees and leverage go through it. Quantities stay in the base coin on the platform's side of that boundary: an order converts to contracts on the way out, and a position or an order reads back in the base coin, taking the unit from whichever reading the venue's own figures agree with rather than from its documentation. They can only be traded from a Unified Trading Account, so a classic account is told that in those words instead of being told the symbol does not exist; the delivery contracts stay on the classic API.
+
+### Fixed
+
+- A coin-margined Unified Trading Account reports the balances it is actually margined in. The unified wallet was filtered to USDT and USDC for every futures product type, which is right for the linear ones and leaves an inverse account reporting nothing at all — inverse contracts are margined in the coin they are written on.
+
 ## [1.21.4] - 2026-09-20
 
 ### Fixed

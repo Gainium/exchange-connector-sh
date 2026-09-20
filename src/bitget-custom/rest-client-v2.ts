@@ -227,6 +227,33 @@ export class RestClientV2 extends BaseRestClient {
   }
 
   /**
+   * Unified v3 tickers. The inverse perpetuals (`BTCUSD_CM`) are served here
+   * and nowhere on v2 — the classic COIN-FUTURES ticker answers them with an
+   * empty list (spec 014 §2.1).
+   */
+  getTickersV3(params: {
+    category: string
+    symbol?: string
+  }): Promise<APIResponse<any>> {
+    return this.get(`/api/v3/market/tickers`, params)
+  }
+
+  /**
+   * Unified v3 candles, `[ts, open, high, low, close, baseVolume,
+   * quoteVolume]`. `interval`: 1m/5m/15m/30m/1H/4H/6H/12H/1D/1W.
+   */
+  getCandlesV3(params: {
+    category: string
+    symbol: string
+    interval: string
+    startTime?: string
+    endTime?: string
+    limit?: string
+  }): Promise<APIResponse<any>> {
+    return this.get(`/api/v3/market/candles`, params)
+  }
+
+  /**
    *
    * Unified Trading Account (UTA) — v3 private endpoints.
    *

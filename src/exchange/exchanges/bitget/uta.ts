@@ -101,6 +101,68 @@ export const UTA_COINM_UNSUPPORTED =
   'Bitget COIN-M futures are not supported for Unified Trading Accounts yet. Use USDT-M or USDC-M futures, or a Classic account.'
 
 /**
+ * Bitget's inverse perpetuals live only on the unified line, where they carry
+ * a `_CM` suffix (`BTCUSD_CM`) that exists to keep them apart from the classic
+ * delivery contracts. The platform knows them by the name the classic
+ * perpetual had, so the suffix is added on the way out and stripped on the way
+ * back (spec 014 §3.2).
+ */
+export const utaCoinmSymbol = (pair: string): string =>
+  pair.endsWith('_CM') ? pair : `${pair}_CM`
+
+export const platformCoinmSymbol = (symbol: string): string =>
+  symbol.replace(/_CM$/, '')
+
+export const isUtaCoinmSymbol = (symbol: string): boolean =>
+  symbol.endsWith('_CM')
+
+/** What a classic account sees when it picks an inverse perpetual. */
+export const COINM_PERP_NEEDS_UTA =
+  'Bitget inverse perpetuals can only be traded from a Bitget Unified Trading Account. Upgrade the account to Unified on Bitget to trade this pair.'
+
+/**
+ * An inverse order's quantity is a whole number of 1-USD contracts on the
+ * unified line, while the platform sizes this product type in the base coin
+ * (spec 014 §3.4). One contract is one USD of notional, so the two differ by
+ * the price.
+ */
+export const coinmContracts = (
+  base: number,
+  price: number,
+  minQty = 1,
+): number => {
+  const contracts = Math.round(base * price)
+  return Math.max(contracts, minQty)
+}
+
+export const coinmBase = (contracts: number, price: number): number =>
+  price > 0 ? contracts / price : 0
+
+/**
+ * Which unit a v3 inverse order reports its quantity in. The venue documents
+ * one answer for every category and the request in another (§2.4), so the
+ * answer is taken from figures that have to agree with each other: an order
+ * that has traded reports `cumExecValue` in the currency its quantity is not
+ * in. Without fills there is nothing to check against and the request's own
+ * unit stands.
+ */
+export const utaInverseQtyUnit = (order: {
+  cumExecQty?: string
+  cumExecValue?: string
+  avgPrice?: string
+}): 'base' | 'quote' => {
+  const qty = parseFloat(`${order.cumExecQty ?? ''}`)
+  const value = parseFloat(`${order.cumExecValue ?? ''}`)
+  const price = parseFloat(`${order.avgPrice ?? ''}`)
+  if (!(qty > 0) || !(value > 0) || !(price > 0)) {
+    return 'quote'
+  }
+  const asBase = Math.abs(qty * price - value)
+  const asQuote = Math.abs(qty / price - value)
+  return asBase <= asQuote ? 'base' : 'quote'
+}
+
+/**
  * Which spot symbols are Reality tokens, from v3 instruments `isReality`.
  * Refreshed hourly; a failed refresh is retried after a minute rather than on
  * every candle request.
@@ -208,7 +270,8 @@ export const aggregateCandles = (
   return result
 }
 
-export type UtaCategory = 'SPOT' | 'USDT-FUTURES' | 'USDC-FUTURES'
+export type UtaCategory =
+  'SPOT' | 'USDT-FUTURES' | 'USDC-FUTURES' | 'COIN-FUTURES'
 
 export const utaFuturesCategory = (symbol: string): UtaCategory =>
   symbol.endsWith('USDT') ? 'USDT-FUTURES' : 'USDC-FUTURES'
@@ -261,7 +324,10 @@ const utaOrderStatus = (status: string): OrderStatusType => {
  * is always the direction of the order itself (hedge mode says which position
  * it acts on through `posSide`), so there is no open/close inversion to undo.
  */
-export const convertUtaOrder = (order: UtaOrder): CommonOrder => {
+export const convertUtaOrder = (
+  order: UtaOrder,
+  inverse = false,
+): CommonOrder => {
   const futures = `${order.category}`.toUpperCase().includes('FUTURES')
   const market = order.orderType === 'market'
   const result: CommonOrder = {
@@ -271,7 +337,7 @@ export const convertUtaOrder = (order: UtaOrder): CommonOrder => {
         asset: `${f?.feeCoin ?? ''}`,
       })),
     ),
-    symbol: order.symbol,
+    symbol: inverse ? platformCoinmSymbol(order.symbol) : order.symbol,
     orderId: order.orderId,
     clientOrderId: order.clientOid,
     transactTime: +order.updatedTime,
@@ -294,6 +360,16 @@ export const convertUtaOrder = (order: UtaOrder): CommonOrder => {
           : PositionSide.LONG
         : PositionSide.BOTH
   }
+  // An inverse order is sized in 1-USD contracts on the venue and in the base
+  // coin everywhere else (spec 014 §3.4). Without a price there is nothing to
+  // convert with, and the venue's own figures are left as they came.
+  const price = num(order.avgPrice) || num(order.price)
+  if (inverse && price > 0 && utaInverseQtyUnit(order) === 'quote') {
+    result.origQty = `${coinmBase(num(order.qty), price)}`
+    result.executedQty = `${coinmBase(num(order.cumExecQty), price)}`
+    // The contracts themselves are the traded notional.
+    result.cummulativeQuoteQty = order.cumExecQty
+  }
   return result
 }
 
@@ -310,8 +386,11 @@ export type UtaPosition = {
   updatedTime: string
 }
 
-export const convertUtaPosition = (position: UtaPosition): PositionInfo => ({
-  symbol: position.symbol,
+export const convertUtaPosition = (
+  position: UtaPosition,
+  inverse = false,
+): PositionInfo => ({
+  symbol: inverse ? platformCoinmSymbol(position.symbol) : position.symbol,
   initialMargin: position.positionBalance,
   maintMargin: position.positionBalance,
   unrealizedProfit: position.unrealisedPnl,
@@ -324,7 +403,12 @@ export const convertUtaPosition = (position: UtaPosition): PositionInfo => ({
   // v3 names the side of every position, one-way included.
   positionSide:
     position.posSide === 'short' ? PositionSide.SHORT : PositionSide.LONG,
-  positionAmt: position.total,
+  // Inverse positions are held in 1-USD contracts; the platform holds this
+  // product type in the base coin (spec 014 §3.4).
+  positionAmt:
+    inverse && num(position.avgPrice) > 0
+      ? `${coinmBase(num(position.total), num(position.avgPrice))}`
+      : position.total,
   notional: '',
   isolatedWallet: '',
   updateTime: +position.updatedTime,

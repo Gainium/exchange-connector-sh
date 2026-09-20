@@ -46,6 +46,10 @@ import {
   getRealitySymbols,
   isUnifiedModeRefusal,
   isUtaPermissionRefusal,
+  utaCoinmSymbol,
+  platformCoinmSymbol,
+  coinmContracts,
+  COINM_PERP_NEEDS_UTA,
   aggregateCandles,
   realityBaseInterval,
   realityGranularity,
@@ -275,11 +279,58 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   }
 
   private utaCategory(symbol: string): UtaCategory {
+    if (this.coinm) {
+      return 'COIN-FUTURES'
+    }
     return this.futures ? utaFuturesCategory(symbol) : 'SPOT'
   }
 
   private get utaCategories(): UtaCategory[] {
+    if (this.coinm) {
+      return ['COIN-FUTURES']
+    }
     return this.futures ? ['USDT-FUTURES', 'USDC-FUTURES'] : ['SPOT']
+  }
+
+  /**
+   * The venue's name for a pair on the unified line. Only the inverse
+   * perpetuals differ from the platform's own name (spec 014 §3.2).
+   */
+  private utaSymbol(pair: string): string
+  private utaSymbol(pair: undefined): undefined
+  private utaSymbol(pair?: string): string | undefined
+  private utaSymbol(pair?: string): string | undefined {
+    if (!pair || !this.coinm) {
+      return pair
+    }
+    return utaCoinmSymbol(pair)
+  }
+
+  /**
+   * Bitget's quarterly inverse contracts (`BTCUSDU26`) stayed on the classic
+   * line when the perpetuals moved; the unified line does not carry them.
+   */
+  private isCoinmDelivery(pair: string): boolean {
+    return this.coinm && /[A-Z]\d{2}$/.test(pair)
+  }
+
+  /**
+   * The venue's last price for an inverse pair, for sizing a market order
+   * whose caller did not carry one (spec 014 §3.4).
+   */
+  private async utaLastPrice(pair: string): Promise<number> {
+    try {
+      await this.checkLimits('utaGetTickers', 0)
+      const res = await this.orderClient.getTickersV3({
+        category: this.utaCategory(pair),
+        symbol: this.utaSymbol(pair),
+      })
+      const row = (Array.isArray(res?.data) ? res.data : [])[0]
+      const price = parseFloat(`${row?.lastPrice ?? ''}`)
+      return Number.isFinite(price) ? price : 0
+    } catch {
+      return 0
+    }
   }
 
   /**
@@ -293,9 +344,6 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     map: (data: any) => T | Promise<T>,
     timeProfile: TimeProfile,
   ): Promise<BaseReturn<T>> {
-    if (this.coinm) {
-      return this.returnBad(timeProfile)(new Error(UTA_COINM_UNSUPPORTED))
-    }
     timeProfile = (await this.checkLimits(limit, 0, timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     try {
@@ -353,11 +401,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       'getAccountAssetsV3',
       () => this.orderClient.getAccountAssetsV3(),
       // Futures reports only its margin coins, as the classic product-type
-      // accounts did; spot reports every coin held.
+      // accounts did; spot reports every coin held. Inverse contracts are
+      // margined in the coin they are written on — a different coin per pair
+      // — so that product type reports them all too.
       (data) =>
         convertUtaAssets(
           (data?.assets ?? []) as UtaAsset[],
-          this.futures ? ['USDT', 'USDC'] : undefined,
+          this.futures && !this.coinm ? ['USDT', 'USDC'] : undefined,
         ),
       timeProfile,
     )
@@ -378,12 +428,31 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
     const limit = order.type === 'LIMIT'
+    if (this.isCoinmDelivery(order.symbol)) {
+      return this.returnBad(timeProfile)(new Error(UTA_COINM_UNSUPPORTED))
+    }
+    // An inverse order is sized in whole 1-USD contracts (spec 014 §3.4). A
+    // limit order carries its own price; a market order is sized from the
+    // venue's last price when the caller did not send one.
+    let quantity = order.quantity
+    if (this.coinm) {
+      const price =
+        order.price > 0 ? order.price : await this.utaLastPrice(order.symbol)
+      if (!(price > 0)) {
+        return this.returnBad(timeProfile)(
+          new Error(
+            `${this.exchangeProblems}no price to size an inverse order for ${order.symbol}`,
+          ),
+        )
+      }
+      quantity = coinmContracts(order.quantity, price)
+    }
     // Spot market buys are sized in the quote coin, exactly as on classic;
     // main-app already sends them that way.
     const options: Record<string, string> = {
       category: this.utaCategory(order.symbol),
-      symbol: order.symbol,
-      qty: this.convertNumberToString(order.quantity),
+      symbol: this.utaSymbol(order.symbol),
+      qty: this.convertNumberToString(quantity),
       side: order.side === 'BUY' ? 'buy' : 'sell',
       orderType: limit ? 'limit' : 'market',
     }
@@ -442,7 +511,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             ? { orderId: data.orderId }
             : { clientOid: data.newClientOrderId },
         ),
-      (order) => convertUtaOrder(order as UtaOrder),
+      (order) => convertUtaOrder(order as UtaOrder, this.coinm),
       timeProfile,
     )
     // An order just accepted can take a moment to become queryable.
@@ -500,7 +569,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           () =>
             this.orderClient.getUnfilledOrdersV3({
               category,
-              symbol,
+              symbol: this.utaSymbol(symbol),
               limit: `${pageSize}`,
               cursor,
             }),
@@ -516,7 +585,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           return res
         }
         timeProfile = res.timeProfile
-        orders.push(...res.data.list.map(convertUtaOrder))
+        orders.push(...res.data.list.map((o) => convertUtaOrder(o, this.coinm)))
         if (res.data.list.length < pageSize || !res.data.cursor) {
           break
         }
@@ -536,7 +605,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       'utaGetFeeRate',
       () =>
         this.orderClient.getFeeRateV3({
-          symbol,
+          symbol: this.utaSymbol(symbol),
           category: this.utaCategory(symbol),
         }),
       (data) => ({ maker: +data?.makerFeeRate, taker: +data?.takerFeeRate }),
@@ -572,7 +641,12 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       }
       timeProfile = res.timeProfile
       for (const r of res.data) {
-        rates.set(r.symbol, { maker: +r.makerFeeRate, taker: +r.takerFeeRate })
+        // v3 names the inverse perpetuals `_CM`; the listing they are matched
+        // against carries the platform's own names (spec 014 §3.2).
+        rates.set(this.coinm ? platformCoinmSymbol(r.symbol) : r.symbol, {
+          maker: +r.makerFeeRate,
+          taker: +r.takerFeeRate,
+        })
       }
     }
     return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
@@ -606,7 +680,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       () =>
         this.orderClient.setLeverageV3({
           category,
-          symbol,
+          symbol: this.utaSymbol(symbol),
           leverage: `${leverage}`,
           marginMode: 'crossed',
         }),
@@ -621,7 +695,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         await this.checkLimits('utaSetLeverage', 0)
         await this.orderClient.setLeverageV3({
           category,
-          symbol,
+          symbol: this.utaSymbol(symbol),
           leverage: `${leverage}`,
           marginMode: 'isolated',
           posSide,
@@ -640,11 +714,11 @@ class BitgetExchange extends AbstractExchange implements Exchange {
 
   /** There is no account-level margin mode on UTA to switch; see above. */
   async uta_changeMarginType(
-    _symbol: string,
+    symbol: string,
     margin: MarginType,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<MarginType>> {
-    if (this.coinm) {
+    if (this.isCoinmDelivery(symbol)) {
       return this.returnBad(timeProfile)(new Error(UTA_COINM_UNSUPPORTED))
     }
     return this.returnGood<MarginType>(timeProfile)(margin)
@@ -685,11 +759,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     for (const category of categories) {
       const res = await this.utaRequest<PositionInfo[]>(
         'utaGetPositions',
-        () => this.orderClient.getCurrentPositionsV3({ category, symbol }),
+        () =>
+          this.orderClient.getCurrentPositionsV3({
+            category,
+            symbol: this.utaSymbol(symbol),
+          }),
         (data) =>
           ((Array.isArray(data) ? data : (data?.list ?? [])) as UtaPosition[])
             .filter((p) => +p.total !== 0)
-            .map(convertUtaPosition),
+            .map((pos) => convertUtaPosition(pos, this.coinm)),
         timeProfile,
       )
       if (res.status === StatusEnum.notok) {
@@ -1553,6 +1631,10 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       return this.errorFutures(timeProfile)
     }
 
+    if (this.coinm && !this.isCoinmDelivery(symbol)) {
+      return this.coinm_getCandles(symbol, interval, from, to, timeProfile)
+    }
+
     const productType = this.getProductTypeBySymbol(symbol)
     // `getFuturesHistoricCandles` maps to `/api/v2/mix/market/history-candles`,
     // which serves the FULL history at 200 rows per page. (The ~90-day
@@ -1630,6 +1712,92 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     return this.returnGood<CandleResponse[]>(timeProfile)(allCandles)
   }
 
+  /**
+   * Bitget's own granularity for an interval on the unified line. `1D` and
+   * `1W` there open at 16:00 UTC (the UTC+8 day), as the Reality tokens do,
+   * so the UTC-aligned variants are asked for by name; 8h has no granularity
+   * of its own on either line and keeps the classic substitution.
+   */
+  private coinmGranularity(interval: ExchangeIntervals): string {
+    switch (interval) {
+      case ExchangeIntervals.oneW:
+        return '1Wutc'
+      case ExchangeIntervals.oneD:
+        return '1Dutc'
+      case ExchangeIntervals.eightH:
+        return '6Hutc'
+      case ExchangeIntervals.fourH:
+        return '4H'
+      case ExchangeIntervals.twoH:
+        return '2H'
+      case ExchangeIntervals.oneH:
+        return '1H'
+      default:
+        // 30m / 15m / 5m / 3m / 1m are named the same on both lines.
+        return interval
+    }
+  }
+
+  /**
+   * Candles for an inverse perpetual. v2 serves nothing for these symbols
+   * (spec 014 §2.1), so they come from v3 — 1000 rows a page, ascending,
+   * `[ts, open, high, low, close, baseVolume, quoteVolume]`.
+   */
+  private async coinm_getCandles(
+    symbol: string,
+    interval: ExchangeIntervals,
+    from?: number,
+    to?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<CandleResponse[]>> {
+    const pageSize = 1000
+    const step = timeIntervalMap[interval]
+    const pages =
+      from && to ? Math.min(Math.ceil((+to - +from) / step / pageSize), 400) : 1
+    const candles: CandleResponse[] = []
+    let start = from
+    for (let page = 0; page < Math.max(pages, 1); page++) {
+      const end = start ? Math.min(+start + pageSize * step, +(to ?? 0)) : to
+      const res = await this.utaRequest<CandleResponse[]>(
+        'utaGetCandles',
+        () =>
+          this.orderClient.getCandlesV3({
+            category: 'COIN-FUTURES',
+            symbol: this.utaSymbol(symbol),
+            interval: this.coinmGranularity(interval),
+            limit: `${pageSize}`,
+            ...(start ? { startTime: `${start}` } : {}),
+            ...(end ? { endTime: `${end}` } : {}),
+          }),
+        (data) =>
+          ((Array.isArray(data) ? data : []) as string[][]).map((d) => ({
+            time: +d[0],
+            open: d[1],
+            high: d[2],
+            low: d[3],
+            close: d[4],
+            // The platform's volume for an inverse pair is the quote one, as
+            // the classic reader takes for every futures product type.
+            volume: d[6],
+          })),
+        timeProfile,
+      )
+      if (res.status === StatusEnum.notok) {
+        return res
+      }
+      timeProfile = res.timeProfile
+      candles.push(...res.data)
+      if (!start || !to || res.data.length < pageSize) {
+        break
+      }
+      start = +start + pageSize * step
+      if (start >= +to) {
+        break
+      }
+    }
+    return this.returnGood<CandleResponse[]>(timeProfile)(candles)
+  }
+
   async futures_getAllPrices(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AllPricesResponse[]>> {
@@ -1637,6 +1805,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       return this.errorFutures(timeProfile)
     }
     const res: AllPricesResponse[] = []
+    if (this.coinm) {
+      res.push(...(await this.coinmPerpPrices()))
+    }
     for (const productType of this.productTypes) {
       timeProfile =
         (await this.checkLimits('getFuturesAllTickers', 20, timeProfile)) ||
@@ -2191,7 +2362,109 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         )(new BitgetError(e?.body?.msg ?? e.message, 0))
       }
     }
+    if (this.coinm) {
+      // The perpetuals of this product type are only on the unified line
+      // (spec 014 §3.1). The listing is public, so every account gets it;
+      // what a classic account cannot do is trade them (§3.3).
+      res.push(...((await this.coinmPerpExchangeInfo()) as typeof res))
+    }
     return this.returnGood<typeof res>(timeProfile)(res)
+  }
+
+  /**
+   * The v3 `COIN-FUTURES` instruments, as listing rows under their historic
+   * names. Their quantity unit is the venue's, not the platform's: an order
+   * is a whole number of 1-USD contracts, so the base step cannot be stated
+   * as a fixed size — the boundary rounds to the contract (spec 014 §3.4) and
+   * the venue's own minimum notional is carried on the quote side.
+   */
+  private async coinmPerpExchangeInfo(): Promise<
+    (ExchangeInfo & {
+      pair: string
+      maxLeverage?: string
+      minLeverage?: string
+      makerFee: number
+      takerFee: number
+      marginCoins?: string[]
+    })[]
+  > {
+    try {
+      await this.checkLimits('getAllExchangeInfo', 0)
+      const get = await this.orderClient.getInstrumentsV3({
+        category: 'COIN-FUTURES',
+      })
+      if (get?.code !== '00000' || !Array.isArray(get.data)) {
+        return []
+      }
+      return get.data
+        .filter(
+          (d: Record<string, string>) =>
+            d?.status === 'online' && `${d?.type}` === 'perpetual',
+        )
+        .map((d: Record<string, string>) => ({
+          pair: platformCoinmSymbol(d.symbol),
+          assetClass:
+            d.symbolType === 'crypto' ||
+            d.symbolType === 'stock' ||
+            d.symbolType === 'metal' ||
+            d.symbolType === 'commodity'
+              ? (d.symbolType as ExchangeInfo['assetClass'])
+              : undefined,
+          baseAsset: {
+            name: d.baseCoin,
+            minAmount: 0,
+            maxAmount: 0,
+            maxMarketAmount: 0,
+            step: 0,
+          },
+          quoteAsset: {
+            name: d.quoteCoin,
+            minAmount: +d.minOrderAmount,
+          },
+          maxOrders: +d.maxSymbolOrderNum || +d.maxProductOrderNum || 200,
+          priceAssetPrecision: +d.pricePrecision,
+          minLeverage: d.minLeverage,
+          maxLeverage: d.maxLeverage,
+          makerFee: +d.makerFeeRate,
+          takerFee: +d.takerFeeRate,
+          priceMultiplier: {
+            up: +d.sellLimitPriceRatio,
+            down: +d.buyLimitPriceRatio,
+            decimals: +d.priceMultiplier,
+          },
+          // Inverse contracts are margined in the coin they are written on.
+          marginCoins: [d.baseCoin],
+        }))
+    } catch (e) {
+      Logger.warn(
+        `bitget v3 COIN-FUTURES instruments failed: ${(e as Error)?.message}`,
+      )
+      return []
+    }
+  }
+
+  /** Last prices for the inverse perpetuals, which v2 does not quote. */
+  private async coinmPerpPrices(): Promise<AllPricesResponse[]> {
+    try {
+      await this.checkLimits('utaGetTickers', 0)
+      const res = await this.orderClient.getTickersV3({
+        category: 'COIN-FUTURES',
+      })
+      if (res?.code !== '00000' || !Array.isArray(res.data)) {
+        return []
+      }
+      return res.data
+        .map((t: Record<string, string>) => ({
+          pair: platformCoinmSymbol(t.symbol),
+          price: +t.lastPrice,
+        }))
+        .filter((t: AllPricesResponse) => Number.isFinite(t.price))
+    } catch (e) {
+      Logger.warn(
+        `bitget v3 COIN-FUTURES tickers failed: ${(e as Error)?.message}`,
+      )
+      return []
+    }
   }
   async spot_getAllExchangeInfo(
     timeProfile = this.getEmptyTimeProfile(),
@@ -2666,6 +2939,18 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     return this.byAccountMode(
       async () => {
         if (this.futures) {
+          // An inverse perpetual exists only on the unified line, so a key
+          // known to be classic is told that rather than the venue's "symbol
+          // does not exist" (spec 014 §3.3).
+          if (
+            this.coinm &&
+            !this.isCoinmDelivery(order.symbol) &&
+            getCachedAccountMode(this.key) === 'classic'
+          ) {
+            return this.returnBad(this.getEmptyTimeProfile())(
+              new Error(COINM_PERP_NEEDS_UTA),
+            )
+          }
           return this.futures_openOrder(order)
         }
         // Only a key known to be classic gets the explanation up front; an

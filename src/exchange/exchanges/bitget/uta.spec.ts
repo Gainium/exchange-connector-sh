@@ -697,6 +697,8 @@ describe('bitget UTA — inverse perpetuals', () => {
     const perp = res.data[1]
     eq('margined in the coin', perp.marginCoins, ['BTC'])
     eq('venue minimum notional', perp.quoteAsset.minAmount, 5)
+    // a base step of 0 would read as "whole coins only" downstream
+    eq('base step', perp.baseAsset.step, 0.00000001)
     eq('price step', perp.priceMultiplier.decimals, 0.1)
   })
 

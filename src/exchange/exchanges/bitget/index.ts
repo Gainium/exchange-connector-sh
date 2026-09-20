@@ -2412,10 +2412,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
               : undefined,
           baseAsset: {
             name: d.baseCoin,
-            minAmount: 0,
+            // The contract, not the coin, is the unit the venue rounds to, so
+            // there is no base step to state: consumers derive the base
+            // precision from this, and the boundary rounds to the contract.
+            minAmount: 0.00000001,
             maxAmount: 0,
             maxMarketAmount: 0,
-            step: 0,
+            step: 0.00000001,
           },
           quoteAsset: {
             name: d.quoteCoin,

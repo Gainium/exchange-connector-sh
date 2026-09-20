@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.4] - 2026-09-20
+
+### Fixed
+
+- Bitget fee lookups on a Unified Trading Account now use the account's own rates. The per-pair lookup runs against the classic API, which a unified account refuses on every endpoint; each refusal was turned into a warning and replaced with the pair's publicly listed rate, so the connector calculated with public rates while the account was charged its own — and every listed pair cost one refused request. The refusal is now the fee call's own answer, which routes it to the unified API, where a single request per product line carries every pair's rate.
+- A Bitget API key that is missing the unified account permissions now says what to change. Upgrading an account to Unified does not upgrade the keys it already has, and the venue's wording for the gap ("need uta manage read or uta manage write permissions") names permissions that are not labelled that way when editing a key. The connector now answers with the action instead: edit the key on Bitget and enable UTA management (read) and UTA trading.
+
 ## [1.21.3] - 2026-09-19
 
 ### Fixed

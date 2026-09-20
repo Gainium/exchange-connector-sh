@@ -33,6 +33,7 @@ import {
   BitgetAccountMode,
   REALITY_NEEDS_UTA,
   UTA_COINM_UNSUPPORTED,
+  UTA_MISSING_PERMISSIONS,
   UtaAsset,
   UtaCategory,
   UtaOrder,
@@ -44,6 +45,7 @@ import {
   getCachedAccountMode,
   getRealitySymbols,
   isUnifiedModeRefusal,
+  isUtaPermissionRefusal,
   aggregateCandles,
   realityBaseInterval,
   realityGranularity,
@@ -1414,11 +1416,24 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     for (let i = 0; i < res.data.length; i += 8) {
       chunks.push(res.data.slice(i, i + 8))
     }
+    // A unified account refuses every classic endpoint. Swallowing that into a
+    // per-pair warning spends one refused call on every listed pair and hands
+    // back the listed rates instead of the account's own, so the refusal is
+    // returned as this call's result — which is what routes it to v3
+    // (`byAccountMode`).
+    let refusal: string | undefined
     for (const ch of chunks) {
+      if (refusal) {
+        break
+      }
       await Promise.all(
         ch.map(async (p) => {
           const f = await this.futures_getUserFees(p.pair)
           if (f.status === StatusEnum.notok) {
+            if (isUnifiedModeRefusal(f.reason)) {
+              refusal = refusal ?? `${f.reason}`
+              return
+            }
             Logger.warn(`Error getting futures fees for ${p.pair} ${f.reason}`)
             fees.push({ pair: p.pair, maker: p.makerFee, taker: p.takerFee })
           } else {
@@ -1432,6 +1447,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       )
     }
 
+    if (refusal) {
+      return this.returnBad(res.timeProfile)(new Error(refusal))
+    }
     return this.returnGood<(UserFee & { pair: string })[]>(res.timeProfile)(
       fees,
     )
@@ -2373,11 +2391,24 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     for (let i = 0; i < res.data.length; i += 8) {
       chunks.push(res.data.slice(i, i + 8))
     }
+    // A unified account refuses every classic endpoint. Swallowing that into a
+    // per-pair warning spends one refused call on every listed pair and hands
+    // back the listed rates instead of the account's own, so the refusal is
+    // returned as this call's result — which is what routes it to v3
+    // (`byAccountMode`).
+    let refusal: string | undefined
     for (const ch of chunks) {
+      if (refusal) {
+        break
+      }
       await Promise.all(
         ch.map(async (p) => {
           const f = await this.spot_getUserFees(p.pair)
           if (f.status === StatusEnum.notok) {
+            if (isUnifiedModeRefusal(f.reason)) {
+              refusal = refusal ?? `${f.reason}`
+              return
+            }
             Logger.warn(`Error getting spot fees for ${p.pair} ${f.reason}`)
             fees.push({ pair: p.pair, maker: p.makerFee, taker: p.takerFee })
           } else {
@@ -2389,6 +2420,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           }
         }),
       )
+    }
+    if (refusal) {
+      return this.returnBad(res.timeProfile)(new Error(refusal))
     }
     return this.returnGood<(UserFee & { pair: string })[]>(res.timeProfile)(
       fees,
@@ -3424,7 +3458,11 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           )
         }
       } else {
-        const message = msg
+        // Bitget's own wording for a key that was never given the unified
+        // scopes names permissions the user cannot find under that name.
+        const message = isUtaPermissionRefusal(msg)
+          ? UTA_MISSING_PERMISSIONS
+          : msg
         return this.returnBad(timeProfile)(new Error(message))
       }
     }

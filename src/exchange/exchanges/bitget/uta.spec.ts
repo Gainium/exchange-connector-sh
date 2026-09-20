@@ -23,6 +23,7 @@ import BitgetExchange from './index'
 import {
   REALITY_NEEDS_UTA,
   UTA_COINM_UNSUPPORTED,
+  UTA_MISSING_PERMISSIONS,
   accountModeFromSettings,
   clearAccountModeCache,
   convertUtaAssets,
@@ -488,5 +489,96 @@ describe('bitget spot exchange info — Reality tokens are listed as stocks', ()
         ['BTCUSDT', 'crypto'],
       ],
     )
+  })
+})
+
+describe('bitget UTA — fees', () => {
+  beforeEach(() => clearAccountModeCache())
+
+  /** Spot pairs for a listing, shaped as `getSpotSymbolInfo` returns them. */
+  const spotSymbols = (symbols: string[]) =>
+    symbols.map((symbol) => ({
+      symbol,
+      status: 'online',
+      baseCoin: symbol.replace('USDT', ''),
+      quoteCoin: 'USDT',
+      minTradeAmount: '0',
+      maxTradeAmount: '0',
+      quantityPrecision: '4',
+      quotePrecision: '6',
+      minTradeUSDT: '10',
+      orderQuantity: '200',
+      pricePrecision: '2',
+      makerFeeRate: '0.001',
+      takerFeeRate: '0.001',
+      sellLimitPriceRatio: '0.1',
+      buyLimitPriceRatio: '0.1',
+    }))
+
+  it('stops the classic fee fan-out at the first refusal and answers from v3', async () => {
+    const symbols = Array.from({ length: 24 }, (_, i) => `C${i}USDT`)
+    let tradeRateCalls = 0
+    const ex = stub(
+      Futures.null,
+      {
+        // transport failure: the mode is undetermined, so classic runs first
+        getAccountSettingsV3: async () => {
+          throw new Error('socket hang up (no body)')
+        },
+        getInstrumentsV3: async () => ({ code: '00000', data: [] }),
+        getAllFeeRatesV3: async () => ({
+          code: '00000',
+          data: symbols.map((symbol) => ({
+            symbol,
+            makerFeeRate: '0.0002',
+            takerFeeRate: '0.0004',
+          })),
+        }),
+      },
+      {
+        getSpotTicker: async () => ({ code: '00000', data: [] }),
+        getSpotSymbolInfo: async () => ({
+          code: '00000',
+          data: spotSymbols(symbols),
+        }),
+        getTradeRate: async () => {
+          tradeRateCalls++
+          throw bitgetError('40084', UNIFIED_REFUSAL)
+        },
+      },
+    )
+
+    const res = await ex.getAllUserFees()
+    eq('status', res.status, StatusEnum.ok)
+    eq('pairs priced', res.data.length, symbols.length)
+    eq('v3 rates', res.data[0], {
+      pair: 'C0USDT',
+      maker: 0.0002,
+      taker: 0.0004,
+    })
+    // one chunk of 8, not one refused call per listed pair
+    if (tradeRateCalls > 8) {
+      throw new Error(`classic fan-out kept going: ${tradeRateCalls} calls`)
+    }
+  })
+
+  it("a key without the unified permissions is told to edit it, not Bitget's wording", async () => {
+    const ex = stub(Futures.null, {
+      ...unified,
+      getAllFeeRatesV3: async () => {
+        throw bitgetError(
+          '40014',
+          'incorrect permissions, need uta manage read or uta manage write permissions',
+        )
+      },
+      getInstrumentsV3: async () => ({ code: '00000', data: [] }),
+    })
+    ex.spot_getAllExchangeInfo = async () =>
+      ex.returnGood(ex.getEmptyTimeProfile())([
+        { pair: 'BTCUSDT', makerFee: 0.001, takerFee: 0.001 },
+      ])
+    const res = await ex.getAllUserFees()
+    eq('status', res.status, StatusEnum.notok)
+    eq('reason', res.reason, UTA_MISSING_PERMISSIONS)
   })
 })

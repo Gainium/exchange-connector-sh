@@ -80,6 +80,18 @@ export const REALITY_NEEDS_UTA =
   'Bitget Reality stock tokens can only be traded from a Bitget Unified Trading Account. Upgrade the account to Unified on Bitget to trade this pair.'
 
 /**
+ * Upgrading an account to Unified does not upgrade its API keys: v3 endpoints
+ * answer a key without the unified scopes with "incorrect permissions, need
+ * uta manage read or uta manage write permissions", which says nothing about
+ * what to do. The key has to be edited on Bitget, not replaced.
+ */
+export const UTA_MISSING_PERMISSIONS =
+  'This Bitget API key does not carry the Unified Trading Account permissions. Edit the key on Bitget, enable UTA management (read) and UTA trading, and save it.'
+
+export const isUtaPermissionRefusal = (reason: unknown): boolean =>
+  `${reason ?? ''}`.toLowerCase().includes('uta manage')
+
+/**
  * Bitget's unified COIN-M line is a different product from the classic one we
  * list: its symbols carry a `_CM` suffix (BTCUSD_CM), its order quantity is
  * denominated in the quote coin, and it has no preset TP/SL. Routing classic

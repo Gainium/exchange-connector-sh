@@ -421,6 +421,43 @@ export type CommonOrder = {
   feeBreakdown?: { asset: string; amount: string }[]
 }
 
+/**
+ * One order in a bulk placement request. LIMIT only, and `newClientOrderId` is
+ * REQUIRED — it is how the caller matches an answer back to the order it asked
+ * for, and a venue reply that only says "order 3 failed" is useless without it.
+ */
+export type BatchOpenOrder = {
+  side: OrderTypes
+  quantity: number
+  price: number
+  newClientOrderId: string
+  type?: OrderTypeT
+}
+
+/**
+ * The answer for ONE order of a bulk placement, positionally aligned with the
+ * request and carrying the caller's own `newClientOrderId` so alignment is
+ * never the only thing holding the two together.
+ *
+ * Exactly one of `order` / `reason` is set:
+ *
+ * - `order` — placed. A REAL order (re-read from the venue, or built from what
+ *   was sent plus the id the venue issued), never synthesised zeros.
+ * - `reason` — THIS order was definitively refused by the venue, in the
+ *   venue's own words. A whole-batch failure is a `notok` `BaseReturn`
+ *   instead, so the caller can tell "none of these were placed" from "this one
+ *   was rejected".
+ *
+ * An order that was placed must never be reported as absent: the caller's
+ * recovery for an unanswered order is to place it again, which on a
+ * successfully placed order is a duplicate live order.
+ */
+export type BatchOpenResult = {
+  newClientOrderId: string
+  order?: CommonOrder
+  reason?: string
+}
+
 export type FuturesOrderType_LT =
   | 'LIMIT'
   | 'MARKET'

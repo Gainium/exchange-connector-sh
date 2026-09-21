@@ -9,6 +9,7 @@ import {
   Query,
 } from '@nestjs/common'
 import {
+  BatchOpenOrder,
   ExchangeEnum,
   ExchangeIntervals,
   OrderTypes,
@@ -192,6 +193,30 @@ export class ExchangeController {
     @Headers() headers: AuthData,
   ) {
     return this.exchangeService.getOrdersBatch(body, headers)
+  }
+
+  /**
+   * POST for the same two reasons as `/orders/batch`: 50 Kraken txids is ~1.9KB
+   * of ids, which belongs in a body rather than a query string that has to
+   * survive the balancer hop, and the path is outside every `publicUrl` prefix
+   * the balancer matches on, so this credentialed call routes to the private
+   * (IP-whitelisted) pool.
+   */
+  @Post('/orders/cancelBatch')
+  async cancelOrdersBatch(
+    @Body() body: { symbol: string; newClientOrderIds: string[] },
+    @Headers() headers: AuthData,
+  ) {
+    return this.exchangeService.cancelOrdersBatch(body, headers)
+  }
+
+  /** POST + private-pool routing, exactly as above. */
+  @Post('/orders/openBatch')
+  async openOrdersBatch(
+    @Body() body: { symbol: string; orders: BatchOpenOrder[] },
+    @Headers() headers: AuthData,
+  ) {
+    return this.exchangeService.openOrdersBatch(body, headers)
   }
 
   @Get('/open/all')

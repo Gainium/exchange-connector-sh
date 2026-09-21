@@ -2,8 +2,6 @@ import {
   AccountFill,
   AllPricesResponse,
   BaseReturn,
-  BatchOpenOrder,
-  BatchOpenResult,
   CandleResponse,
   FundingRateResponse,
   CommonOrder,
@@ -224,46 +222,6 @@ export class ExchangeService {
     ).getOrdersBatch({
       symbol: data.symbol,
       newClientOrderIds: data.newClientOrderIds ?? [],
-    })
-  }
-
-  cancelOrdersBatch(
-    data: { symbol: string; newClientOrderIds: string[] },
-    auth: AuthData,
-  ): Promise<BaseReturn<CommonOrder[]>> {
-    return this.getExchange(
-      auth.exchange,
-      auth.key,
-      auth.secret,
-      auth.passphrase,
-      auth.keystype,
-      auth.okxsource,
-      auth.code,
-      auth.bybithost,
-      auth.subaccount,
-    ).cancelOrdersBatch({
-      symbol: data.symbol,
-      newClientOrderIds: data.newClientOrderIds ?? [],
-    })
-  }
-
-  openOrdersBatch(
-    data: { symbol: string; orders: BatchOpenOrder[] },
-    auth: AuthData,
-  ): Promise<BaseReturn<BatchOpenResult[]>> {
-    return this.getExchange(
-      auth.exchange,
-      auth.key,
-      auth.secret,
-      auth.passphrase,
-      auth.keystype,
-      auth.okxsource,
-      auth.code,
-      auth.bybithost,
-      auth.subaccount,
-    ).openOrdersBatch({
-      symbol: data.symbol,
-      orders: data.orders ?? [],
     })
   }
 

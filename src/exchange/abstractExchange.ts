@@ -2,8 +2,6 @@ import type {
   AccountFill,
   AllPricesResponse,
   BaseReturn,
-  BatchOpenOrder,
-  BatchOpenResult,
   CandleResponse,
   FundingRateResponse,
   CommonOrder,
@@ -80,32 +78,6 @@ export interface Exchange {
     symbol: string
     newClientOrderIds: string[]
   }): Promise<BaseReturn<CommonOrder[]>>
-
-  /**
-   * Cancel several orders in one venue call. OPTIONAL — a venue with no bulk
-   * cancel declines and the caller keeps its per-order loop. Answers only the
-   * orders this call OBSERVED as cancelled; see the base implementation.
-   */
-  cancelOrdersBatch?({
-    symbol,
-    newClientOrderIds,
-  }: {
-    symbol: string
-    newClientOrderIds: string[]
-  }): Promise<BaseReturn<CommonOrder[]>>
-
-  /**
-   * Place several orders in one venue call. OPTIONAL — a venue with no bulk
-   * placement declines and the caller keeps its per-order loop. A decline sends
-   * NOTHING; see the base implementation.
-   */
-  openOrdersBatch?({
-    symbol,
-    orders,
-  }: {
-    symbol: string
-    orders: BatchOpenOrder[]
-  }): Promise<BaseReturn<BatchOpenResult[]>>
 
   cancelOrder({
     symbol,
@@ -261,56 +233,6 @@ abstract class AbsctractExchange implements Exchange {
       status: StatusEnum.notok as StatusEnum.notok,
       data: null,
       reason: 'Batch order lookup not supported for this exchange',
-      usage: [],
-      timeProfile: this.getEmptyTimeProfile(),
-    }
-  }
-
-  /**
-   * Cancel several orders in one venue call. Declines by default, for the same
-   * reason {@link getOrdersBatch} does: a loop here would cost the caller
-   * exactly what its own loop costs while pinning every one of those cancels to
-   * the single connector instance that received the batch.
-   *
-   * The decline matters more here than it does for a lookup. A caller reads
-   * this answer as "these orders, and only these, are cancelled"; anything
-   * absent it cancels itself. So a venue that cannot bulk-cancel must say so
-   * rather than half-answer, and its orders stay on the per-order path that
-   * cancels them today — which is also the path that owns the fill/cancel race
-   * and the unknown-order ladder.
-   */
-  async cancelOrdersBatch(_data: {
-    symbol: string
-    newClientOrderIds: string[]
-  }): Promise<BaseReturn<CommonOrder[]>> {
-    return {
-      status: StatusEnum.notok as StatusEnum.notok,
-      data: null,
-      reason: 'Batch order cancel not supported for this exchange',
-      usage: [],
-      timeProfile: this.getEmptyTimeProfile(),
-    }
-  }
-
-  /**
-   * Place several orders in one venue call. Declines by default, and a decline
-   * sends NOTHING to the venue.
-   *
-   * Deliberately NOT a loop over {@link Exchange#openOrder} — and here that is
-   * not only about cost. A loop that fails halfway has placed some of the
-   * orders and not the others, and the answer this returns cannot express that
-   * as anything the caller can act on safely; its recovery for an unanswered
-   * order is to place it again. Declining leaves placement entirely on the
-   * caller's own per-order path, which already knows what it has sent.
-   */
-  async openOrdersBatch(_data: {
-    symbol: string
-    orders: BatchOpenOrder[]
-  }): Promise<BaseReturn<BatchOpenResult[]>> {
-    return {
-      status: StatusEnum.notok as StatusEnum.notok,
-      data: null,
-      reason: 'Batch order placement not supported for this exchange',
       usage: [],
       timeProfile: this.getEmptyTimeProfile(),
     }

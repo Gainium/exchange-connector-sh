@@ -5,12 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.23.0] - 2026-09-21
-
-### Added
-
-- Kraken spot orders can be cancelled and placed in bulk, so a group of orders on one pair is no longer paced one at a time by Kraken's per-key request budget. Kraken counts a request, not the orders in it, and allows up to 50 cancellations or 15 placements per request; the connector previously spent two requests per order — one to identify it and one to act — against a budget of 20 requests that refills one request every two seconds, so after the first few every further order waited seconds for its turn. The new bulk cancel reports only the orders it observed the venue cancel, each as the order it really was, and leaves anything it cannot vouch for to the existing one-at-a-time path, including orders that had already filled. The new bulk placement answers every order in the request individually: placed, with the order as the venue holds it, or refused, in the venue's own words. It is never sent twice — a request whose response is lost, or that fails without a worded refusal from the venue, is reported as having an unknown outcome rather than repeated, because repeating it would place the orders a second time — and an order the venue has accepted is always reported as placed, even when it has not yet appeared in a read-back. Both are Kraken spot only; every other exchange keeps the behaviour it has today.
-
 ## [1.22.2] - 2026-09-21
 
 ### Fixed

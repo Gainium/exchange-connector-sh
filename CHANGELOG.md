@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.2] - 2026-09-21
+
+### Fixed
+
+- Kraken spot balances now separate funds held by open orders. The balance was read from an endpoint that reports only the wallet total, so everything committed to resting orders came back as `free` with `locked: 0`. The extended balance endpoint is used instead: `locked` is the venue's hold and `free` is what it reports as tradable. Same API key permission as before.
+
 ## [1.22.1] - 2026-09-20
 
 ### Fixed

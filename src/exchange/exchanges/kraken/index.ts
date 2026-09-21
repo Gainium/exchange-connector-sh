@@ -36,6 +36,7 @@ import {
 } from '../../../kraken-custom'
 import limitHelper from './limit'
 import { krakenLadderFee, krakenOrderFee } from './fees'
+import { krakenSpotFreeLocked } from './balance'
 import {
   aggregateCandles,
   krakenSpotCandleSource,
@@ -1668,8 +1669,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
+    // BalanceEx, not Balance: the basic endpoint reports only the total, so
+    // funds held by open orders were returned as `free` with `locked: 0`.
+    // Same "Query funds" permission and rate cost as Balance.
     return this.spotClient
-      .getAccountBalance()
+      .getExtendedBalance()
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
 
@@ -1678,11 +1682,10 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
 
         const balances: FreeAsset = []
-        for (const [asset, balance] of Object.entries(result.result)) {
+        for (const [asset, b] of Object.entries(result.result)) {
           balances.push({
             asset: this.symbolMapper.getActualAssetName(asset),
-            free: parseFloat(balance as string),
-            locked: 0, // Kraken's basic balance doesn't separate locked
+            ...krakenSpotFreeLocked(b),
           })
         }
 

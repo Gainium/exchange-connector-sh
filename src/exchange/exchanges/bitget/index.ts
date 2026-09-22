@@ -51,6 +51,7 @@ import {
   coinmContracts,
   COINM_PERP_NEEDS_UTA,
   aggregateCandles,
+  bitgetBaseInterval,
   realityBaseInterval,
   realityGranularity,
   setCachedAccountMode,
@@ -80,6 +81,16 @@ import {
   FuturesSingleAccount,
 } from './types'
 import { timeIntervalMap } from '../okx'
+
+/**
+ * The SDK's `SpotKlineInterval` still carries the v1 documentation's set,
+ * which has no `3min`. The live endpoints serve it and name it in their own
+ * `400171` text — `[1min,3min,5min,15min,30min,1h,...]`, measured 2026-09-22
+ * on both `/spot/market/candles` and `/spot/market/history-candles`. Widened
+ * here, once, rather than cast at the call site: a cast at the call site is
+ * what let `3m` be sent as `1min` unnoticed (bug #913).
+ */
+type BitgetSpotGranularity = SpotKlineInterval | '3min'
 
 type SpotOrderInfoV2 = _SpotOrderInfoV2 & {
   basePrice?: string
@@ -1575,48 +1586,42 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     return this.returnGood<PositionInfo[]>(timeProfile)(res)
   }
 
+  /**
+   * The classic v2 granularity for an interval. Every arm here names a width
+   * the venue really serves at that width — a substitution would be returned
+   * to the caller unlabelled (bug #913). The two widths the classic line has
+   * no granularity for (`8h` on both product lines, `2h` on spot) never reach
+   * this function: `bitgetBaseInterval` sends them to a finer interval that
+   * `aggregateCandles` merges back up.
+   */
   private convertInterval(
     interval: ExchangeIntervals,
-  ): FuturesKlineInterval | SpotKlineInterval {
-    return interval === ExchangeIntervals.oneW
-      ? '1Wutc'
-      : interval === ExchangeIntervals.oneD
-        ? '1Dutc'
-        : interval === ExchangeIntervals.eightH
-          ? '6Hutc'
-          : interval === ExchangeIntervals.fourH
-            ? this.futures
-              ? '4H'
-              : '4h'
-            : interval === ExchangeIntervals.twoH
-              ? this.futures
-                ? '1H'
-                : '1h'
-              : interval === ExchangeIntervals.oneH
-                ? this.futures
-                  ? '1H'
-                  : '1h'
-                : interval === ExchangeIntervals.thirtyM
-                  ? this.futures
-                    ? '30m'
-                    : '30min'
-                  : interval === ExchangeIntervals.fifteenM
-                    ? this.futures
-                      ? '15m'
-                      : '15min'
-                    : interval === ExchangeIntervals.fiveM
-                      ? this.futures
-                        ? '5m'
-                        : '5min'
-                      : interval === ExchangeIntervals.threeM
-                        ? this.futures
-                          ? '1m'
-                          : '1min'
-                        : interval === ExchangeIntervals.oneM
-                          ? this.futures
-                            ? '1m'
-                            : '1min'
-                          : interval
+  ): FuturesKlineInterval | BitgetSpotGranularity {
+    switch (interval) {
+      case ExchangeIntervals.oneW:
+        return '1Wutc'
+      case ExchangeIntervals.oneD:
+        return '1Dutc'
+      case ExchangeIntervals.fourH:
+        return this.futures ? '4H' : '4h'
+      case ExchangeIntervals.twoH:
+        // Spot has no `2h`; it is aggregated from `1h` before it gets here.
+        return '2H'
+      case ExchangeIntervals.oneH:
+        return this.futures ? '1H' : '1h'
+      case ExchangeIntervals.thirtyM:
+        return this.futures ? '30m' : '30min'
+      case ExchangeIntervals.fifteenM:
+        return this.futures ? '15m' : '15min'
+      case ExchangeIntervals.fiveM:
+        return this.futures ? '5m' : '5min'
+      case ExchangeIntervals.threeM:
+        return this.futures ? '3m' : '3min'
+      case ExchangeIntervals.oneM:
+        return this.futures ? '1m' : '1min'
+      default:
+        return interval as FuturesKlineInterval
+    }
   }
 
   async futures_getCandles(
@@ -1629,6 +1634,29 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   ) {
     if (!this.futures) {
       return this.errorFutures(timeProfile)
+    }
+
+    // No Bitget futures line has an `8h` granularity. Read the base interval
+    // and merge, rather than substituting a narrower width and returning it as
+    // if it were the one asked for (bug #913). Above the inverse delegation so
+    // it covers the unified line too, and recursing at the base interval also
+    // prices the page budget below at the width the venue is really serving.
+    const base = bitgetBaseInterval(interval, true)
+    if (base !== interval) {
+      const res = await this.futures_getCandles(
+        symbol,
+        base,
+        from,
+        to,
+        _countData,
+        timeProfile,
+      )
+      if (res.status === StatusEnum.notok) {
+        return res
+      }
+      return this.returnGood<CandleResponse[]>(res.timeProfile)(
+        aggregateCandles(res.data, timeIntervalMap[interval]),
+      )
     }
 
     if (this.coinm && !this.isCoinmDelivery(symbol)) {
@@ -1715,8 +1743,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   /**
    * Bitget's own granularity for an interval on the unified line. `1D` and
    * `1W` there open at 16:00 UTC (the UTC+8 day), as the Reality tokens do,
-   * so the UTC-aligned variants are asked for by name; 8h has no granularity
-   * of its own on either line and keeps the classic substitution.
+   * so the UTC-aligned variants are asked for by name. 8h has no granularity
+   * of its own on either line; it never reaches here, because
+   * `futures_getCandles` reads it at 4h and merges (bug #913).
    */
   private coinmGranularity(interval: ExchangeIntervals): string {
     switch (interval) {
@@ -1724,8 +1753,6 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         return '1Wutc'
       case ExchangeIntervals.oneD:
         return '1Dutc'
-      case ExchangeIntervals.eightH:
-        return '6Hutc'
       case ExchangeIntervals.fourH:
         return '4H'
       case ExchangeIntervals.twoH:
@@ -3085,15 +3112,17 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       case ExchangeIntervals.thirtyM:
         // Every sub-hour granularity shares one 31-day floor.
         return 30 * day
-      // `twoH` is served by requesting granularity `1h` (see convertInterval),
-      // so it inherits the 1h window rather than a wider one of its own.
+      // `twoH` is read at granularity `1h` and merged (see bitgetBaseInterval),
+      // so it inherits the 1h window rather than a wider one of its own; it
+      // reaches here only through that recursion, as `oneH`.
       case ExchangeIntervals.oneH:
       case ExchangeIntervals.twoH:
         return 59 * day
+      // `eightH` likewise arrives here as `fourH`.
       case ExchangeIntervals.fourH:
         return 239 * day
       default:
-        // 6h / 8h / 1d / 1w — 6Hutc is the shallowest of these at 360d.
+        // 1d / 1w — 1Dutc reaches >1200d and 1Wutc 705d.
         return 355 * day
     }
   }
@@ -3114,10 +3143,17 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     const recentMaxSize = 1000
     const historicMaxSize = 200
     const reality = await this.isRealitySymbol(symbol)
-    if (reality && realityBaseInterval(interval) !== interval) {
+    // Reality tokens are served from the few granularities they have; every
+    // other pair from the classic set, which has no `2h` and no `8h` (bug
+    // #913). Either way a width the venue cannot serve is read at a finer one
+    // and merged, never substituted.
+    const baseInterval = reality
+      ? realityBaseInterval(interval)
+      : bitgetBaseInterval(interval, false)
+    if (baseInterval !== interval) {
       const base = await this.spot_getCandles(
         symbol,
-        realityBaseInterval(interval),
+        baseInterval,
         from,
         to,
         countData,

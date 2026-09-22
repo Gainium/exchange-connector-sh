@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.1] - 2026-09-22
+
+### Fixed
+
+- Bitget candles are returned at the bar width that was asked for. Three widths were quietly answered with a different one: a request for 8-hour bars came back as 6-hour bars on every Bitget product line, and on spot and USDT/USDC futures a request for 2-hour bars came back as 1-hour bars and 3-minute bars as 1-minute bars. Each was answered successfully, carrying the venue's own timestamps, so an 8-hour series was not even aligned to 8 hours and nothing downstream could tell it was the wrong series — an indicator or a backtest configured at one timeframe was calculated on another. Bitget serves 3-minute bars natively on all three lines and 2-hour bars natively on the two futures lines, so those are now requested directly; the two widths it has no granularity for at all (8-hour everywhere, 2-hour on spot) are read at the nearest finer width it does serve and merged into the requested one, which is exact because each divides the other evenly and both open on the same UTC boundaries. Merging also repairs the paging of long ranges at those widths: the reader advanced its cursor by the width it had asked for while the venue was sending a narrower one, so a multi-page range came back with a gap after every page. Reality tokens already worked this way and are unchanged, as is every other exchange.
+
 ## [1.23.0] - 2026-09-21
 
 ### Added

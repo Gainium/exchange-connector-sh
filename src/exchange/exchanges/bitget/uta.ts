@@ -230,6 +230,39 @@ export const realityGranularity = (interval: ExchangeIntervals): string =>
     [ExchangeIntervals.fourH]: '4h',
   })[realityBaseInterval(interval)]
 
+/**
+ * The interval a NON-Reality Bitget pair's candles are actually read at, for
+ * the widths the venue has no granularity of its own for. Everything else is
+ * returned unchanged and is requested natively.
+ *
+ * Measured against the live API 2026-09-22 — an unsupported granularity is
+ * answered `400171` naming the accepted set (spec 017 §2.1):
+ *
+ *   v2 futures   1m 3m 5m 15m 30m 1H 2H 4H 6H 12H 1D 1W ...   — no 8h
+ *   v2 spot      1min 3min 5min 15min 30min 1h 4h 6h 12h ...   — no 2h, no 8h
+ *   v3 unified   1m 3m 5m 15m 30m 1H 2H 4H 6H 12H 1D 1W ...   — no 8h
+ *
+ * So `8h` is merged from `4h` everywhere — the coarsest native width that
+ * divides it, as `realityBaseInterval` also picks — and `2h` is merged from
+ * `1h` on spot only. Both are exact multiples of their base and both align to
+ * UTC midnight, so the merge is lossless (`aggregateCandles`).
+ *
+ * Substituting a different width instead of merging is what made an indicator
+ * configured at 8h compute on 6-hour bars, with no error (bug #913).
+ */
+export const bitgetBaseInterval = (
+  interval: ExchangeIntervals,
+  futures: boolean,
+): ExchangeIntervals => {
+  if (interval === ExchangeIntervals.eightH) {
+    return ExchangeIntervals.fourH
+  }
+  if (interval === ExchangeIntervals.twoH && !futures) {
+    return ExchangeIntervals.oneH
+  }
+  return interval
+}
+
 /** 1970-01-01 was a Thursday; weeks start on Monday, 4 days later. */
 const WEEK_ALIGN_MS = 4 * 24 * 60 * 60 * 1000
 

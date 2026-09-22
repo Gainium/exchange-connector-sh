@@ -296,8 +296,14 @@ export const aggregateCandles = (
   }
   const result = [...buckets.values()]
   // A range that starts mid-bucket leaves the first bucket without its open;
-  // drop it rather than report a truncated candle as a whole one.
-  if (result.length > 1 && sorted[0].time !== result[0].time) {
+  // drop it rather than report a truncated candle as a whole one. That holds
+  // whether or not anything follows it: guarding on `length > 1` left the
+  // single-bucket case returning a bar that held only the tail of its bucket
+  // — stamped at the bucket's start, indistinguishable from a whole one, and
+  // written into the archive as permanent history (bug #917, spec 020). An
+  // empty result is the honest answer and callers read it as a gap still to
+  // fill. Same shape as the sibling helper in `kraken/candles.ts`.
+  if (result.length && sorted[0].time !== result[0].time) {
     result.shift()
   }
   return result

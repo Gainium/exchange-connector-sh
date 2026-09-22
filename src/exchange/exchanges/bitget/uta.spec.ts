@@ -453,6 +453,59 @@ describe('bitget UTA — conversions', () => {
       [monday],
     )
   })
+
+  // Spec 020 §1.1/§1.2 (bug #917). A leading partial bucket is dropped for
+  // the same reason whether or not the merge produced anything after it: its
+  // open/high/low are missing the start of the bar. The window below is the
+  // one measured against the live venue — an 8h bucket whose 4h base data
+  // starts four hours in — and it must yield nothing at all rather than a
+  // bar stamped at the bucket start that only holds its second half.
+  it('drops a leading partial bucket even when it is the only bucket', () => {
+    const H = 60 * 60 * 1000
+    const EIGHT_H = 8 * H
+    // 2026-09-22T08:00Z, an 8h boundary.
+    const bucket = Date.UTC(2026, 8, 22, 8)
+    const first = {
+      time: bucket,
+      open: '100',
+      high: '150',
+      low: '90',
+      close: '140',
+      volume: '1',
+    }
+    const second = {
+      time: bucket + 4 * H,
+      open: '200',
+      high: '210',
+      low: '190',
+      close: '205',
+      volume: '1',
+    }
+
+    eq(
+      'only the second half of the bucket',
+      aggregateCandles([second], EIGHT_H),
+      [],
+    )
+    // The whole bucket still merges, and a trailing partial is still kept.
+    eq(
+      'the whole bucket',
+      aggregateCandles([first, second], EIGHT_H).map((c) => [
+        c.time,
+        c.open,
+        c.high,
+        c.low,
+        c.close,
+        c.volume,
+      ]),
+      [[bucket, '100', '210', '90', '205', '2']],
+    )
+    eq(
+      'a bucket open at its start is not partial',
+      aggregateCandles([first], EIGHT_H).map((c) => [c.time, c.open, c.close]),
+      [[bucket, '100', '140']],
+    )
+  })
 })
 
 describe('bitget spot exchange info — Reality tokens are listed as stocks', () => {

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.3] - 2026-09-23
+
+### Fixed
+
+- Bitget candle history no longer loses a bar at every page boundary. A range wider than one venue page is read in several requests, and each request started one bar after the previous one ended — but none of Bitget's three candle endpoints ends its window where that assumed. The futures history endpoint and the spot history endpoint both stop one bar short of the requested end, and the recent spot endpoint starts one bar after the requested start, so a bar fell between every pair of consecutive pages, and two fell across the single point in a long spot range where the reader switches from the history endpoint to the recent one. Nothing reported a fault: the read succeeded and the series looked plausible, so a chart, a backtest, an indicator warm-up or an archive backfill over a long range was quietly computed on an incomplete series. At the bar widths that are read at a finer width and merged — 8-hour everywhere, and 2-hour, 3-minute and weekly on spot — there was no gap to notice at all, because a bar missing from the finer series does not leave a hole in the merged one, it silently changes that merged bar's open, high, low, close and volume. The damage grew with the number of boundaries a range crossed, so it was largest at the daily and weekly widths, whose pages are the narrowest relative to the range. Each page now begins where the previous one ended, which for the futures reader cannot double-count because its window excludes its own end, and for the spot reader overlaps by at most two bars, which the existing de-duplication already removes. The deliberate reach past the requested end that carries the in-progress candle is unchanged, as are the page-size limits and the merging of widths the venue does not serve natively.
+
 ## [1.23.2] - 2026-09-23
 
 ### Fixed

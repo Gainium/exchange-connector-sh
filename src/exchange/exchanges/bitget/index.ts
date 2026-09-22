@@ -1750,7 +1750,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         if (!from || !to || !windowEnd) {
           break
         }
-        from = +to + timeIntervalMap[interval]
+        // The next page starts exactly where this one ended, NOT one bar past
+        // it: the venue's window is `[startTime, endTime)`, so the page just
+        // read served opens up to `to - interval` and the bar opening at `to`
+        // is the FIRST bar of the next page. Advancing past it meant no page
+        // ever asked for it, and one bar was lost at every boundary — silently,
+        // and invisibly at the merged widths (bug #918). Half-open is also why
+        // this cannot double-count, which matters because the pages below are
+        // returned as accumulated, with no dedup.
+        from = +to
         if (+from >= +windowEnd) {
           break
         }
@@ -3316,6 +3324,31 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     )
     // safety cap
     const hardLimit = totalChunks + 5
+    /**
+     * Move the cursor onto the first bar the page ending at `pageEnd` did not
+     * serve, and say whether there is anything left to ask for.
+     *
+     * The two spot candle endpoints disagree about `endTime`, so there is no
+     * single "last bar served" to step past: `/spot/market/candles` serves
+     * `(startTime, endTime]` and ends ON `pageEnd`, while
+     * `/spot/market/history-candles` serves `[…, endTime)` and ends one bar
+     * before it. Stepping BACK one bar is the only rule that leaves no hole
+     * whichever pair of endpoints meets at the boundary; it costs at most two
+     * bars of overlap, which the dedup at the end of this method absorbs. The
+     * cursor used to advance one bar PAST `pageEnd`, which skipped a bar at
+     * every boundary and two across the historic -> recent switch (bug #918).
+     *
+     * `chunkEnd` is clamped to `to`, so a cursor that no longer jumps past the
+     * end needs this to stop: a page that reached `to` covered the window, and
+     * re-asking it would just spin to `hardLimit`.
+     */
+    const advanceCursor = (pageEnd: number): boolean => {
+      if (pageEnd >= to) {
+        return false
+      }
+      cursor = pageEnd - step
+      return true
+    }
     for (let attempt = 0; attempt < hardLimit && cursor <= to; attempt++) {
       const useRecent = Date.now() - cursor <= lookbackMs
       // Stride each chunk by the page size of the endpoint it will use: a
@@ -3398,7 +3431,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           const retryData = retry.data as string[][]
           if (retry.code === '00000' && retryData?.length) {
             allCandles.push(...retryData.map(mapRow))
-            cursor = retryEnd + step
+            if (!advanceCursor(retryEnd)) {
+              break
+            }
             continue
           }
           // History has nothing either — genuinely no data here. Fall through
@@ -3407,11 +3442,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
 
         if (!data || data.length === 0) {
           // nothing in this window — advance to avoid infinite loop
-          cursor = chunkEnd + step
+          if (!advanceCursor(chunkEnd)) {
+            break
+          }
           continue
         }
         allCandles.push(...data.map(mapRow))
-        cursor = chunkEnd + step
+        if (!advanceCursor(chunkEnd)) {
+          break
+        }
       } catch (e) {
         return this.handleBitgetErrors(
           this.spot_getCandles,

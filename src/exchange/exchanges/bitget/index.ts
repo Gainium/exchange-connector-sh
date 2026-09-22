@@ -1755,9 +1755,10 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         // read served opens up to `to - interval` and the bar opening at `to`
         // is the FIRST bar of the next page. Advancing past it meant no page
         // ever asked for it, and one bar was lost at every boundary — silently,
-        // and invisibly at the merged widths (bug #918). Half-open is also why
-        // this cannot double-count, which matters because the pages below are
-        // returned as accumulated, with no dedup.
+        // and invisibly at the merged widths (bug #918). Half-open is why the
+        // CURSOR lays out no overlap; it says nothing about the venue's own
+        // end-anchoring, which does overlap the final page and is why the
+        // result is deduplicated below (bug #920).
         from = +to
         if (+from >= +windowEnd) {
           break
@@ -1780,7 +1781,22 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         )(e)
       }
     }
-    return this.returnGood<CandleResponse[]>(timeProfile)(allCandles)
+
+    // Dedup + sort ascending by time, as `spot_getCandles` already does for
+    // its own overlapping chunks. The pages the cursor lays out are disjoint,
+    // but the last one deliberately overhangs the requested end (spec 019
+    // §1.6) and the venue serves a page anchored on its LAST bar: once
+    // `endTime` is in the future it answers with the `limit` bars ending at
+    // the latest CLOSED one, reaching back before its own `startTime` and
+    // re-serving what the previous page already returned (bug #920). Keeping
+    // the first copy is safe — every page but the last reads a window wholly
+    // in the past, so both copies are of the same closed bar.
+    const seen = new Set<number>()
+    const deduped = allCandles
+      .filter((c) => (seen.has(c.time) ? false : (seen.add(c.time), true)))
+      .sort((a, b) => a.time - b.time)
+
+    return this.returnGood<CandleResponse[]>(timeProfile)(deduped)
   }
 
   /**

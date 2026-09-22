@@ -19,18 +19,36 @@ process.env.NODE_ENV = 'testing'
  *
  * Run: `npm test` (mocha). No network, no auth, no wall-clock sleeping.
  */
-import { describe, it, before } from 'mocha'
+import { describe, it, before, after } from 'mocha'
 
-// The limiter reads `process.env` at call time, so set the mode before the
-// module is pulled in for clarity — the numbers below are identical either way
-// (spec §2.2), and both modes are exercised at the bottom of this file.
-process.env.KRAKEN_PER_ACCOUNT_LIMITS = 'true'
+// The limiter reads `process.env` at call time, so the mode is set in the
+// top-level `before()` below rather than here — setting it at module load
+// would hand it to every other spec file too, for the same reason the clock
+// must not be installed here (spec 018 §1.2). The numbers below are identical
+// in either mode (spec §2.2), and both are exercised at the bottom of this
+// file.
 
 // ── virtual clock ───────────────────────────────────────────────────────────
 // `limit.ts` reads Date.now() directly for decay; "sleeping" is advancing VNOW.
-let VNOW = 1_800_000_000_000
-const realDateNow = Date.now
-;(Date as any).now = () => VNOW
+//
+// It is installed in the top-level `before()` below and handed back in the
+// matching `after()` — NOT at module load. Mocha loads every spec file before
+// it runs any test, so a clock patched here would be the clock every file
+// sorting ahead of this one runs on, and their subjects read `Date.now()` too
+// (spec 018 §1.2).
+//
+// The anchor is relative, never an absolute instant: `limit.ts` is a
+// process-wide singleton and its decay only runs forward, so a clock that
+// starts BEHIND the timestamps an earlier spec left on it would find buckets
+// that never refill (spec 018 §4.3). `batch-limit.spec.ts` runs first and
+// leaves them ~1h ahead of real time; a day of headroom clears that without
+// needing to be re-tuned when its advance grows.
+let VNOW = 0
+let previousDateNow: () => number
+let previousMode: string | undefined
+
+/** Comfortably past anything an earlier spec left on the shared limiter. */
+const SETTLE_MS = 24 * 60 * 60 * 1000
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import limitHelper, {
@@ -161,6 +179,31 @@ let keySeq = 0
 const freshKey = () => `spec012-acct-${++keySeq}`
 
 describe('spec 012 — Kraken order calls charge both buckets atomically', () => {
+  before(() => {
+    previousDateNow = Date.now
+    previousMode = process.env.KRAKEN_PER_ACCOUNT_LIMITS
+    process.env.KRAKEN_PER_ACCOUNT_LIMITS = 'true'
+    VNOW = Date.now() + SETTLE_MS
+    ;(Date as any).now = () => VNOW
+  })
+
+  after(() => {
+    // Drain every counter this file charged before handing the clock back:
+    // `getUsage` is what applies decay, and it has to be asked in both modes
+    // because each one reads a different set of entries. Then give back both
+    // globals this suite borrowed (spec 018 §4.4).
+    VNOW += SETTLE_MS
+    process.env.KRAKEN_PER_ACCOUNT_LIMITS = 'true'
+    limitHelper.getUsage()
+    process.env.KRAKEN_PER_ACCOUNT_LIMITS = 'false'
+    limitHelper.getUsage()
+    // `process.env.X = undefined` stores the literal string 'undefined', which
+    // is not what this suite found — delete the key instead when it was unset.
+    if (previousMode === undefined) delete process.env.KRAKEN_PER_ACCOUNT_LIMITS
+    else process.env.KRAKEN_PER_ACCOUNT_LIMITS = previousMode
+    ;(Date as any).now = previousDateNow
+  })
+
   // §1.1 — one SENT call spends exactly one token in each bucket.
   describe('§1.1 a sent order call spends exactly one token per bucket', () => {
     let cancel: Awaited<ReturnType<typeof steadyState>>
@@ -266,7 +309,6 @@ describe('spec 012 — Kraken order calls charge both buckets atomically', () =>
       VNOW += 60 * 60 * 1000
       cancel = await steadyState('cancel', freshKey())
       process.env.KRAKEN_PER_ACCOUNT_LIMITS = 'true'
-      ;(Date as any).now = realDateNow
     })
 
     expect(

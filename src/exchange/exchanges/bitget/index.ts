@@ -92,6 +92,21 @@ import { timeIntervalMap } from '../okx'
  */
 type BitgetSpotGranularity = SpotKlineInterval | '3min'
 
+/**
+ * The widest `[startTime, endTime]` window `/api/v2/mix/market/history-candles`
+ * will accept, whatever the granularity. Wider is refused outright with
+ * `40017 "Parameter verification failed startTime || endTime"` — not truncated,
+ * so the page yields nothing at all (bug #914).
+ *
+ * MEASURED against the live API, not taken from the docs, which do not mention
+ * it. On BTCUSDT / USDT-FUTURES, 2026-09-23, bisected to ~90.27 days and
+ * identical at `1H`, `4H`, `1Dutc` and `1Wutc` and for windows entirely in the
+ * past; 90d is accepted and 91d is refused at every one of them. Held one day
+ * inside the real cliff so a page can never land on the wrong side of it. The
+ * numbers drift — re-measure by walking a window wider per granularity.
+ */
+const BITGET_FUTURES_MAX_SPAN_MS = 90 * 24 * 60 * 60 * 1000
+
 type SpotOrderInfoV2 = _SpotOrderInfoV2 & {
   basePrice?: string
 }
@@ -1665,21 +1680,32 @@ class BitgetExchange extends AbstractExchange implements Exchange {
 
     const productType = this.getProductTypeBySymbol(symbol)
     // `getFuturesHistoricCandles` maps to `/api/v2/mix/market/history-candles`,
-    // which serves the FULL history at 200 rows per page. (The ~90-day
-    // retention window belongs to the other endpoint, `/mix/market/candles`,
-    // which we do not call here.) So there is no date floor to apply — the
-    // work is bounded by page count instead, so a nonsensical range still
-    // cannot spin.
+    // which serves the FULL history — there is no date floor to apply (bug
+    // #225). But a page is bounded TWICE: by the 200-row limit AND by the
+    // window-span cap above, and a page that breaks either one yields nothing.
+    // Sizing by rows alone is what emptied `1d` (200 rows = 200 days) and `1w`
+    // (1400 days) completely, while everything up to `4h` stayed inside the
+    // cap and worked (bug #914). Walking the window to its end is what bounds
+    // the loop; `maxPages` is only there so a nonsensical range cannot spin.
     const maxSize = 200
     const maxPages = 400 // 80k candles; callers chunk at 200/request
-    const candlesSize =
-      to && from ? (+to - +from) / timeIntervalMap[interval] : maxSize
-    if (candlesSize > maxSize && from && to) {
-      to = +from + maxSize * timeIntervalMap[interval]
+    const pageSpan = Math.min(
+      maxSize * timeIntervalMap[interval],
+      BITGET_FUTURES_MAX_SPAN_MS,
+    )
+    const windowEnd = to
+    if (from && to) {
+      // An empty or inverted range asked for no candles and still does; the
+      // row-count budget it used to be measured against went to zero pages.
+      if (+to <= +from) {
+        return this.returnGood<CandleResponse[]>(timeProfile)([])
+      }
+      if (+to - +from > pageSpan) {
+        to = +from + pageSpan
+      }
     }
-    const i = Math.min(Math.ceil(candlesSize / maxSize), maxPages)
     const allCandles: CandleResponse[] = []
-    for (let attempt = 1; attempt <= i; attempt++) {
+    for (let attempt = 1; attempt <= maxPages; attempt++) {
       try {
         timeProfile =
           (await this.checkLimits(
@@ -1721,10 +1747,19 @@ class BitgetExchange extends AbstractExchange implements Exchange {
             this.endProfilerTime(timeProfile, 'exchange'),
           )(new BitgetError(result.msg, +result.code))
         }
-        if (from && to) {
-          from = +to + timeIntervalMap[interval]
-          to = +from + maxSize * timeIntervalMap[interval]
+        if (!from || !to || !windowEnd) {
+          break
         }
+        from = +to + timeIntervalMap[interval]
+        if (+from >= +windowEnd) {
+          break
+        }
+        // Deliberately NOT clamped to `windowEnd`: a page has always been
+        // allowed to run past the requested end, and that overhang is what
+        // carries the bar the end falls inside — the venue only serves bars
+        // that close within the window. Clamping it would quietly drop the
+        // in-progress candle from every multi-page read.
+        to = +from + pageSpan
       } catch (e) {
         return this.handleBitgetErrors(
           this.futures_getCandles,

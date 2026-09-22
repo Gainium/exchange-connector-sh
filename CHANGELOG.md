@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.2] - 2026-09-23
+
+### Fixed
+
+- Bitget futures candles are returned at daily and weekly bars over ranges longer than about three months, where the request previously came back empty. Bitget's futures candle history limits a request two ways — at most 200 bars, and a window no wider than about 90 days whatever the bar size — and the reader sized each page by bar count alone. Two hundred bars is inside 90 days at every width up to 4 hours, so those were unaffected; at daily bars a page asked for 200 days and at weekly bars for 1400 days, so every page was refused and the whole read failed with the venue's parameter error, reaching a chart or a backtest as an absence of history rather than as a fault. A page is now bounded by whichever of the two limits binds first, with the 90-day figure recorded as a measured constant, and the reader walks the requested range to its end instead of counting pages in bars — a span-limited page carries fewer bars than that arithmetic assumed, so counting them would have truncated the series silently instead. Ranges still reach as far back as the venue serves; no floor on the start of a range is reintroduced, and widths of 8 hours and below are untouched.
+
 ## [1.23.1] - 2026-09-22
 
 ### Fixed

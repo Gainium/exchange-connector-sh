@@ -62,6 +62,20 @@ import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { safeStringify } from '../../../utils/redact'
 import { keyFingerprint } from '../../../utils/keyFingerprint'
+import { pageCandleRange } from '../../helpers/candlePager'
+import { timeIntervalMap } from '../okx'
+
+/**
+ * Most bars one `/klines` call serves. MEASURED against the live API
+ * (spec 024 §2.2): spot clamps an over-ask to 1000 silently — `limit=1500`
+ * returns 1000 rows, HTTP 200 — while `fapi`/`dapi` really do serve 1500.
+ *
+ * These are page sizes for the pager only. The single-call paths keep sending
+ * `countData || 1000`: that is a caller's page size, not this cap, and every
+ * caller that passes a count relies on getting exactly what it asked for.
+ */
+const SPOT_CANDLE_PAGE_SIZE = 1000
+const FUTURES_CANDLE_PAGE_SIZE = 1500
 
 export enum HttpMethod {
   GET = 'GET',
@@ -2209,6 +2223,66 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     if (!this.client) {
       return this.errorClient(timeProfile)
     }
+    // A range read with no explicit count walks the venue until the window is
+    // covered. Without this the single call below returns one page — the
+    // OLDEST 1000 bars, because `/api/v3/klines` anchors at `startTime` — for
+    // any range, silently (bug #923, spec 024).
+    //
+    // `from`/`to` are typed `number` and are NOT numbers at runtime (spec 023
+    // §2.1: `@Query` with no transforming pipe). Nothing here used to ADD to
+    // them, which is why this adapter never had #921's concatenation; the
+    // pager does, so they are coerced into locals. Locals, not reassignment:
+    // the single-call path below keeps passing exactly what it passes today.
+    const fromMs = from == null ? from : +from
+    const toMs = to == null ? to : +to
+    const step = timeIntervalMap[interval]
+    if (fromMs && toMs && !countData && step > 0 && toMs > fromMs) {
+      try {
+        const candles = await pageCandleRange({
+          from: fromMs,
+          to: toMs,
+          step,
+          pageSize: SPOT_CANDLE_PAGE_SIZE,
+          fetchPage: async (start, end, limit) => {
+            timeProfile =
+              (await this.checkLimits(
+                'getCandles',
+                'request',
+                this.isNewLimit ? 2 : 1,
+                timeProfile,
+              )) || timeProfile
+            timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+            const res = await this.client.getKlines({
+              symbol,
+              interval,
+              startTime: start,
+              endTime: end,
+              limit,
+            })
+            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+            return res.map((k) => ({
+              open: `${k[1]}`,
+              close: `${k[4]}`,
+              high: `${k[2]}`,
+              low: `${k[3]}`,
+              time: k[0],
+              volume: `${k[5]}`,
+            }))
+          },
+        })
+        return this.returnGood<CandleResponse[]>(timeProfile)(candles)
+      } catch (e) {
+        return this.handleBinanceErrors(
+          this.spot_getCandles,
+          symbol,
+          interval,
+          from,
+          to,
+          countData,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        )(e)
+      }
+    }
     timeProfile =
       (await this.checkLimits(
         'getCandles',
@@ -2297,6 +2371,63 @@ class BinanceExchange extends AbstractExchange implements Exchange {
             ? 5
             : 10
       : 5
+    // A range read with no explicit count walks the venue until the window is
+    // covered — one call returns the OLDEST page and nothing says so (bug
+    // #923, spec 024). Placed BEFORE the COIN-M branch below, which chunks by
+    // 200 DAYS rather than by bar count, so it no longer sees these reads.
+    // `from`/`to` are query strings at runtime (spec 023 §2.1) and the pager
+    // is the first code here to ADD to them; the rest of this method already
+    // coerces with unary `+` at each use, as it always has.
+    const fromMs = from == null ? from : +from
+    const toMs = to == null ? to : +to
+    const step = timeIntervalMap[interval]
+    if (fromMs && toMs && !countData && step > 0 && toMs > fromMs) {
+      try {
+        const candles = await pageCandleRange({
+          from: fromMs,
+          to: toMs,
+          step,
+          pageSize: FUTURES_CANDLE_PAGE_SIZE,
+          fetchPage: async (start, end, pageLimit) => {
+            timeProfile =
+              (await this.checkLimits(
+                'futures_getCandles',
+                'request',
+                limit,
+                timeProfile,
+              )) || timeProfile
+            timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+            const res = await client.getKlines({
+              symbol,
+              interval,
+              startTime: start,
+              endTime: end,
+              limit: pageLimit,
+            })
+            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+            return res.map((k) => ({
+              open: `${k[1]}`,
+              close: `${k[4]}`,
+              high: `${k[2]}`,
+              low: `${k[3]}`,
+              time: k[0],
+              volume: `${k[5]}`,
+            }))
+          },
+        })
+        return this.returnGood<CandleResponse[]>(timeProfile)(candles)
+      } catch (e) {
+        return this.handleBinanceErrors(
+          this.futures_getCandles,
+          symbol,
+          interval,
+          from,
+          to,
+          countData,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        )(e)
+      }
+    }
     if (this.coinm) {
       if (
         options.startTime &&

@@ -58,6 +58,17 @@ import {
 import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { keyFingerprint } from '../../../utils/keyFingerprint'
+import { pageCandleRange } from '../../helpers/candlePager'
+import { timeIntervalMap } from '../okx'
+
+/**
+ * Most bars `/v5/market/kline` serves in one call, on every category.
+ * MEASURED against the live API (spec 024 §2.2) — asking for 1500 returns
+ * 1000, silently, with `retCode: 0`. The single-call path below still asks for
+ * `countData || 200`: that is a caller's page size, not this cap, and every
+ * caller that passes a count relies on getting exactly what it asked for.
+ */
+const CANDLE_PAGE_SIZE = 1000
 
 class BybitError extends Error {
   code: number
@@ -1683,6 +1694,67 @@ class BybitExchange extends AbstractExchange implements Exchange {
     countData?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
+    // A range read with no explicit count walks the venue until the window is
+    // covered. Without this the single call below returns one page — the
+    // NEWEST 200 bars, because `/v5/market/kline` anchors at `end` — for any
+    // range, silently (bug #923, spec 024).
+    //
+    // `from`/`to` are typed `number` and are NOT numbers at runtime: the
+    // controller binds them with `@Query` and no transforming pipe is
+    // installed (spec 023 §2.1). The pager is the first code here to ADD to
+    // them, and on a string that concatenates, so they are coerced into locals
+    // first. Locals, not reassignment: the single-call path below is left
+    // passing exactly what it passes today.
+    const fromMs = from == null ? from : +from
+    const toMs = to == null ? to : +to
+    const step = timeIntervalMap[interval]
+    if (fromMs && toMs && !countData && step > 0 && toMs > fromMs) {
+      try {
+        const candles = await pageCandleRange({
+          from: fromMs,
+          to: toMs,
+          step,
+          pageSize: CANDLE_PAGE_SIZE,
+          fetchPage: async (start, end, limit) => {
+            timeProfile =
+              (await this.checkLimits('getCandles', 'get', timeProfile)) ||
+              timeProfile
+            timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+            const res = await this.client.getKline({
+              category: this.getCategory() as GetKlineParamsV5['category'],
+              symbol,
+              interval: this.convertInterval(interval),
+              start,
+              end,
+              limit,
+            })
+            timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+            if (res.retMsg !== 'OK') {
+              throw new BybitError(res.retMsg, res.retCode)
+            }
+            return res.result.list.map((k) => ({
+              open: k[1],
+              close: k[4],
+              high: k[2],
+              low: k[3],
+              time: +k[0],
+              volume: k[5],
+            }))
+          },
+        })
+        return this.returnGood<CandleResponse[]>(timeProfile)(candles)
+      } catch (e) {
+        return this.handleBybitErrors(
+          this.getCandles,
+          symbol,
+          interval,
+          from,
+          to,
+          countData,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        )(e)
+      }
+    }
     timeProfile =
       (await this.checkLimits('getCandles', 'get', timeProfile)) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')

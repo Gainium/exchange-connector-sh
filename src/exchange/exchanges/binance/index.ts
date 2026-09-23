@@ -2373,15 +2373,39 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       : 5
     // A range read with no explicit count walks the venue until the window is
     // covered — one call returns the OLDEST page and nothing says so (bug
-    // #923, spec 024). Placed BEFORE the COIN-M branch below, which chunks by
-    // 200 DAYS rather than by bar count, so it no longer sees these reads.
+    // #923, spec 024).
     // `from`/`to` are query strings at runtime (spec 023 §2.1) and the pager
     // is the first code here to ADD to them; the rest of this method already
     // coerces with unary `+` at each use, as it always has.
     const fromMs = from == null ? from : +from
     const toMs = to == null ? to : +to
     const step = timeIntervalMap[interval]
-    if (fromMs && toMs && !countData && step > 0 && toMs > fromMs) {
+    // COIN-M has ALWAYS walked a window wider than 200 days rather than
+    // serving one page of `countData` — but in a loop of its own that asked
+    // `this.client`, the SPOT `MainClient` (:224), instead of the `client`
+    // resolved above for the market. `api.binance.com` does not list
+    // `BTCUSD_PERP`, so every chunk came back `-1121 Invalid symbol`, the
+    // `.catch` resolved a `BaseReturn` into a `for` body where nothing read
+    // it, and the method reported the empty accumulator as `status: OK`
+    // (bug #925, spec 026). Routing that window through the same pager keeps
+    // the branch's intent and fixes all three: the right client, chunks by BAR
+    // COUNT instead of a flat 200 days (a 200-day `1h` chunk is 4800 bars
+    // against a 1500-row cap), and a throw that reaches `handleBinanceErrors`.
+    // The 200-day trigger is deliberately unchanged, so a narrower COIN-M
+    // window still takes the single call below exactly as it does today, and
+    // `binanceUsdm`/spot never satisfy `this.coinm` at all.
+    const coinmWideRange =
+      this.coinm &&
+      !!fromMs &&
+      !!toMs &&
+      toMs - fromMs > 200 * 24 * 60 * 60 * 1000
+    if (
+      fromMs &&
+      toMs &&
+      step > 0 &&
+      toMs > fromMs &&
+      (!countData || coinmWideRange)
+    ) {
       try {
         const candles = await pageCandleRange({
           from: fromMs,
@@ -2397,6 +2421,25 @@ class BinanceExchange extends AbstractExchange implements Exchange {
                 timeProfile,
               )) || timeProfile
             timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+            // The bail-out the COIN-M loop carried: once the rate-limit queue
+            // has already eaten the whole timeout, the request is pointless.
+            // Scoped to the window that loop owned so the paths #923 added
+            // keep the behaviour they shipped with. The throw becomes the same
+            // `notok`/`Response timeout` the loop returned, via the `catch`.
+            if (
+              coinmWideRange &&
+              timeProfile.inQueueStartTime &&
+              timeProfile.inQueueEndTime
+            ) {
+              const diff =
+                timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+              if (diff >= this.timeout) {
+                Logger.error(
+                  `BINANCE Queue time is too long ${diff / 1000} futures_getCandles coinm`,
+                )
+                throw new Error('Response timeout')
+              }
+            }
             const res = await client.getKlines({
               symbol,
               interval,
@@ -2426,79 +2469,6 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           countData,
           this.endProfilerTime(timeProfile, 'exchange'),
         )(e)
-      }
-    }
-    if (this.coinm) {
-      if (
-        options.startTime &&
-        options.endTime &&
-        options.endTime - options.startTime > 200 * 24 * 60 * 60 * 1000
-      ) {
-        const candles: CandleResponse[] = []
-
-        for (
-          let start = options.startTime;
-          start < options.endTime;
-          start += 200 * 24 * 60 * 60 * 1000
-        ) {
-          const end = Math.min(
-            start + 200 * 24 * 60 * 60 * 1000,
-            options.endTime,
-          )
-          timeProfile =
-            (await this.checkLimits(
-              'futures_getCandles',
-              'request',
-              limit,
-              timeProfile,
-            )) || timeProfile
-          timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-          if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
-            const diff =
-              timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
-            if (diff >= this.timeout) {
-              Logger.error(
-                `BINANCE Queue time is too long ${diff / 1000} futures_getCandles ${
-                  this.usdm ? 'usdm' : 'coinm'
-                }`,
-              )
-              return this.returnBad(timeProfile)(new Error('Response timeout'))
-            }
-          }
-          await this.client
-            .getKlines({
-              ...options,
-              startTime: start,
-              endTime: end,
-            })
-            .then((res) => {
-              timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-              candles.push(
-                ...res.map((k) => ({
-                  open: `${k[1]}`,
-                  close: `${k[4]}`,
-                  high: `${k[2]}`,
-                  low: `${k[3]}`,
-                  time: k[0],
-                  volume: `${k[5]}`,
-                })),
-              )
-            })
-            .catch(
-              this.handleBinanceErrors(
-                this.futures_getCandles,
-                symbol,
-                interval,
-                from,
-                to,
-                countData,
-                this.endProfilerTime(timeProfile, 'exchange'),
-              ),
-            )
-          await sleep(0)
-        }
-
-        return this.returnGood<CandleResponse[]>(timeProfile)(candles)
       }
     }
 

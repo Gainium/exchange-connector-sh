@@ -224,7 +224,16 @@ async function widths(
   return {
     deltas: [...new Set(times.slice(1).map((t, i) => t - times[i]))],
     aligned: times.every((t) => t % want === 0),
-    count: times.length,
+    // Bars opening inside the REQUESTED window, not every bar returned. The
+    // spot reader's last page comes from `/spot/market/candles`, whose window
+    // is closed at `endTime` (spec 025 §2.1), so it carries a bar at `to` that
+    // is deliberate overhang (spec 019 §1.6) and not one of the `bars` asked
+    // for; the futures stubs are half-open and carry none. Counting raw length
+    // conflated the two and let the spot cases read 20 while returning only 19
+    // of the window plus that overhang — which is how the missing leading bar
+    // of #924 sat under a green assertion. Windowing here makes all three
+    // product types assert the same 20.
+    count: times.filter((t) => t >= from && t < to).length,
   }
 }
 

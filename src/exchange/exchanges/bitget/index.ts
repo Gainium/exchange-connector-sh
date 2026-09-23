@@ -3348,6 +3348,30 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     // selecting recent vs historic endpoint per chunk based on `lookbackMs`.
     const allCandles: CandleResponse[] = []
     let cursor = from
+    // `/spot/market/candles` serves `(startTime, endTime]` — open at the start
+    // (spec 025 §2.1) — so a chunk asking `startTime: cursor` gets its first
+    // bar at `cursor + step`. `advanceCursor` already pays for that at every
+    // LATER boundary (`cursor = pageEnd - step`, bug #918); the FIRST chunk is
+    // the one boundary it cannot reach, because there is no preceding page to
+    // step back from. So the bar opening exactly at `from` was never inside any
+    // requested window and the series silently began one bar late (bug #924).
+    //
+    // Seeding the cursor is what fixes it, NOT `startTime: cursor - step` at
+    // the call site: the venue anchors its `limit` cap on `endTime` and
+    // truncates at the START, so widening the window to 1001 bars at
+    // `limit: 1000` just has the extra bar capped straight back off (measured
+    // live). Moving the seed moves `chunkEnd` with it and the page stays
+    // exactly `recentMaxSize` wide.
+    //
+    // Only when the first chunk will use the recent endpoint. The historic one
+    // is `endTime`-anchored and already reaches back to exactly `cursor` (spec
+    // 025 §2.2), so back-stepping it would return a bar opening BEFORE `from`
+    // and shift every later chunk boundary. The predicate is the loop's own,
+    // evaluated on the back-stepped value, so the seed cannot disagree with the
+    // branch the loop then takes.
+    if (Date.now() - (cursor - step) <= lookbackMs) {
+      cursor -= step
+    }
     // Size the safety cap off the smaller (historic) page so it never
     // under-counts iterations when a range mixes recent + historic chunks.
     const totalChunks = Math.max(

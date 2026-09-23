@@ -290,9 +290,11 @@ export class RestClientV2 extends BaseRestClient {
   setLeverageV3(params: {
     category: string
     symbol: string
-    leverage: string
+    leverage?: string
     marginMode?: 'crossed' | 'isolated'
     posSide?: 'long' | 'short'
+    longLeverage?: string
+    shortLeverage?: string
   }): Promise<APIResponse<any>> {
     return this.postPrivate(`/api/v3/account/set-leverage`, params)
   }

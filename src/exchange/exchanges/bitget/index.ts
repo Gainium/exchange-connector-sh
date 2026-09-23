@@ -691,21 +691,21 @@ class BitgetExchange extends AbstractExchange implements Exchange {
 
   /**
    * Unified leverage is kept per margin mode, and the mode is chosen per order
-   * (`uta_openOrder` sends `marginMode`), so both are set: cross is the answer,
-   * isolated is set alongside it so an isolated order opens at the same
-   * leverage.
+   * (`uta_openOrder` sends `marginMode`). The caller does not say which mode
+   * the bot trades, so cross is the answer and isolated is set alongside it
+   * on a best-effort basis; `uta_changeMarginType` is what enforces isolated
+   * (spec 027).
    */
   async uta_changeLeverage(
     symbol: string,
     leverage: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {
-    const category = this.utaCategory(symbol)
     const res = await this.utaRequest<number>(
       'utaSetLeverage',
       () =>
         this.orderClient.setLeverageV3({
-          category,
+          category: this.utaCategory(symbol),
           symbol: this.utaSymbol(symbol),
           leverage: `${leverage}`,
           marginMode: 'crossed',
@@ -716,36 +716,85 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     if (res.status === StatusEnum.notok) {
       return res
     }
-    for (const posSide of ['long', 'short'] as const) {
-      try {
-        await this.checkLimits('utaSetLeverage', 0)
-        await this.orderClient.setLeverageV3({
-          category,
-          symbol: this.utaSymbol(symbol),
+    const isolated = await this.uta_setIsolatedLeverage(symbol, leverage)
+    if (isolated.status === StatusEnum.notok) {
+      Logger.warn(
+        `Bitget UTA isolated leverage for ${symbol} not set: ${isolated.reason}`,
+      )
+    }
+    return res
+  }
+
+  /**
+   * Isolated leverage on the unified line is per position side. In hedge mode
+   * the venue wants both sides in one request (`longLeverage` +
+   * `shortLeverage`) and refuses a single `posSide` with
+   * `DOUBLE_SIDE_HOLD afterShortLeverage and afterLongLeverage none`; one-way
+   * mode takes one request per side.
+   */
+  private async uta_setIsolatedLeverage(
+    symbol: string,
+    leverage: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<number>> {
+    const hedge = await this.uta_getHedge(timeProfile)
+    if (hedge.status === StatusEnum.notok) {
+      return hedge
+    }
+    const base = {
+      category: this.utaCategory(symbol),
+      symbol: this.utaSymbol(symbol),
+      marginMode: 'isolated' as const,
+    }
+    const requests = hedge.data
+      ? [{ ...base, longLeverage: `${leverage}`, shortLeverage: `${leverage}` }]
+      : (['long', 'short'] as const).map((posSide) => ({
+          ...base,
           leverage: `${leverage}`,
-          marginMode: 'isolated',
           posSide,
-        })
-      } catch (e) {
-        Logger.warn(
-          `Bitget UTA isolated ${posSide} leverage for ${symbol} not set: ${
-            (e as { body?: { msg?: string } })?.body?.msg ??
-            (e as Error)?.message
-          }`,
-        )
+        }))
+    let res: BaseReturn<number> = this.returnGood<number>(hedge.timeProfile)(
+      leverage,
+    )
+    for (const params of requests) {
+      res = await this.utaRequest<number>(
+        'utaSetLeverage',
+        () => this.orderClient.setLeverageV3(params),
+        () => leverage,
+        res.timeProfile,
+      )
+      if (res.status === StatusEnum.notok) {
+        return res
       }
     }
     return res
   }
 
-  /** There is no account-level margin mode on UTA to switch; see above. */
+  /**
+   * There is no account-level margin mode on UTA to switch; the order carries
+   * it. An isolated bot does need its isolated leverage, and a failure to set
+   * it is returned so the bot errors instead of opening at the venue's
+   * default (spec 027).
+   */
   async uta_changeMarginType(
     symbol: string,
     margin: MarginType,
+    leverage?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<MarginType>> {
     if (this.isCoinmDelivery(symbol)) {
       return this.returnBad(timeProfile)(new Error(UTA_COINM_UNSUPPORTED))
+    }
+    if (margin === MarginType.ISOLATED && leverage) {
+      const res = await this.uta_setIsolatedLeverage(
+        symbol,
+        leverage,
+        timeProfile,
+      )
+      if (res.status === StatusEnum.notok) {
+        return res
+      }
+      timeProfile = res.timeProfile
     }
     return this.returnGood<MarginType>(timeProfile)(margin)
   }
@@ -843,7 +892,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   ): Promise<BaseReturn<MarginType>> {
     return this.byAccountMode<MarginType>(
       () => this.classic_futures_changeMarginType(symbol, margin, leverage),
-      () => this.uta_changeMarginType(symbol, margin),
+      () => this.uta_changeMarginType(symbol, margin, leverage),
     )
   }
 

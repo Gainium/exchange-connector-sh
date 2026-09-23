@@ -943,3 +943,122 @@ describe('bitget UTA — inverse perpetuals', () => {
     })
   })
 })
+
+/**
+ * Spec 027 — isolated leverage on a unified account. The venue keeps isolated
+ * leverage per position side; in hedge mode it wants both sides in one request
+ * and refuses a single `posSide` with the error prod logged.
+ */
+describe('bitget UTA — isolated leverage (spec 027)', () => {
+  beforeEach(() => clearAccountModeCache())
+
+  const DOUBLE_SIDE_HOLD =
+    'DOUBLE_SIDE_HOLD afterShortLeverage and afterLongLeverage none validation error'
+
+  /** A venue that records every set-leverage body and applies Bitget's rule. */
+  function venue(holdMode: 'hedge_mode' | 'one_way_mode', refuseAll = false) {
+    const calls: Record<string, unknown>[] = []
+    const ex = stub(Futures.usdm, {
+      getAccountSettingsV3: async () => ({
+        data: { accountMode: 'unified', holdMode },
+      }),
+      setLeverageV3: async (p: Record<string, unknown>) => {
+        calls.push(p)
+        if (p.marginMode === 'isolated') {
+          const pairOk =
+            holdMode === 'hedge_mode'
+              ? p.longLeverage !== undefined && p.shortLeverage !== undefined
+              : p.posSide !== undefined
+          if (refuseAll || !pairOk) {
+            throw bitgetError('40019', DOUBLE_SIDE_HOLD)
+          }
+        }
+        return { code: '00000', data: {} }
+      },
+    })
+    return { ex, calls }
+  }
+
+  it('§2.1 hedge mode: an isolated bot sets both sides in one request', async () => {
+    const { ex, calls } = venue('hedge_mode')
+    const res = await ex.futures_changeMarginType(
+      'BTCUSDT',
+      MarginType.ISOLATED,
+      2,
+    )
+    eq('status', res.status, StatusEnum.ok)
+    eq('calls', calls, [
+      {
+        category: 'USDT-FUTURES',
+        symbol: 'BTCUSDT',
+        marginMode: 'isolated',
+        longLeverage: '2',
+        shortLeverage: '2',
+      },
+    ])
+  })
+
+  it('§2.2 one-way mode: an isolated bot sets each side', async () => {
+    const { ex, calls } = venue('one_way_mode')
+    const res = await ex.futures_changeMarginType(
+      'BTCUSDT',
+      MarginType.ISOLATED,
+      2,
+    )
+    eq('status', res.status, StatusEnum.ok)
+    eq(
+      'calls',
+      calls.map((c) => [c.marginMode, c.leverage, c.posSide]),
+      [
+        ['isolated', '2', 'long'],
+        ['isolated', '2', 'short'],
+      ],
+    )
+  })
+
+  it('§2.3 an isolated bot is told when the venue refuses its leverage', async () => {
+    const { ex } = venue('hedge_mode', true)
+    const res = await ex.futures_changeMarginType(
+      'BTCUSDT',
+      MarginType.ISOLATED,
+      2,
+    )
+    eq('status', res.status, StatusEnum.notok)
+    if (!`${res.reason}`.toUpperCase().includes('DOUBLE_SIDE_HOLD')) {
+      throw new Error(`reason: ${res.reason}`)
+    }
+  })
+
+  it('§2.4 a cross bot touches no isolated leverage', async () => {
+    const { ex, calls } = venue('hedge_mode', true)
+    const res = await ex.futures_changeMarginType(
+      'BTCUSDT',
+      MarginType.CROSSED,
+      2,
+    )
+    eq('status', res.status, StatusEnum.ok)
+    eq('calls', calls.length, 0)
+  })
+
+  it('§2.5 changeLeverage sets cross, and isolated in the hold-mode shape', async () => {
+    const { ex, calls } = venue('hedge_mode')
+    const res = await ex.futures_changeLeverage('BTCUSDT', 2)
+    eq('status', res.status, StatusEnum.ok)
+    eq('data', res.data, 2)
+    eq(
+      'calls',
+      calls.map((c) => [c.marginMode, c.leverage, c.longLeverage, c.posSide]),
+      [
+        ['crossed', '2', undefined, undefined],
+        ['isolated', undefined, '2', undefined],
+      ],
+    )
+  })
+
+  it('§2.5 changeLeverage still answers the cross leverage if isolated is refused', async () => {
+    const { ex } = venue('hedge_mode', true)
+    const res = await ex.futures_changeLeverage('BTCUSDT', 2)
+    eq('status', res.status, StatusEnum.ok)
+    eq('data', res.data, 2)
+  })
+})

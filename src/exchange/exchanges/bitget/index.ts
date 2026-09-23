@@ -3194,6 +3194,22 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     countData?: number,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
+    // `from`/`to` are typed `number` and are NOT numbers at runtime: the
+    // controller binds them with `@Query` and no transforming pipe is
+    // installed, so every read through `GET /candles` delivers the raw query
+    // strings. The pager below is the one place that ADDS to them
+    // (`cursor + size * step`), and on a string that concatenates — a 13-digit
+    // epoch and a 9-digit page span become a ~22-digit number that is always
+    // past `to`, so every chunk clamped to `to`, the first call answered with
+    // the most recent page and `advanceCursor` ended the loop. One page for
+    // any range, silently (bug #921). `futures_getCandles` coerces with unary
+    // `+` at each arithmetic use, which is why futures never had this.
+    // Coerced once here rather than per use so the recursion below at the base
+    // interval, and anything added later, is right by construction. Left as-is
+    // when absent: both are optional and the single-call branches below select
+    // on truthiness, which `+undefined` (NaN) would not survive.
+    from = from == null ? from : +from
+    to = to == null ? to : +to
     // Bitget candle page caps differ by endpoint (verified against the live
     // API docs): recent /spot/market/candles serves up to 1000 per call, but
     // /spot/market/history-candles is hard-capped at 200. Paging recent reads

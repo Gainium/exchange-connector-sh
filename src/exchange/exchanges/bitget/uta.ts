@@ -133,11 +133,11 @@ export const isUtaPermissionRefusal = (reason: unknown): boolean =>
 /**
  * A unified account starts in Basic mode, which trades spot and USDT/USDC
  * futures only: coin-margined (inverse) futures and cross margin need Advanced
- * mode. Bitget refuses such an order with "the data is not exist" followed by
+ * mode, which Bitget unlocks only from 1,000 USD of account equity. Bitget refuses such an order with "the data is not exist" followed by
  * "basemode not supported", which tells the user nothing they can act on.
  */
 export const UTA_BASIC_MODE_UNSUPPORTED =
-  'This order needs your Bitget Unified Trading Account in Advanced mode. Basic mode does not support coin-margined (inverse) futures or cross margin. Switch the account mode to Advanced on Bitget and try again.'
+  'This order needs your Bitget Unified Trading Account in Advanced mode: Basic mode does not support coin-margined (inverse) futures or cross margin. Bitget offers Advanced mode (Account Mode in the account settings) only to accounts with at least 1,000 USD of equity and no open orders, positions or debts.'
 
 export const isUtaBasicModeRefusal = (reason: unknown): boolean =>
   `${reason ?? ''}`.toLowerCase().includes('basemode not supported')

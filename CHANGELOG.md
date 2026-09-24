@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.3] - 2026-09-24
+
+### Fixed
+
+- The Basic-mode refusal message now states Bitget's conditions for Advanced mode — at least 1,000 USD of account equity and no open orders, positions or debts — so a smaller account is not sent looking for a setting Bitget does not offer it.
+
 ## [1.25.2] - 2026-09-24
 
 ### Fixed

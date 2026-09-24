@@ -29,6 +29,11 @@ export type ExchangeInfo = {
   // canonical. The dashboard's "Canonical only" pair-picker toggle filters on
   // `=== false` so non-HL exchanges are unaffected.
   isCanonical?: boolean
+  // Clean equity ticker behind a tokenized-stock market (`AAPL` for Bitget's
+  // `rAAPL`), set only where the exchange itself marks the market as a wrapper
+  // (Bitget v3 `isReality`). Consumers use it for logo/name lookup instead of
+  // guessing from the symbol's shape. Absent => the base name is the ticker.
+  underlying?: string
   priceMultiplier?: {
     up: number
     down: number

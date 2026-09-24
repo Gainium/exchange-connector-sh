@@ -2711,9 +2711,19 @@ class BitgetExchange extends AbstractExchange implements Exchange {
                   d.quoteCoin === 'USDT' || d.quoteCoin === 'USDC'
                     ? +d.minTradeUSDT
                     : +d.minTradeUSDT / +(p?.price ?? 1)
+                // Bitget exposes no underlying-ticker field. Its Reality tokens
+                // are named `r` + the stock ticker (`rAAPL`, single-letter `rT`),
+                // so the underlying is taken ONLY for rows v3 flags `isReality`;
+                // any other base is left alone rather than guessed from shape.
+                const underlying =
+                  getRealitySymbols()?.has(d.symbol) &&
+                  /^r[A-Z]/.test(d.baseCoin)
+                    ? d.baseCoin.slice(1)
+                    : undefined
                 const res = {
                   pair: d.symbol,
                   assetClass: assetClassMap.get(d.symbol),
+                  ...(underlying ? { underlying } : {}),
                   baseAsset: {
                     minAmount: +d.minTradeAmount,
                     maxAmount: +d.maxTradeAmount,

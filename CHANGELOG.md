@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.0] - 2026-09-24
+
+### Added
+
+- Bitget Reality stock tokens carry the ticker of the stock they track in a new optional `underlying` field on exchange info (`AAPL` for `rAAPL`, `T` for `rT`). It is set only for markets Bitget itself flags as Reality tokens, so consumers can look up a logo or company name without inferring the ticker from the shape of the symbol. Bitget's stock perpetuals already use the plain ticker and carry no `underlying`.
+
 ## [1.24.1] - 2026-09-24
 
 ### Fixed

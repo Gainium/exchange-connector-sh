@@ -557,6 +557,60 @@ describe('bitget spot exchange info — Reality tokens are listed as stocks', ()
       ],
     )
   })
+
+  it('carries the underlying ticker only for rows Bitget flags isReality', async () => {
+    const base: Record<string, string> = {
+      RAAPLUSDT: 'rAAPL',
+      RTUSDT: 'rT', // AT&T: a one-letter ticker
+      RSRUSDT: 'RSR', // crypto that merely starts with R
+    }
+    const ex = stub(
+      Futures.null,
+      {
+        getInstrumentsV3: async () => ({
+          code: '00000',
+          data: [
+            { symbol: 'RAAPLUSDT', symbolType: 'stock', isReality: 'yes' },
+            { symbol: 'RTUSDT', symbolType: 'stock', isReality: 'yes' },
+            { symbol: 'RSRUSDT', symbolType: 'crypto', isReality: 'no' },
+          ],
+        }),
+      },
+      {
+        getSpotTicker: async () => ({ code: '00000', data: [] }),
+        getSpotSymbolInfo: async () => ({
+          code: '00000',
+          data: Object.keys(base).map((symbol) => ({
+            symbol,
+            status: 'online',
+            baseCoin: base[symbol],
+            quoteCoin: 'USDT',
+            minTradeAmount: '0',
+            maxTradeAmount: '0',
+            quantityPrecision: '4',
+            quotePrecision: '6',
+            minTradeUSDT: '10',
+            orderQuantity: '200',
+            pricePrecision: '2',
+            makerFeeRate: '0.001',
+            takerFeeRate: '0.001',
+            sellLimitPriceRatio: '0.1',
+            buyLimitPriceRatio: '0.1',
+          })),
+        }),
+      },
+    )
+    const res = await ex.getAllExchangeInfo()
+    eq(
+      'underlying',
+      res.data.map((p: any) => [p.pair, p.underlying]),
+      [
+        ['RAAPLUSDT', 'AAPL'],
+        ['RTUSDT', 'T'],
+        ['RSRUSDT', undefined],
+      ],
+    )
+  })
 })
 
 describe('bitget UTA — fees', () => {

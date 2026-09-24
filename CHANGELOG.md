@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.1] - 2026-09-24
+
+### Fixed
+
+- Bitget returns monthly candles on every market — spot, USDT-M and inverse — where a monthly request previously succeeded with no bars. Monthly is not one of the connector's fixed-width intervals, and each Bitget reader sized its pages by bar width, so a month's page came out with no size at all. Months are now read as UTC calendar months (the same anchor Binance uses) by their own short path: spot in one request, since the venue returns every month a pair has traded; USDT-M and USDC-M from the history endpoint, which serves closed months, plus the recent endpoint for the month still forming; inverse perpetuals walking back from the requested end in windows inside the venue's 90-day limit until the first empty page before the listing. The result is cut to the requested range, starting from the month containing its start.
+
 ## [1.25.0] - 2026-09-24
 
 ### Added

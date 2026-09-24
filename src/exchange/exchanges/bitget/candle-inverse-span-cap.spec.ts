@@ -64,8 +64,8 @@ function stub(listed: number) {
       const width = VENUE_WIDTHS[p.interval]
       const rows: string[][] = []
       for (
-        let t = Math.max(Math.ceil(start / width), Math.ceil(listed / width)) *
-          width;
+        let t =
+          Math.max(Math.ceil(start / width), Math.ceil(listed / width)) * width;
         t <= end && rows.length < +p.limit;
         t += width
       ) {
@@ -93,7 +93,12 @@ async function read(
   const from = to - days * DAY
   const res = await ex.futures_getCandles('DOGEUSD', interval, from, to)
   if (res.status === StatusEnum.notok) {
-    return { error: `${res.reason?.message ?? res.reason}`, times: [], from, to }
+    return {
+      error: `${res.reason?.message ?? res.reason}`,
+      times: [],
+      from,
+      to,
+    }
   }
   return { times: res.data.map((c: any) => c.time), from, to }
 }

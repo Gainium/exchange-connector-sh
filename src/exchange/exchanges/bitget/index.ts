@@ -109,6 +109,24 @@ type BitgetSpotGranularity = SpotKlineInterval | '3min'
  */
 const BITGET_FUTURES_MAX_SPAN_MS = 90 * 24 * 60 * 60 * 1000
 
+/**
+ * Monthly bars. `ExchangeIntervals` has no monthly member, but market-archive
+ * and the chart ask for `1M` by that string, and every reader below priced
+ * its pages with `timeIntervalMap[interval]` — undefined for `1M` — so the
+ * window came out NaN and the read returned OK with nothing, on every Bitget
+ * market. Months are not a fixed width, so they are read by their own path
+ * (`futures_getMonthlyCandles`, and the spot branch in `spot_getCandles`)
+ * rather than through the bar-count pagers.
+ */
+const BITGET_MONTH = '1M' as ExchangeIntervals
+
+/** Opening of the UTC calendar month containing `t` — what `1Mutc` bars are
+ *  stamped with, and the same anchor as Binance's `1M`. */
+const utcMonthStart = (t: number): number => {
+  const d = new Date(t)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)
+}
+
 type SpotOrderInfoV2 = _SpotOrderInfoV2 & {
   basePrice?: string
 }
@@ -1760,6 +1778,10 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       )
     }
 
+    if (interval === BITGET_MONTH) {
+      return this.futures_getMonthlyCandles(symbol, from, to, timeProfile)
+    }
+
     if (this.coinm && !this.isCoinmDelivery(symbol)) {
       return this.coinm_getCandles(symbol, interval, from, to, timeProfile)
     }
@@ -1883,6 +1905,153 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       .sort((a, b) => a.time - b.time)
 
     return this.returnGood<CandleResponse[]>(timeProfile)(deduped)
+  }
+
+  /**
+   * Monthly futures bars, as `1Mutc` (UTC calendar months). Each line serves
+   * months differently (measured live, 2026-09-24):
+   *
+   * - classic `history-candles` is anchored on `endTime`: it returns up to
+   *   `limit` CLOSED months at or before it whatever `startTime` says, but
+   *   still refuses a window wider than 90 days. The still-forming month
+   *   comes only from the recent `candles` endpoint.
+   * - the unified v3 endpoint (inverse perpetuals) serves exactly the window
+   *   asked for, current month included, under the same 90-day cap.
+   *
+   * Both are walked BACKWARDS from `to` a window at a time until a page comes
+   * back empty or reaches `from`. That is correct whichever way a page is
+   * bounded: an anchored page carries the whole history and the next one is
+   * empty, a windowed page carries ~3 months and the walk continues. Walking
+   * forwards from `from` would instead spend one call per 90 days of
+   * pre-listing time a long-range chart asks for.
+   */
+  private async futures_getMonthlyCandles(
+    symbol: string,
+    from?: number,
+    to?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<CandleResponse[]>> {
+    const end = to ? +to : Date.now()
+    const floor = from ? utcMonthStart(+from) : -Infinity
+    const maxPages = 400
+    const candles: CandleResponse[] = []
+    const mapRow = (d: string[]): CandleResponse => ({
+      time: +d[0],
+      open: d[1],
+      high: d[2],
+      low: d[3],
+      close: d[4],
+      volume: d[6],
+    })
+    const retry = (
+      e: Error & { code: number; response?: string },
+      tp: typeof timeProfile,
+    ) =>
+      this.handleBitgetErrors<BaseReturn<CandleResponse[]>>(
+        this.futures_getCandles,
+        symbol,
+        BITGET_MONTH,
+        from,
+        to,
+        undefined,
+        this.endProfilerTime(tp, 'exchange'),
+      )(e)
+
+    if (this.coinm && !this.isCoinmDelivery(symbol)) {
+      let pageEnd = end
+      for (let page = 0; page < maxPages; page++) {
+        const pageStart = Math.max(pageEnd - BITGET_FUTURES_MAX_SPAN_MS, floor)
+        const res = await this.utaRequest<CandleResponse[]>(
+          'utaGetCandles',
+          () =>
+            this.orderClient.getCandlesV3({
+              category: 'COIN-FUTURES',
+              symbol: this.utaSymbol(symbol),
+              interval: '1Mutc',
+              limit: '1000',
+              startTime: `${pageStart}`,
+              endTime: `${pageEnd}`,
+            }),
+          (data) =>
+            ((Array.isArray(data) ? data : []) as string[][]).map(mapRow),
+          timeProfile,
+        )
+        if (res.status === StatusEnum.notok) {
+          return res
+        }
+        timeProfile = res.timeProfile
+        candles.push(...res.data)
+        if (!res.data.length || pageStart <= floor) {
+          break
+        }
+        pageEnd = pageStart
+      }
+    } else {
+      const productType = this.getProductTypeBySymbol(symbol)
+      let pageEnd = end
+      for (let page = 0; page < maxPages; page++) {
+        try {
+          timeProfile =
+            (await this.checkLimits(
+              'getFuturesHistoricCandles',
+              20,
+              timeProfile,
+            )) || timeProfile
+          timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+          const result = await this.client.getFuturesHistoricCandles({
+            symbol,
+            productType,
+            startTime: `${Math.max(pageEnd - BITGET_FUTURES_MAX_SPAN_MS, 0)}`,
+            endTime: `${pageEnd}`,
+            limit: '200',
+            granularity: '1Mutc',
+          })
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (result.code !== '00000') {
+            return retry(new BitgetError(result.msg, +result.code), timeProfile)
+          }
+          const rows = (result.data as string[][]).map(mapRow)
+          candles.push(...rows)
+          const oldest = Math.min(...rows.map((c) => c.time))
+          if (!rows.length || oldest <= floor || oldest >= pageEnd) {
+            break
+          }
+          pageEnd = oldest
+        } catch (e) {
+          return retry(e, timeProfile)
+        }
+      }
+      // The still-forming month: `history-candles` serves closed bars only.
+      if (end >= utcMonthStart(Date.now())) {
+        try {
+          timeProfile =
+            (await this.checkLimits('getFuturesCandles', 20, timeProfile)) ||
+            timeProfile
+          timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+          const result = await this.client.getFuturesCandles({
+            symbol,
+            productType,
+            granularity: '1Mutc',
+            limit: '1000',
+          })
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (result.code !== '00000') {
+            return retry(new BitgetError(result.msg, +result.code), timeProfile)
+          }
+          candles.push(...(result.data as string[][]).map(mapRow))
+        } catch (e) {
+          return retry(e, timeProfile)
+        }
+      }
+    }
+
+    const seen = new Set<number>()
+    return this.returnGood<CandleResponse[]>(timeProfile)(
+      candles
+        .filter((c) => c.time >= floor && c.time <= end)
+        .filter((c) => (seen.has(c.time) ? false : (seen.add(c.time), true)))
+        .sort((a, b) => a.time - b.time),
+    )
   }
 
   /**
@@ -3333,6 +3502,60 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     const recentMaxSize = 1000
     const historicMaxSize = 200
     const reality = await this.isRealitySymbol(symbol)
+    // Monthly: the recent endpoint answers with every month the pair has
+    // traded, the forming one included (99 for BTCUSDT, measured 2026-09-24),
+    // so one call covers any range and is cut down to it here — the pagers
+    // below price their pages by a fixed bar width a month does not have.
+    if (interval === BITGET_MONTH && !reality) {
+      timeProfile =
+        (await this.checkLimits('getSpotCandles', 20, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      try {
+        const result = await this.client.getSpotCandles({
+          symbol,
+          granularity: '1Mutc',
+          limit: '1000',
+        })
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (result.code !== '00000') {
+          return this.handleBitgetErrors(
+            this.spot_getCandles,
+            symbol,
+            interval,
+            from,
+            to,
+            countData,
+            timeProfile,
+          )(new BitgetError(result.msg, +result.code))
+        }
+        const floor = from ? utcMonthStart(from) : -Infinity
+        const end = to ?? Infinity
+        return this.returnGood<CandleResponse[]>(timeProfile)(
+          (result.data as string[][])
+            .map((d) => ({
+              open: d[1],
+              high: d[2],
+              low: d[3],
+              close: d[4],
+              volume: d[7],
+              time: +d[0],
+            }))
+            .filter((c) => c.time >= floor && c.time <= end)
+            .sort((a, b) => a.time - b.time),
+        )
+      } catch (e) {
+        return this.handleBitgetErrors(
+          this.spot_getCandles,
+          symbol,
+          interval,
+          from,
+          to,
+          countData,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        )(e)
+      }
+    }
     // Reality tokens are served from the few granularities they have; every
     // other pair from the classic set, which has no `2h` and no `8h` (bug
     // #913). Either way a width the venue cannot serve is read at a finer one

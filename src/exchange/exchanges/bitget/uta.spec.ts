@@ -703,6 +703,90 @@ describe('bitget UTA — fees', () => {
     eq('status', res.status, StatusEnum.notok)
     eq('reason', res.reason, UTA_MISSING_PERMISSIONS)
   })
+
+  /**
+   * A classic key the venue refuses as a key (IP not allow-listed, key deleted,
+   * wrong secret, restricted account) is refused for every pair alike, so the
+   * fan-out must stop at the first answer instead of asking once per listing.
+   */
+  const classicFeeFanOut = (
+    futures: Futures,
+    tradeRate: (symbol: string) => unknown,
+  ) => {
+    const listing = Array.from({ length: 24 }, (_, i) => ({
+      pair: `C${i}USDT`,
+      makerFee: 0.001,
+      takerFee: 0.001,
+    }))
+    const calls: string[] = []
+    const ex = stub(
+      futures,
+      {
+        // a venue answer with a body code: the key is classic
+        getAccountSettingsV3: async () => {
+          throw bitgetError('40018', 'invalid ip,current request ip 1.2.3.4')
+        },
+      },
+      {
+        getTradeRate: async ({ symbol }: { symbol: string }) => {
+          calls.push(symbol)
+          return tradeRate(symbol)
+        },
+      },
+    )
+    const listed = async () => ex.returnGood(ex.getEmptyTimeProfile())(listing)
+    ex.spot_getAllExchangeInfo = listed
+    ex.futures_getAllExchangeInfo = listed
+    return { ex, calls, listing }
+  }
+
+  for (const [futures, code, msg] of [
+    [Futures.null, '40018', 'invalid ip,current request ip 1.2.3.4'],
+    [Futures.null, '40037', 'apikey does not exist'],
+    [Futures.null, '40009', 'sign signature error'],
+    [Futures.usdm, '40037', 'apikey does not exist'],
+    [Futures.usdm, '40018', 'invalid ip,current request ip 1.2.3.4'],
+    [Futures.usdm, '40014', 'user status is abnormal'],
+  ] as const) {
+    it(`${futures === Futures.null ? 'spot' : 'futures'}: "${msg}" stops the fee fan-out and is the call's result`, async () => {
+      const { ex, calls } = classicFeeFanOut(futures, () => {
+        throw bitgetError(code, msg)
+      })
+      const res = await ex.getAllUserFees()
+      eq('status', res.status, StatusEnum.notok)
+      eq('reason', res.reason, msg)
+      if (calls.length > 8) {
+        throw new Error(`fan-out kept going: ${calls.length} calls`)
+      }
+    })
+  }
+
+  it('a per-symbol refusal still falls back to the listed rate for that pair only', async () => {
+    const { ex, calls, listing } = classicFeeFanOut(Futures.usdm, (symbol) => {
+      if (symbol === 'C3USDT') {
+        throw bitgetError('40034', 'parameter c3usdt does not exist')
+      }
+      return {
+        code: '00000',
+        data: { makerFeeRate: '0.0002', takerFeeRate: '0.0006' },
+      }
+    })
+    const res = await ex.getAllUserFees()
+    eq('status', res.status, StatusEnum.ok)
+    eq('every pair asked', calls.length, listing.length)
+    eq('pairs priced', res.data.length, listing.length)
+    const byPair = new Map(res.data.map((f) => [f.pair, f]))
+    eq('refused pair', byPair.get('C3USDT'), {
+      pair: 'C3USDT',
+      maker: 0.001,
+      taker: 0.001,
+    })
+    eq('account rate', byPair.get('C0USDT'), {
+      pair: 'C0USDT',
+      maker: 0.0002,
+      taker: 0.0006,
+    })
+  })
 })
 
 /**

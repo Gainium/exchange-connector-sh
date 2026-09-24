@@ -112,6 +112,27 @@ export const isUnifiedModeRefusal = (reason: unknown): boolean =>
   `${reason ?? ''}`.toLowerCase().includes('unified account mode')
 
 /**
+ * Refusals that belong to the API key or the account, not to the symbol asked
+ * about: the same request for any other pair is refused the same way. Exact
+ * phrases, not bare "does not exist" — `parameter <symbol> does not exist` is a
+ * per-symbol answer and must stay one.
+ */
+const KEY_REFUSALS = [
+  'invalid ip', // 40018: the calling IP is not on the key's allow-list
+  'apikey does not exist', // 40037
+  'invalid access_key', // 40006
+  'apikey/password is incorrect', // 40012
+  'sign signature error', // 40009: the secret does not belong to the key
+  'incorrect permissions', // 40014
+  'user status is abnormal', // the account is restricted on Bitget's side
+]
+
+export const isKeyRefusal = (reason: unknown): boolean => {
+  const r = `${reason ?? ''}`.toLowerCase()
+  return KEY_REFUSALS.some((s) => r.includes(s))
+}
+
+/**
  * What a user sees when a classic account picks a Reality token. Bitget's own
  * answer to that order is not specific enough to act on.
  */

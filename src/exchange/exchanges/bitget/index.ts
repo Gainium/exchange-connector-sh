@@ -46,6 +46,7 @@ import {
   convertUtaPosition,
   getCachedAccountMode,
   getRealitySymbols,
+  isKeyRefusal,
   isUnifiedModeRefusal,
   isUtaPermissionRefusal,
   isUtaBasicModeRefusal,
@@ -1626,11 +1627,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     for (let i = 0; i < res.data.length; i += 8) {
       chunks.push(res.data.slice(i, i + 8))
     }
-    // A unified account refuses every classic endpoint. Swallowing that into a
-    // per-pair warning spends one refused call on every listed pair and hands
-    // back the listed rates instead of the account's own, so the refusal is
-    // returned as this call's result — which is what routes it to v3
-    // (`byAccountMode`).
+    // A unified account refuses every classic endpoint, and a dead, IP-locked
+    // or restricted key refuses every pair. Swallowing that into a per-pair
+    // warning spends one refused call on every listed pair and hands back the
+    // listed rates instead of the account's own, so the refusal is returned as
+    // this call's result — which routes a unified account to v3
+    // (`byAccountMode`) and shows the caller one key error instead of one per
+    // pair.
     let refusal: string | undefined
     for (const ch of chunks) {
       if (refusal) {
@@ -1640,7 +1643,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         ch.map(async (p) => {
           const f = await this.futures_getUserFees(p.pair)
           if (f.status === StatusEnum.notok) {
-            if (isUnifiedModeRefusal(f.reason)) {
+            if (isUnifiedModeRefusal(f.reason) || isKeyRefusal(f.reason)) {
               refusal = refusal ?? `${f.reason}`
               return
             }
@@ -3039,11 +3042,13 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     for (let i = 0; i < res.data.length; i += 8) {
       chunks.push(res.data.slice(i, i + 8))
     }
-    // A unified account refuses every classic endpoint. Swallowing that into a
-    // per-pair warning spends one refused call on every listed pair and hands
-    // back the listed rates instead of the account's own, so the refusal is
-    // returned as this call's result — which is what routes it to v3
-    // (`byAccountMode`).
+    // A unified account refuses every classic endpoint, and a dead, IP-locked
+    // or restricted key refuses every pair. Swallowing that into a per-pair
+    // warning spends one refused call on every listed pair and hands back the
+    // listed rates instead of the account's own, so the refusal is returned as
+    // this call's result — which routes a unified account to v3
+    // (`byAccountMode`) and shows the caller one key error instead of one per
+    // pair.
     let refusal: string | undefined
     for (const ch of chunks) {
       if (refusal) {
@@ -3053,7 +3058,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         ch.map(async (p) => {
           const f = await this.spot_getUserFees(p.pair)
           if (f.status === StatusEnum.notok) {
-            if (isUnifiedModeRefusal(f.reason)) {
+            if (isUnifiedModeRefusal(f.reason) || isKeyRefusal(f.reason)) {
               refusal = refusal ?? `${f.reason}`
               return
             }

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.4] - 2026-09-24
+
+### Fixed
+
+- Bitget fee refreshes stop at the first refusal that belongs to the API key rather than to a pair (IP not on the key's allow-list, key deleted, wrong secret, missing permissions, restricted account), and return that refusal as the call's result. The spot and futures fee readers ask for each listed pair separately, and previously logged such a refusal once per pair and carried on through the whole listing, although no pair could succeed with that key. Refusals about a single pair, such as a delisted symbol, still fall back to the listed rate for that pair only.
+
 ## [1.25.3] - 2026-09-24
 
 ### Fixed

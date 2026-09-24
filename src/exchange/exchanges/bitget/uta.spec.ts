@@ -810,6 +810,47 @@ describe('bitget UTA — inverse perpetuals', () => {
     eq('status', res.status, StatusEnum.ok)
   })
 
+  it('a live fill: the venue quotes the contracts in both fields', async () => {
+    // Verbatim from production (2026-09-23): a filled BTCUSD_CM order for 120
+    // contracts reports qty, cumExecQty AND cumExecValue as 120. A cheap
+    // contract — DOGEUSD at $0.20 — reports the same shape, where reading the
+    // pair of figures as two different currencies would answer "base" and
+    // hand the platform 120 DOGE instead of 600 USD worth.
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      getOrderInfoV3: async () => ({
+        data: perpOrder({
+          qty: '120',
+          cumExecQty: '120',
+          cumExecValue: '120',
+          avgPrice: '84350.2',
+          orderStatus: 'filled',
+          feeDetail: [{ feeCoin: 'BTC', fee: '0.0000002845280747' }],
+        }),
+      }),
+    })
+    const res = await ex.getOrder({ symbol: 'BTCUSD', orderId: '9' })
+    eq('pair', res.data.symbol, 'BTCUSD')
+    eq('base quantity', res.data.executedQty, `${120 / 84350.2}`)
+    eq('traded notional', res.data.cummulativeQuoteQty, '120')
+
+    const cheap = stub(Futures.coinm, {
+      ...unified,
+      getOrderInfoV3: async () => ({
+        data: perpOrder({
+          symbol: 'DOGEUSD_CM',
+          qty: '120',
+          cumExecQty: '120',
+          cumExecValue: '120',
+          avgPrice: '0.2',
+          orderStatus: 'filled',
+        }),
+      }),
+    })
+    const res2 = await cheap.getOrder({ symbol: 'DOGEUSD', orderId: '9' })
+    eq('base quantity', res2.data.executedQty, '600')
+  })
+
   it('reads quantity back in base, from whichever unit the venue agrees with', async () => {
     const ex = stub(Futures.coinm, {
       ...unified,

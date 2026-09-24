@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.5] - 2026-09-24
+
+### Fixed
+
+- An inverse perpetual's filled quantity is read correctly on contracts priced under a dollar. The venue reports a filled order's traded quantity and traded value as the same figure — both in contracts — and the connector inferred the unit from which currency the two agreed in. Above a dollar that inference happened to land on the right answer; below one it read the contracts as the coin itself, reporting a fill at a fraction of its real size. The venue's behaviour on live fills is now the rule.
+
 ## [1.23.3] - 2026-09-23
 
 ### Fixed

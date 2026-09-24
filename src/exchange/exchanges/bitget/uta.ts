@@ -139,12 +139,16 @@ export const coinmBase = (contracts: number, price: number): number =>
   price > 0 ? contracts / price : 0
 
 /**
- * Which unit a v3 inverse order reports its quantity in. The venue documents
- * one answer for every category and the request in another (§2.4), so the
- * answer is taken from figures that have to agree with each other: an order
- * that has traded reports `cumExecValue` in the currency its quantity is not
- * in. Without fills there is nothing to check against and the request's own
- * unit stands.
+ * Which unit a v3 inverse order reports its quantity in.
+ *
+ * The venue documents one answer for every category and its request format
+ * says another (§2.4). Live fills settle it: on `COIN-FUTURES` the quantity
+ * is the contracts, and `cumExecValue` is **the same figure** — a filled
+ * order for 120 contracts reports `qty`, `cumExecQty` and `cumExecValue` all
+ * as `120` against an `avgPrice` of `84350.2`. The two fields therefore carry
+ * no unit information when they agree, and that is the ordinary case; the
+ * comparison below only decides the ones where the venue ever reports them in
+ * different currencies.
  */
 export const utaInverseQtyUnit = (order: {
   cumExecQty?: string
@@ -155,6 +159,10 @@ export const utaInverseQtyUnit = (order: {
   const value = parseFloat(`${order.cumExecValue ?? ''}`)
   const price = parseFloat(`${order.avgPrice ?? ''}`)
   if (!(qty > 0) || !(value > 0) || !(price > 0)) {
+    return 'quote'
+  }
+  // One figure quoted twice: the contracts, as the venue reports them.
+  if (Math.abs(qty - value) <= 1e-6 * Math.max(qty, value)) {
     return 'quote'
   }
   const asBase = Math.abs(qty * price - value)

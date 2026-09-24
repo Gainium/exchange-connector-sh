@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.0] - 2026-09-24
+
+### Added
+
+- OKX reports pooled collateral for futures connections on a Multi-currency or Portfolio margin account (`/marginAvailableUsd` = adjusted equity minus initial margin in use, in USD), so an account holding EUR or coins but no USDC can size and open USDC-quoted contracts such as the OKX Europe X-Perps. Other account modes answer `null` and keep the per-coin rule.
+- OKX pairs carry an asset class from OKX's own instrument category: equities (including equity ETFs, which OKX does not tell apart) are `stock`, metals and energy are `commodity`; everything else keeps the crypto default. Contributed by a community member.
+
 ## [1.25.4] - 2026-09-24
 
 ### Fixed

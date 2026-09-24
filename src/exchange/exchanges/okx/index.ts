@@ -45,6 +45,7 @@ import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { RestClient as OKXOrderRestClient } from '../../../okx-custom/rest-client'
 import { round } from '../../../utils/math'
+import { okxCollateralIsPooled, pooledMarginFromOkx } from './pooledMargin'
 import { createHash } from 'crypto'
 
 class OKXError extends Error {
@@ -53,6 +54,36 @@ class OKXError extends Error {
   constructor(message: string, code: number) {
     super(message)
     this.code = code
+  }
+}
+
+/**
+ * OKX's own instrument classification (`instCategory` on every
+ * `/api/v5/public/instruments` and `/api/v5/account/instruments` row) mapped to
+ * the platform asset class. Present on SPOT, SWAP and FUTURES alike, so one
+ * mapper covers every OKX market:
+ *   - `1` -> crypto (left undefined so consumers apply their own default and
+ *     existing rows stay untouched)
+ *   - `3` -> stock. OKX groups equities and equity ETFs under the SAME value and
+ *     exposes no sub-signal to separate them, so ETFs (QQQ, SPY) stay `stock`
+ *     rather than being guessed from a ticker list.
+ *   - `4` -> commodity (metals XAU/XAG and energy CL/BZ; matches how Binance's
+ *     `COMMODITY` underlyingType is mapped).
+ * Anything unknown returns undefined rather than guessing.
+ *
+ * `instCategory` is absent from the `okx-api` SDK's typed `Instrument`, hence
+ * the `@ts-ignore` at the call site.
+ */
+export function okxAssetClass(
+  instCategory?: string,
+): ExchangeInfo['assetClass'] {
+  switch (`${instCategory ?? ''}`) {
+    case '3':
+      return 'stock'
+    case '4':
+      return 'commodity'
+    default:
+      return undefined
   }
 }
 
@@ -1040,6 +1071,9 @@ class OKXExchange extends AbstractExchange implements Exchange {
         const step = this.futures ? minAmount : +s.lotSz
         return {
           pair: this.futures ? s.instFamily : s.instId,
+          // OKX classifies every instrument itself; no name heuristics needed.
+          //@ts-ignore -- instCategory is not on the SDK's typed Instrument
+          assetClass: okxAssetClass(s.instCategory),
           baseAsset: {
             minAmount,
             maxAmount: +s.maxLmtSz,
@@ -1287,6 +1321,40 @@ class OKXExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleOkxErrors(
           this.getBalance,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /**
+   * Pooled collateral in USD for a futures connection on a Multi-currency or
+   * Portfolio margin account (see {@link pooledMarginFromOkx}); `null` for
+   * spot, for the other account modes, and when the mode can't be read.
+   *
+   * Two reads (account mode, cached; then the balance). Callers ask only
+   * after their own per-coin check has come up short.
+   */
+  async getMarginAvailableUsd(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<number | null>> {
+    if (!this.futures || !okxCollateralIsPooled(await this.getAcctLv())) {
+      return this.returnGood<number | null>(timeProfile)(null)
+    }
+    timeProfile =
+      (await this.checkLimits('getBalance', 3000, 5, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getBalance()
+      .then(async (balances) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<number | null>(timeProfile)(
+          pooledMarginFromOkx(await this.getAcctLv(), balances?.[0]),
+        )
+      })
+      .catch(
+        this.handleOkxErrors(
+          this.getMarginAvailableUsd,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

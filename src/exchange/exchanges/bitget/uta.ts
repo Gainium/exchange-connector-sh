@@ -145,6 +145,15 @@ export const REALITY_NEEDS_UTA =
  * uta manage read or uta manage write permissions", which says nothing about
  * what to do. The key has to be edited on Bitget, not replaced.
  */
+/**
+ * A Reality token order that was accepted while its book had nobody on the
+ * other side. Bitget keeps these tokens listed and their price moving around
+ * the clock, but liquidity for many of them exists only around US market
+ * hours, so such an order simply waits.
+ */
+export const realityNoLiquidityNotice = (symbol: string, side: string) =>
+  `Bitget has no ${side === 'BUY' ? 'sellers' : 'buyers'} on ${symbol} right now, so this order will wait until there are. Liquidity for Bitget stock tokens is mostly available around US market hours.`
+
 export const UTA_MISSING_PERMISSIONS =
   'This Bitget API key does not carry the Unified Trading Account permissions. Edit the key on Bitget, enable UTA management (read) and UTA trading, and save it.'
 

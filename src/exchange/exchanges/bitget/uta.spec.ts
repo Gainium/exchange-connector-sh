@@ -183,6 +183,67 @@ describe('bitget UTA — account mode', () => {
 describe('bitget UTA — orders', () => {
   beforeEach(() => clearAccountModeCache())
 
+  describe('a Reality token order with nobody on the other side', () => {
+    const place = async (
+      side: 'BUY' | 'SELL',
+      book: { a: any[]; b: any[] } | Error,
+      reality = true,
+    ) => {
+      setRealitySymbols(reality ? ['RMCDUSDT'] : [])
+      const ex = stub(Futures.null, {
+        ...unified,
+        placeOrderV3: async (p: any) => ({
+          data: { orderId: '1', clientOid: p.clientOid },
+        }),
+        getOrderInfoV3: async () => ({ data: orderRow({}) }),
+        getOrderBookV3: async () => {
+          if (book instanceof Error) throw book
+          return { code: '00000', data: { ...book, ts: '1' } }
+        },
+      })
+      return ex.openOrder({
+        symbol: 'RMCDUSDT',
+        side,
+        quantity: 0.05,
+        price: 238.8,
+        newClientOrderId: 'c-liq',
+        type: 'LIMIT',
+      })
+    }
+
+    it('is placed, and carries a notice when the side it trades against is empty', async () => {
+      const buy = await place('BUY', { a: [], b: [[238.6, 1]] })
+      eq('buy status', buy.status, StatusEnum.ok)
+      eq(
+        'buy notice',
+        /no sellers on RMCDUSDT/.test(`${buy.data.notice}`),
+        true,
+      )
+      const sell = await place('SELL', { a: [[238.9, 1]], b: [] })
+      eq(
+        'sell notice',
+        /no buyers on RMCDUSDT/.test(`${sell.data.notice}`),
+        true,
+      )
+    })
+
+    it('carries no notice when the other side has orders, the book cannot be read, or the pair is not a Reality token', async () => {
+      eq(
+        'liquid',
+        (await place('BUY', { a: [[238.9, 1]], b: [] })).data.notice,
+        undefined,
+      )
+      const failed = await place('BUY', new Error('timeout'))
+      eq('book read failed: still placed', failed.status, StatusEnum.ok)
+      eq('book read failed: no notice', failed.data.notice, undefined)
+      eq(
+        'not reality',
+        (await place('BUY', { a: [], b: [] }, false)).data.notice,
+        undefined,
+      )
+    })
+  })
+
   it('spot limit order on a Reality token goes to v3 place-order', async () => {
     const sent: any[] = []
     const ex = stub(Futures.null, {

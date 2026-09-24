@@ -368,6 +368,10 @@ export type CommonOrder = {
   status: OrderStatusType
   type: OrderTypeT
   side: OrderSideType
+  // Something the user should know about an order the venue ACCEPTED, e.g. a
+  // Bitget Reality token with nobody on the other side of the book right now.
+  // Never a refusal: those are the call's `reason`.
+  notice?: string
   fills?: {
     price: string
     qty: string

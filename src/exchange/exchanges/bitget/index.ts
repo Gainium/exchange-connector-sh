@@ -32,6 +32,7 @@ import {
 import {
   BitgetAccountMode,
   REALITY_NEEDS_UTA,
+  realityNoLiquidityNotice,
   UTA_COINM_UNSUPPORTED,
   UTA_MISSING_PERMISSIONS,
   UtaAsset,
@@ -3346,8 +3347,51 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         }
         return this.spot_openOrder(order)
       },
-      () => this.uta_openOrder(order),
+      async () =>
+        this.withRealityLiquidityNotice(order, await this.uta_openOrder(order)),
     )
+  }
+
+  /**
+   * Reality tokens stay listed and priced around the clock, but many have no
+   * book outside US market hours: an order is accepted and then just waits.
+   * The order stands; when the side it trades against is empty, the result
+   * carries a `notice` saying so. The check never fails or delays the order
+   * beyond one book read — any error reading the book leaves the result as is.
+   */
+  private async withRealityLiquidityNotice(
+    order: { symbol: string; side: OrderTypes },
+    res: BaseReturn<CommonOrder>,
+  ): Promise<BaseReturn<CommonOrder>> {
+    if (
+      this.futures ||
+      res.status !== StatusEnum.ok ||
+      !res.data ||
+      !(await this.isRealitySymbol(order.symbol))
+    ) {
+      return res
+    }
+    try {
+      const book = await this.orderClient.getOrderBookV3({
+        category: 'SPOT',
+        symbol: order.symbol,
+        limit: '1',
+      })
+      const opposite =
+        order.side === 'BUY' ? book?.data?.a : book?.data?.b
+      if (
+        book?.code === '00000' &&
+        Array.isArray(opposite) &&
+        !opposite.length
+      ) {
+        res.data.notice = realityNoLiquidityNotice(order.symbol, order.side)
+      }
+    } catch (e) {
+      Logger.warn(
+        `bitget reality book check for ${order.symbol} failed: ${(e as Error)?.message}`,
+      )
+    }
+    return res
   }
 
   /** Open order function

@@ -48,6 +48,8 @@ import {
   getRealitySymbols,
   isUnifiedModeRefusal,
   isUtaPermissionRefusal,
+  isUtaBasicModeRefusal,
+  UTA_BASIC_MODE_UNSUPPORTED,
   utaCoinmSymbol,
   platformCoinmSymbol,
   coinmContracts,
@@ -4254,7 +4256,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         // scopes names permissions the user cannot find under that name.
         const message = isUtaPermissionRefusal(msg)
           ? UTA_MISSING_PERMISSIONS
-          : msg
+          : isUtaBasicModeRefusal(msg)
+            ? UTA_BASIC_MODE_UNSUPPORTED
+            : msg
         return this.returnBad(timeProfile)(new Error(message))
       }
     }

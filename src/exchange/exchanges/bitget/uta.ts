@@ -131,6 +131,18 @@ export const isUtaPermissionRefusal = (reason: unknown): boolean =>
   `${reason ?? ''}`.toLowerCase().includes('uta manage')
 
 /**
+ * A unified account starts in Basic mode, which trades spot and USDT/USDC
+ * futures only: coin-margined (inverse) futures and cross margin need Advanced
+ * mode. Bitget refuses such an order with "the data is not exist" followed by
+ * "basemode not supported", which tells the user nothing they can act on.
+ */
+export const UTA_BASIC_MODE_UNSUPPORTED =
+  'This order needs your Bitget Unified Trading Account in Advanced mode. Basic mode does not support coin-margined (inverse) futures or cross margin. Switch the account mode to Advanced on Bitget and try again.'
+
+export const isUtaBasicModeRefusal = (reason: unknown): boolean =>
+  `${reason ?? ''}`.toLowerCase().includes('basemode not supported')
+
+/**
  * Bitget's unified COIN-M line is a different product from the classic one we
  * list: its symbols carry a `_CM` suffix (BTCUSD_CM), its order quantity is
  * denominated in the quote coin, and it has no preset TP/SL. Routing classic

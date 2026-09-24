@@ -25,6 +25,7 @@ import {
   REALITY_NEEDS_UTA,
   UTA_COINM_UNSUPPORTED,
   UTA_MISSING_PERMISSIONS,
+  UTA_BASIC_MODE_UNSUPPORTED,
   accountModeFromSettings,
   clearAccountModeCache,
   convertUtaAssets,
@@ -835,6 +836,30 @@ describe('bitget UTA — inverse perpetuals', () => {
     // and the answer comes back in the platform's own name and unit
     eq('pair', res.data.symbol, 'BTCUSD')
     eq('base quantity', res.data.origQty, '0.01')
+  })
+
+  it("a Basic-mode account is told to switch to Advanced, not Bitget's wording", async () => {
+    const ex = stub(Futures.coinm, {
+      ...unified,
+      placeOrderV3: async () => {
+        // Prod, 2026-09-24: the venue's whole answer to an inverse order
+        // from a unified account still in Basic mode.
+        throw bitgetError(
+          '40019',
+          'the data is not existbasemode not supported',
+        )
+      },
+    })
+    const res = await ex.openOrder({
+      symbol: 'BTCUSD',
+      side: 'BUY',
+      quantity: 0.0003,
+      price: 84111.7,
+      type: 'LIMIT',
+      newClientOrderId: 'c10',
+    })
+    eq('status', res.status, StatusEnum.notok)
+    eq('reason', res.reason, UTA_BASIC_MODE_UNSUPPORTED)
   })
 
   it('a market order with no price of its own is sized from the venue', async () => {

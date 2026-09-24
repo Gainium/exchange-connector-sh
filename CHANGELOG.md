@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.25.2] - 2026-09-24
+
+### Fixed
+
+- An order Bitget refuses because the Unified Trading Account is in Basic mode now says what to do. Unified accounts start in Basic mode, which does not support coin-margined (inverse) futures or cross margin, and the venue answers such an order with "the data is not exist" and "basemode not supported", which named nothing a user could act on. The refusal now reads that the account must be switched to Advanced mode on Bitget.
+
 ## [1.25.1] - 2026-09-24
 
 ### Fixed

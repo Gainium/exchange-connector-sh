@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.1] - 2026-09-24
+
+### Fixed
+
+- Bitget inverse (coin-margined) perpetuals return candle history at 4-hour, daily and weekly bars over long ranges. Their candles come from the venue's unified-account market endpoint, which, like the classic futures one, refuses any window wider than about 90 days — but the reader sized each page by bar count alone (1000 bars), so every page at 4 hours and wider was refused. Weekly charts came back empty, and a daily range could not be read or back-filled beyond the few days already stored. Pages are now bounded by the 90-day window as well, the reader walks the whole requested range instead of stopping at the first short page (a window-limited page is short by design, and so is every page before a pair's listing), and bars repeated across a page boundary are removed.
+
 ## [1.24.0] - 2026-09-24
 
 ### Added

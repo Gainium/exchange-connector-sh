@@ -40,6 +40,8 @@ import {
   UtaPosition,
   accountModeFromSettings,
   convertUtaAssets,
+  pooledMarginFromUta,
+  utaCollateralIsPooled,
   convertUtaOrder,
   convertUtaPosition,
   getCachedAccountMode,
@@ -436,6 +438,41 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           this.futures && !this.coinm ? ['USDT', 'USDC'] : undefined,
         ),
       timeProfile,
+    )
+  }
+
+  /**
+   * Pooled collateral on a unified account in `multi_assets` mode (spec 028):
+   * every coin in the wallet margins every contract, so an inverse pair can be
+   * opened from USDT alone. `null` for classic accounts, spot, and any unified
+   * account that is not pooled — callers then keep the per-coin rule.
+   *
+   * Two reads (settings, then assets). Callers ask only once their own
+   * per-coin check has failed, so the common path costs nothing.
+   */
+  async getMarginAvailableUsd(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<number | null>> {
+    if (!this.futures || (await this.accountMode(timeProfile)) !== 'uta') {
+      return this.returnGood<number | null>(timeProfile)(null)
+    }
+    const settings = await this.utaRequest<unknown>(
+      'getAccountSettingsV3',
+      () => this.orderClient.getAccountSettingsV3(),
+      (data) => data,
+      timeProfile,
+    )
+    if (settings.status === StatusEnum.notok) {
+      return settings
+    }
+    if (!utaCollateralIsPooled(settings.data)) {
+      return this.returnGood<number | null>(settings.timeProfile)(null)
+    }
+    return this.utaRequest<number | null>(
+      'getAccountAssetsV3',
+      () => this.orderClient.getAccountAssetsV3(),
+      (data) => pooledMarginFromUta(settings.data, data),
+      settings.timeProfile,
     )
   }
 
@@ -1877,6 +1914,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
    * Candles for an inverse perpetual. v2 serves nothing for these symbols
    * (spec 014 §2.1), so they come from v3 — 1000 rows a page, ascending,
    * `[ts, open, high, low, close, baseVolume, quoteVolume]`.
+   *
+   * v3 caps the window span at 90 days just as v2 does (measured on
+   * DOGEUSD_CM / BTCUSD_CM, 2026-09-24: 90d accepted, 91d refused with
+   * `00001` at 4H, 1Dutc and 1Wutc), so a page is bounded by that as well as
+   * by the row limit. Sizing by rows alone refused every page from 4h up —
+   * `1w` came back empty and the archive could not backfill `1d`. The loop
+   * walks the whole window rather than stopping at the first short page: a
+   * span-bounded page is short by design, and so is every page before the
+   * listing.
    */
   private async coinm_getCandles(
     symbol: string,
@@ -1886,13 +1932,16 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CandleResponse[]>> {
     const pageSize = 1000
-    const step = timeIntervalMap[interval]
+    const pageSpan = Math.min(
+      pageSize * timeIntervalMap[interval],
+      BITGET_FUTURES_MAX_SPAN_MS,
+    )
     const pages =
-      from && to ? Math.min(Math.ceil((+to - +from) / step / pageSize), 400) : 1
+      from && to ? Math.min(Math.ceil((+to - +from) / pageSpan), 400) : 1
     const candles: CandleResponse[] = []
     let start = from
     for (let page = 0; page < Math.max(pages, 1); page++) {
-      const end = start ? Math.min(+start + pageSize * step, +(to ?? 0)) : to
+      const end = start ? Math.min(+start + pageSpan, +(to ?? 0)) : to
       const res = await this.utaRequest<CandleResponse[]>(
         'utaGetCandles',
         () =>
@@ -1922,15 +1971,22 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       }
       timeProfile = res.timeProfile
       candles.push(...res.data)
-      if (!start || !to || res.data.length < pageSize) {
+      if (!start || !to) {
         break
       }
-      start = +start + pageSize * step
+      start = +start + pageSpan
       if (start >= +to) {
         break
       }
     }
-    return this.returnGood<CandleResponse[]>(timeProfile)(candles)
+    // The venue's bounds at a page edge are not a clean half-open window
+    // (a bar can come back on both sides of one), so dedup and sort as
+    // `futures_getCandles` does for its own pages.
+    const seen = new Set<number>()
+    const deduped = candles
+      .filter((c) => (seen.has(c.time) ? false : (seen.add(c.time), true)))
+      .sort((a, b) => a.time - b.time)
+    return this.returnGood<CandleResponse[]>(timeProfile)(deduped)
   }
 
   async futures_getAllPrices(

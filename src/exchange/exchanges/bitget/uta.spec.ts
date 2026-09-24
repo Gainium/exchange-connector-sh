@@ -29,6 +29,7 @@ import {
   clearAccountModeCache,
   convertUtaAssets,
   convertUtaOrder,
+  pooledMarginFromUta,
   aggregateCandles,
   realityBaseInterval,
   realityGranularity,
@@ -1101,5 +1102,110 @@ describe('bitget UTA — isolated leverage (spec 027)', () => {
     const res = await ex.futures_changeLeverage('BTCUSDT', 2)
     eq('status', res.status, StatusEnum.ok)
     eq('data', res.data, 2)
+  })
+})
+
+/**
+ * Spec 028 — pooled collateral. A unified account in `multi_assets` mode
+ * margins an inverse contract from any coin in the wallet, so the connector
+ * reports the pool (USD) for callers whose per-coin check came up short.
+ */
+describe('bitget UTA — pooled collateral (spec 028)', () => {
+  beforeEach(() => clearAccountModeCache())
+
+  const pooled = { accountMode: 'unified', assetMode: 'multi_assets' }
+  const assets = { effEquity: '100.5', imr: '20.5', assets: [] }
+
+  it('§2.1 a multi_assets account reports effEquity less imr', () => {
+    eq('pool', pooledMarginFromUta(pooled, assets), 80)
+  })
+
+  it('§2.1 the pool never reads negative', () => {
+    eq('pool', pooledMarginFromUta(pooled, { effEquity: '10', imr: '15' }), 0)
+  })
+
+  it('§2.2 a unified account that is not multi_assets is not pooled', () => {
+    eq(
+      'single',
+      pooledMarginFromUta(
+        { accountMode: 'unified', assetMode: 'single' },
+        assets,
+      ),
+      null,
+    )
+    eq('absent', pooledMarginFromUta({ accountMode: 'unified' }, assets), null)
+  })
+
+  it('§2.2 an isolated account level is not pooled', () => {
+    eq(
+      'isolated',
+      pooledMarginFromUta({ ...pooled, accountLevel: 'isolated' }, assets),
+      null,
+    )
+  })
+
+  it('§2.2 a classic account is not pooled', () => {
+    eq(
+      'classic',
+      pooledMarginFromUta(
+        { accountMode: 'switching', assetMode: 'multi_assets' },
+        assets,
+      ),
+      null,
+    )
+  })
+
+  it('§2.2 an assets answer without effEquity is no answer', () => {
+    eq('missing', pooledMarginFromUta(pooled, { assets: [] }), null)
+  })
+
+  it('§2.3 a COIN-M connection on a pooled account reports the pool', async () => {
+    const ex = stub(Futures.coinm, {
+      getAccountSettingsV3: async () => ({ data: pooled }),
+      getAccountAssetsV3: async () => ({ data: assets }),
+    })
+    const res = await ex.getMarginAvailableUsd()
+    eq('status', res.status, StatusEnum.ok)
+    eq('data', res.data, 80)
+  })
+
+  it('§2.3 a non-pooled unified account never reads its assets', async () => {
+    let assetReads = 0
+    const ex = stub(Futures.coinm, {
+      getAccountSettingsV3: async () => ({
+        data: { accountMode: 'unified', assetMode: 'single' },
+      }),
+      getAccountAssetsV3: async () => {
+        assetReads++
+        return { data: assets }
+      },
+    })
+    const res = await ex.getMarginAvailableUsd()
+    eq('data', res.data, null)
+    eq('asset reads', assetReads, 0)
+  })
+
+  it('§2.4 a classic account answers null', async () => {
+    const ex = stub(Futures.coinm, {
+      getAccountSettingsV3: async () => {
+        throw bitgetError('40084', 'you are not in unified account mode')
+      },
+    })
+    const res = await ex.getMarginAvailableUsd()
+    eq('status', res.status, StatusEnum.ok)
+    eq('data', res.data, null)
+  })
+
+  it('§2.4 a spot connection answers null without asking the venue', async () => {
+    let reads = 0
+    const ex = stub(Futures.null, {
+      getAccountSettingsV3: async () => {
+        reads++
+        return { data: pooled }
+      },
+    })
+    const res = await ex.getMarginAvailableUsd()
+    eq('data', res.data, null)
+    eq('reads', reads, 0)
   })
 })

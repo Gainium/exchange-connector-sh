@@ -68,6 +68,45 @@ export const accountModeFromSettings = (
   return undefined
 }
 
+/**
+ * USD a unified account can still commit to new positions, when its wallet is
+ * pooled collateral — `null` when it is not (spec 028).
+ *
+ * In `multi_assets` mode every coin in the wallet margins every contract,
+ * inverse ones included, so a USDT-only account can open DOGEUSD: the classic
+ * rule "an inverse contract is margined in its own coin" no longer holds. The
+ * pool is the account's effective equity (collateral after haircuts) less the
+ * initial margin already required, both USD figures from
+ * `GET /api/v3/account/assets`.
+ *
+ * An `isolated` account level margins each position on its own, and any
+ * `assetMode` other than `multi_assets` is not documented as pooled: both
+ * answer `null`, so callers keep the per-coin rule — today's behaviour.
+ */
+export const utaCollateralIsPooled = (settings: unknown): boolean => {
+  const s = settings as { assetMode?: unknown; accountLevel?: unknown }
+  const lower = (v: unknown) => `${v ?? ''}`.trim().toLowerCase()
+  return (
+    accountModeFromSettings(settings) === 'uta' &&
+    lower(s?.assetMode) === 'multi_assets' &&
+    lower(s?.accountLevel) !== 'isolated'
+  )
+}
+
+export const pooledMarginFromUta = (
+  settings: unknown,
+  assets: unknown,
+): number | null => {
+  if (!utaCollateralIsPooled(settings)) {
+    return null
+  }
+  const a = assets as { effEquity?: unknown; imr?: unknown }
+  if (!Number.isFinite(parseFloat(`${a?.effEquity ?? ''}`))) {
+    return null
+  }
+  return Math.max(0, num(a.effEquity) - num(a.imr))
+}
+
 /** The refusal every classic private endpoint gives a unified account. */
 export const isUnifiedModeRefusal = (reason: unknown): boolean =>
   `${reason ?? ''}`.toLowerCase().includes('unified account mode')

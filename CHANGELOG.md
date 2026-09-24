@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.24.0] - 2026-09-24
+
+### Added
+
+- Bitget Unified Trading Accounts in multi-assets mode report their pooled margin. In that mode every coin in the wallet margins every contract, inverse ones included, so an account holding only USDT can open an inverse (coin-margined) perpetual — but the platform still expected such a contract to be funded in its own coin and refused the order before it reached the venue. The connector now answers the pooled-margin request for these accounts with the USD still available to new positions (effective equity less the initial margin already required), which lets the platform check an inverse order against the whole wallet. Single-asset and isolated-level unified accounts, classic accounts and spot are unchanged and still answer that they have no pool.
+
 ## [1.23.4] - 2026-09-24
 
 ### Fixed

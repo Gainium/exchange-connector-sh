@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.2] - 2026-09-25
+
+### Fixed
+
+- **A KuCoin order refused on every attempt is reported as a refusal, not as an unknown outcome.** Some definitive KuCoin answers, such as insufficient balance, are retried on purpose. Once those retries ran out, the error was returned with the prefix that means the connection itself failed, so callers treated a plain refusal as an order that might have been placed: they asked about it and sent it again, and kept it on record as if it could be resting. The prefix is now added only when at least one attempt failed in a way that could have reached the exchange.
+
 ## [1.26.1] - 2026-09-24
 
 ### Added

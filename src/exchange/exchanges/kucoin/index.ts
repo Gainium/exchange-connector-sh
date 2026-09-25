@@ -7,6 +7,7 @@ import type {
 import Kucoin from '@gainium/kucoin-api'
 import AbstractExchange, { Exchange } from '../../abstractExchange'
 import limitHelper, { LimitType } from './limit'
+import { exhaustedKucoinReason, noteKucoinAttempt } from './errorOutcome'
 import { normalizeOrderFee, normalizeOrderFees } from '../../helpers/orderFee'
 import {
   BaseReturn,
@@ -1338,6 +1339,8 @@ class KucoinExchange extends AbstractExchange implements Exchange {
       const tls =
         'Client network socket disconnected before secure TLS connection was established'.toLowerCase()
       const timeProfile: TimeProfile = args[args.length - 1]
+      // Spec 029: remember whether any attempt of this call could have landed.
+      noteKucoinAttempt(timeProfile, e)
       const ts =
         e.message.toLowerCase().indexOf('KC-API-TIMESTAMP'.toLowerCase()) !== -1
       // sleep 10 seconds if too many requests received
@@ -1436,8 +1439,12 @@ class KucoinExchange extends AbstractExchange implements Exchange {
           const newResult = await cb.bind(this)(...args)
           return newResult as T
         } else {
+          // Spec 029: the transport prefix only when some attempt was
+          // ambiguous — ten definitive refusals are a definitive refusal.
           return this.returnBad(timeProfile)(
-            new Error(`${this.exchangeProblems}${e.message} | ${e.code}`),
+            new Error(
+              exhaustedKucoinReason(timeProfile, e, this.exchangeProblems),
+            ),
           )
         }
       } else {

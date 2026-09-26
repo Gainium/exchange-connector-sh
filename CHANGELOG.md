@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.26.3] - 2026-09-26
+
+### Fixed
+
+- **Hyperliquid perpetuals show the balance of Unified Account and Portfolio Margin accounts.** In these account modes Hyperliquid keeps all collateral, including what backs perpetual positions, in the spot ledger, and reports the perpetuals account as empty. The perpetuals balance was read only from that perpetuals account, so a funded account showed zero and bots could not start. The connector now checks the account mode and, for these two modes, reads the perpetuals collateral (USDC and each builder dex's quote token) from the spot ledger, with amounts reserved by margin and open orders shown as locked. Standard accounts are unchanged.
+
 ## [1.26.2] - 2026-09-25
 
 ### Fixed

@@ -973,6 +973,50 @@ const hlStateHasActivity = (state: unknown): boolean => {
 }
 
 /**
+ * Hyperliquid account abstraction modes whose collateral lives in the SPOT
+ * clearinghouse. Per HL's docs: "unified account and portfolio margin show all
+ * balances and holds in the spot clearinghouse state. Individual perp dex user
+ * states are not meaningful." — so `clearinghouseState` reads accountValue=0 /
+ * withdrawable=0 for these wallets even when they hold funds, and a perps
+ * balance built from it shows an empty account.
+ */
+export const HL_SPOT_COLLATERAL_MODES = new Set([
+  'unifiedAccount',
+  'portfolioMargin',
+])
+
+/** Per-wallet `userAbstraction` cache. Users can switch mode in the HL UI, so
+ *  the entry expires; a failed lookup is not cached. */
+const HL_ABSTRACTION_TTL_MS = 5 * 60 * 1000
+const hlAbstractionCache = new Map<string, { mode: string; at: number }>()
+
+/**
+ * Perps balance for a unified / portfolio-margin wallet, from its spot
+ * clearinghouse state: one entry per perps collateral asset. `hold` is the
+ * amount HL reserves (cross margin + open orders), so free = total - hold.
+ */
+export const hlUnifiedPerpBalance = (
+  balances: Array<{ coin: string; total: string; hold: string }>,
+  collateral: Set<string>,
+  alias: (coin: string) => string,
+): FreeAsset => {
+  const totals = new Map<string, { free: number; locked: number }>()
+  for (const b of balances) {
+    const asset = alias(b.coin)
+    if (!collateral.has(asset)) continue
+    const locked = Math.max(0, +b.hold || 0)
+    const free = Math.max(0, (+b.total || 0) - locked)
+    const cur = totals.get(asset) ?? { free: 0, locked: 0 }
+    cur.free += free
+    cur.locked += locked
+    totals.set(asset, cur)
+  }
+  const res: FreeAsset = []
+  totals.forEach((v, asset) => res.push({ asset, ...v }))
+  return res
+}
+
+/**
  * Classify an HL info-endpoint error for retry decisions.
  *
  * 422 "Failed to deserialize the JSON body into the target type" is HL
@@ -1727,11 +1771,76 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     }
   }
 
+  /**
+   * This wallet's HL account abstraction mode (`unifiedAccount`,
+   * `portfolioMargin`, `default`, `dexAbstraction`, …) or `null` when the
+   * lookup fails — callers then fall back to the per-dex perps state.
+   */
+  private async getAccountAbstraction(): Promise<string | null> {
+    const cached = hlAbstractionCache.get(this._key)
+    if (cached && Date.now() - cached.at < HL_ABSTRACTION_TTL_MS) {
+      return cached.mode
+    }
+    try {
+      await this.checkLimits('userAbstraction', 20)
+      const mode = await this.infoClient.transport.request('info', {
+        type: 'userAbstraction',
+        user: this._key,
+      })
+      if (typeof mode !== 'string') return null
+      hlAbstractionCache.set(this._key, { mode, at: Date.now() })
+      return mode
+    } catch (e) {
+      Logger.warn(
+        `Hyperliquid userAbstraction failed for ${
+          typeof this._key === 'string' ? this._key.slice(0, 10) : '<unset>'
+        }…: ${(e as Error)?.message ?? e}`,
+      )
+      return null
+    }
+  }
+
+  /** Perps balance for a unified / portfolio-margin wallet (see
+   *  {@link HL_SPOT_COLLATERAL_MODES}). */
+  private async futures_getUnifiedBalance(
+    timeProfile: TimeProfile,
+  ): Promise<BaseReturn<FreeAsset>> {
+    try {
+      const assetsCache = HyperliquidAssets.getInstance()
+      await assetsCache.ensureSpotAssets()
+      // Collateral = HL native USDC + every builder dex's quote token.
+      const collateral = new Set<string>(['USDC'])
+      for (const a of await assetsCache.listFuturesAssets()) {
+        if (a.quoteAsset) collateral.add(aliasToken(a.quoteAsset))
+      }
+      timeProfile =
+        (await this.checkLimits('getSpotClearinghouseState', 2, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      const get = await this.infoClient.spotClearinghouseState({
+        user: this._key,
+      })
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      return this.returnGood<FreeAsset>(timeProfile)(
+        hlUnifiedPerpBalance(get.balances, collateral, aliasToken),
+      )
+    } catch (e) {
+      return this.handleHyperliquidErrors(
+        this.futures_getBalance,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(new HyperliquidError(e?.body?.msg ?? e.message, 0))
+    }
+  }
+
   async futures_getBalance(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<FreeAsset>> {
     if (!this.futures) {
       return this.errorFutures(timeProfile)
+    }
+    const mode = await this.getAccountAbstraction()
+    if (mode && HL_SPOT_COLLATERAL_MODES.has(mode)) {
+      return this.futures_getUnifiedBalance(timeProfile)
     }
     const res: FreeAsset = []
     try {

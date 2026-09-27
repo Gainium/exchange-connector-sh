@@ -459,6 +459,38 @@ describe('bitget UTA — conversions', () => {
     )
   })
 
+  // Spec 030 §4.1/§4.2. The venue takes order-reserved funds and position
+  // margin out of `balance`; `equity` keeps the coin's full value.
+  it('a resting ladder does not shrink the total: equity anchors it', () => {
+    eq(
+      'reserved',
+      convertUtaAssets([
+        {
+          coin: 'BTC',
+          equity: '1',
+          balance: '0.119',
+          available: '0',
+          locked: '0.785',
+        },
+      ]),
+      [{ asset: 'BTC', free: 0, locked: 1 }],
+    )
+    eq(
+      'partly reserved',
+      convertUtaAssets([
+        { coin: 'BTC', equity: '1', balance: '0.904', available: '0.8' },
+      ]),
+      [{ asset: 'BTC', free: 0.8, locked: 0.19999999999999996 }],
+    )
+    eq(
+      'no equity keeps the balance anchor',
+      convertUtaAssets([
+        { coin: 'BTC', equity: '0', balance: '0.5', available: '0.2' },
+      ]),
+      [{ asset: 'BTC', free: 0.2, locked: 0.3 }],
+    )
+  })
+
   it('Reality candles come from a UTC-aligned native interval', () => {
     eq(
       'base',

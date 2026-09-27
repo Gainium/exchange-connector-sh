@@ -546,6 +546,7 @@ export const convertUtaPosition = (
 
 export type UtaAsset = {
   coin: string
+  equity?: string
   balance?: string
   available?: string
   locked?: string
@@ -553,11 +554,16 @@ export type UtaAsset = {
 
 /**
  * One unified wallet backs spot and futures alike. `free` and `locked` must be
- * a partition of the coin's balance (consumers render `free + locked` as the
+ * a partition of the coin's total (consumers render `free + locked` as the
  * total), so `locked` is whatever the venue does not report as available —
  * order-frozen funds plus margin committed to positions — rather than the
  * order-frozen `locked` field alone, which would leave position margin in
  * `free` and count it twice.
+ *
+ * The total is `equity`, not `balance`: the venue takes order-reserved funds
+ * and position margin out of `balance`, so a resting ladder shrank the total
+ * to its unreserved part (spec 030). An entry without equity keeps the
+ * balance anchor rather than reading as an emptied account.
  */
 export const convertUtaAssets = (
   assets: UtaAsset[],
@@ -566,7 +572,10 @@ export const convertUtaAssets = (
   (assets ?? [])
     .filter((a) => !coins || coins.includes(a.coin))
     .map((a) => {
-      const balance = num(a.balance) || num(a.available) + num(a.locked)
+      const balance =
+        num(a.equity) > 0
+          ? num(a.equity)
+          : num(a.balance) || num(a.available) + num(a.locked)
       const free = Math.min(Math.max(num(a.available), 0), balance)
       return { asset: a.coin, free, locked: balance - free }
     })

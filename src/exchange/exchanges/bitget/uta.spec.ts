@@ -1433,3 +1433,32 @@ describe('bitget UTA — pooled collateral (spec 028)', () => {
     eq('reads', reads, 0)
   })
 })
+
+describe('bitget UTA — shared wallet', () => {
+  beforeEach(() => clearAccountModeCache())
+
+  it('a unified account shares one wallet across its legs', async () => {
+    const res = await stub(Futures.null, unified).getSharedWallet()
+    eq('status', res.status, StatusEnum.ok)
+    eq('shared', res.data, true)
+  })
+
+  it('a classic account keeps a wallet per product line', async () => {
+    const res = await stub(Futures.usdm, {
+      getAccountSettingsV3: async () => {
+        throw bitgetError('40084', UNIFIED_REFUSAL.replace('unified', 'x'))
+      },
+    }).getSharedWallet()
+    eq('shared', res.data, false)
+  })
+
+  it('a transport failure is undetermined, not classic', async () => {
+    const res = await stub(Futures.null, {
+      getAccountSettingsV3: async () => {
+        throw new Error('ETIMEDOUT')
+      },
+    }).getSharedWallet()
+    eq('status', res.status, StatusEnum.ok)
+    eq('shared', res.data, null)
+  })
+})

@@ -359,6 +359,20 @@ export class ExchangeService {
     ).getMarginAvailableUsd()
   }
 
+  getSharedWallet(auth: AuthData): Promise<BaseReturn<boolean | null>> {
+    return this.getExchange(
+      auth.exchange,
+      auth.key,
+      auth.secret,
+      auth.passphrase,
+      auth.keystype,
+      auth.okxsource,
+      auth.code,
+      auth.bybithost,
+      auth.subaccount,
+    ).getSharedWallet()
+  }
+
   getAccountFills(
     auth: AuthData,
     sinceMs?: number,

@@ -272,6 +272,15 @@ export class ExchangeController {
   }
 
   /**
+   * Whether the key's spot and futures legs share one wallet (unified
+   * account). `data: null` means undetermined — keep the current linking.
+   */
+  @Get('/sharedWallet')
+  async getSharedWallet(@Headers() headers: AuthData) {
+    return this.exchangeService.getSharedWallet(headers)
+  }
+
+  /**
    * Executions on the account, newest first — NOT the public tape (`/trades`).
    * Read-only, for reconciling what the venue did against what we recorded.
    * `since` (ms) pages backwards through history.

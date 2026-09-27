@@ -464,6 +464,26 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   }
 
   /**
+   * A unified trading account is one wallet behind the spot, USDT-M and
+   * COIN-M legs; classic accounts keep a separate account per product line.
+   * `accountMode` falls back to classic on a transport failure without
+   * caching it, so only a settled (cached) answer is reported — an unsettled
+   * one is `null`, never a false "classic".
+   */
+  async getSharedWallet(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<boolean | null>> {
+    if (!this.key || this.demo) {
+      return this.returnGood<boolean | null>(timeProfile)(false)
+    }
+    await this.accountMode(timeProfile)
+    const settled = getCachedAccountMode(this.key)
+    return this.returnGood<boolean | null>(timeProfile)(
+      settled ? settled === 'uta' : null,
+    )
+  }
+
+  /**
    * Pooled collateral on a unified account in `multi_assets` mode (spec 028):
    * every coin in the wallet margins every contract, so an inverse pair can be
    * opened from USDT alone. `null` for classic accounts, spot, and any unified

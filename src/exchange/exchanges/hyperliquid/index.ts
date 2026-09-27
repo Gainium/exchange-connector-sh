@@ -1800,6 +1800,18 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     }
   }
 
+  /**
+   * Unified / portfolio-margin wallets keep every balance in the spot
+   * clearinghouse, so the spot and perps legs read the same money (see
+   * {@link HL_SPOT_COLLATERAL_MODES}). `null` when the lookup failed.
+   */
+  async getSharedWallet(): Promise<BaseReturn<boolean | null>> {
+    const mode = await this.getAccountAbstraction()
+    return this.returnGood<boolean | null>(this.getEmptyTimeProfile())(
+      mode === null ? null : HL_SPOT_COLLATERAL_MODES.has(mode),
+    )
+  }
+
   /** Perps balance for a unified / portfolio-margin wallet (see
    *  {@link HL_SPOT_COLLATERAL_MODES}). */
   private async futures_getUnifiedBalance(

@@ -45,6 +45,8 @@ export interface Exchange {
 
   getMarginAvailableUsd(): Promise<BaseReturn<number | null>>
 
+  getSharedWallet(): Promise<BaseReturn<boolean | null>>
+
   getAccountFills(sinceMs?: number): Promise<BaseReturn<AccountFill[]>>
 
   openOrder(order: {
@@ -439,6 +441,21 @@ abstract class AbsctractExchange implements Exchange {
    */
   async getMarginAvailableUsd(): Promise<BaseReturn<number | null>> {
     return this.returnGood<number | null>(this.getEmptyTimeProfile(), [])(null)
+  }
+
+  /**
+   * Whether this key's spot and futures legs see ONE wallet (a unified
+   * account), so the per-leg `/balance` answers are the same money read
+   * several times. The caller links such legs and stores the wallet once;
+   * summing them is what double-counted unified accounts in the portfolio.
+   *
+   * `false` = separate wallets per product line; `null` = not determinable
+   * right now (a failed lookup) — callers must then keep whatever they had,
+   * never treat it as `false`. Venues whose unified accounts are linked by
+   * other means (Bybit, OKX) keep the default.
+   */
+  async getSharedWallet(): Promise<BaseReturn<boolean | null>> {
+    return this.returnGood<boolean | null>(this.getEmptyTimeProfile(), [])(null)
   }
 
   /**

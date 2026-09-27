@@ -550,6 +550,7 @@ export type UtaAsset = {
   balance?: string
   available?: string
   locked?: string
+  usdValue?: string
 }
 
 /**
@@ -560,22 +561,36 @@ export type UtaAsset = {
  * order-frozen `locked` field alone, which would leave position margin in
  * `free` and count it twice.
  *
- * The total is `equity`, not `balance`: the venue takes order-reserved funds
- * and position margin out of `balance`, so a resting ladder shrank the total
- * to its unreserved part (spec 030). An entry without equity keeps the
- * balance anchor rather than reading as an emptied account.
+ * The per-coin figures leave out what resting orders and positions hold:
+ * `balance` and `equity` both shrink as a ladder is placed (a live COIN-M
+ * account read balance = equity 0.00088924 BTC while the venue showed
+ * 0.007488). The account's USD `totalEquity` (`accountEquity` over REST) is
+ * the venue's own total, so its excess over the coins' `usdValue` is held
+ * funds (less the account's open P&L, which a balance leaves out, as the
+ * classic futures path does). It is credited at the coin's own price when
+ * exactly one reported coin can hold it — a COIN-M margin coin, or the USDT-M
+ * margin coin; with several candidates there is no honest split and the coin
+ * figures stand (spec 030).
  */
 export const convertUtaAssets = (
   assets: UtaAsset[],
   coins?: string[],
-): FreeAsset =>
-  (assets ?? [])
-    .filter((a) => !coins || coins.includes(a.coin))
-    .map((a) => {
-      const balance =
-        num(a.equity) > 0
-          ? num(a.equity)
-          : num(a.balance) || num(a.available) + num(a.locked)
-      const free = Math.min(Math.max(num(a.available), 0), balance)
-      return { asset: a.coin, free, locked: balance - free }
-    })
+  totalEquityUsd?: unknown,
+  unrealisedPnlUsd?: unknown,
+): FreeAsset => {
+  const all = assets ?? []
+  const kept = all.filter((a) => !coins || coins.includes(a.coin))
+  const priced = kept.filter((a) => num(a.balance) > 0 && num(a.usdValue) > 0)
+  const heldUsd =
+    num(totalEquityUsd) -
+    num(unrealisedPnlUsd) -
+    all.reduce((sum, a) => sum + num(a.usdValue), 0)
+  // `totalEquity` is rounded to cents; below that it is rounding, not funds.
+  const holder = heldUsd > 0.01 && priced.length === 1 ? priced[0] : null
+  return kept.map((a) => {
+    const held = a === holder ? (heldUsd * num(a.balance)) / num(a.usdValue) : 0
+    const balance = (num(a.balance) || num(a.available) + num(a.locked)) + held
+    const free = Math.min(Math.max(num(a.available), 0), balance)
+    return { asset: a.coin, free, locked: balance - free }
+  })
+}

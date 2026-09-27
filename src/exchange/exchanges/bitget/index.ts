@@ -458,6 +458,8 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         convertUtaAssets(
           (data?.assets ?? []) as UtaAsset[],
           this.futures && !this.coinm ? ['USDT', 'USDC'] : undefined,
+          data?.accountEquity ?? data?.totalEquity,
+          data?.unrealisedPnl ?? data?.unrealisedPnL,
         ),
       timeProfile,
     )

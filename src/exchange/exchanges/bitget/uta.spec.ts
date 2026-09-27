@@ -459,35 +459,89 @@ describe('bitget UTA — conversions', () => {
     )
   })
 
-  // Spec 030 §4.1/§4.2. The venue takes order-reserved funds and position
-  // margin out of `balance`; `equity` keeps the coin's full value.
-  it('a resting ladder does not shrink the total: equity anchors it', () => {
+  // Spec 030. Figures from a live COIN-M account with a resting DCA ladder:
+  // balance and equity both shrank to the unreserved part; the account's USD
+  // totalEquity is the venue's own total (Est. value 0.007488 BTC).
+  it('a resting ladder does not shrink the total: totalEquity carries it', () => {
+    const ladder = {
+      coin: 'BTC',
+      balance: '0.00088924',
+      equity: '0.00088924',
+      locked: '0.00587569',
+      available: '-0.00498646',
+      usdValue: '75.3740391',
+    }
+    const [btc] = convertUtaAssets([ladder], undefined, '634.73')
+    eq('free', btc.free, 0)
+    eq('total', +(btc.free + btc.locked).toFixed(7), 0.0074884)
+    eq('no account total keeps the coin figures', convertUtaAssets([ladder]), [
+      { asset: 'BTC', free: 0, locked: 0.00088924 },
+    ])
     eq(
-      'reserved',
-      convertUtaAssets([
-        {
-          coin: 'BTC',
-          equity: '1',
-          balance: '0.119',
-          available: '0',
-          locked: '0.785',
-        },
-      ]),
-      [{ asset: 'BTC', free: 0, locked: 1 }],
+      'cent rounding is not held funds',
+      convertUtaAssets(
+        [
+          {
+            coin: 'USDT',
+            balance: '0.98',
+            available: '0.98',
+            usdValue: '0.97976181',
+          },
+        ],
+        ['USDT', 'USDC'],
+        '0.97',
+      ),
+      [{ asset: 'USDT', free: 0.98, locked: 0 }],
+    )
+  })
+
+  it('open P&L stays out of the total, as on the classic futures path', () => {
+    const [btc] = convertUtaAssets(
+      [{ coin: 'BTC', balance: '0.001', available: '0', usdValue: '100' }],
+      undefined,
+      '350',
+      '50',
+    )
+    eq('total', +(btc.free + btc.locked).toFixed(8), 0.003)
+  })
+
+  it('held funds are not split between several coins', () => {
+    eq(
+      'two candidates',
+      convertUtaAssets(
+        [
+          {
+            coin: 'BTC',
+            balance: '0.001',
+            available: '0.001',
+            usdValue: '100',
+          },
+          { coin: 'ETH', balance: '0.1', available: '0.1', usdValue: '300' },
+        ],
+        undefined,
+        '1000',
+      ),
+      [
+        { asset: 'BTC', free: 0.001, locked: 0 },
+        { asset: 'ETH', free: 0.1, locked: 0 },
+      ],
     )
     eq(
-      'partly reserved',
-      convertUtaAssets([
-        { coin: 'BTC', equity: '1', balance: '0.904', available: '0.8' },
-      ]),
-      [{ asset: 'BTC', free: 0.8, locked: 0.19999999999999996 }],
-    )
-    eq(
-      'no equity keeps the balance anchor',
-      convertUtaAssets([
-        { coin: 'BTC', equity: '0', balance: '0.5', available: '0.2' },
-      ]),
-      [{ asset: 'BTC', free: 0.2, locked: 0.3 }],
+      'USDT-M: the one margin coin holds it, spot coins still count toward the excess',
+      convertUtaAssets(
+        [
+          { coin: 'USDT', balance: '100', available: '100', usdValue: '100' },
+          {
+            coin: 'BTC',
+            balance: '0.001',
+            available: '0.001',
+            usdValue: '100',
+          },
+        ],
+        ['USDT', 'USDC'],
+        '500',
+      ),
+      [{ asset: 'USDT', free: 100, locked: 300 }],
     )
   })
 

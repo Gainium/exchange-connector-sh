@@ -1934,6 +1934,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 'Failed to create order, no order events returned',
             )
           }
+          this.logBrokerTagged('futures', krakenSymbol, [
+            (result.sendStatus as { order_id?: string }).order_id ||
+              newClientOrderId ||
+              '',
+          ])
           // Kraken states what this order actually executed at, right here, in
           // the submit response — and this used to be thrown away in favour of
           // a re-fetch whose only price source is `getOrderStatus` (limit price
@@ -2008,6 +2013,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
 
         const orderIds = result.result.txid || []
+        this.logBrokerTagged('spot', symbol, orderIds)
 
         await sleep(500)
         // Re-fetch by the Kraken txid via QueryOrders. This stays the primary
@@ -2702,6 +2708,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         throw new Error(result.error?.join(', ') || 'Failed to create orders')
       }
       replies = result.result.orders ?? []
+      this.logBrokerTagged(
+        'spotBatch',
+        symbol,
+        replies.map((r) => r.txid ?? ''),
+      )
     } catch (error) {
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       this.noteKrakenRateLimit(error)
@@ -2845,6 +2856,23 @@ class KrakenExchange extends AbstractExchange implements Exchange {
    */
   private brokerParams(): { broker?: string } {
     return this.broker ? { broker: this.broker } : {}
+  }
+
+  /**
+   * One line per order Kraken accepted with `broker` set — the evidence that
+   * a given txid / order_id was submitted under the API Partner ID.
+   */
+  private logBrokerTagged(
+    path: 'spot' | 'spotBatch' | 'futures',
+    symbol: string,
+    orderIds: string[],
+  ) {
+    if (!this.broker) {
+      return
+    }
+    Logger.log(
+      `Kraken broker | ${path} | ${symbol} | ${orderIds.filter(Boolean).join(',')} | ${this.broker}`,
+    )
   }
 
   /**

@@ -555,6 +555,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   protected futures?: Futures
   /** Symbol mapper for converting between our format and Kraken's format */
   private symbolMapper: KrakenSymbolMapper
+  /**
+   * Kraken API Partner ID (IIBAN), sent as `broker` on order placement. Kraken
+   * only accepts the exact IIBAN, spaces included (`AAAA BBBB CCCC DDDD`).
+   */
+  protected broker?: string
 
   constructor(
     futures: Futures,
@@ -564,11 +569,17 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     _environment?: string,
     _keysType?: unknown,
     _okxSource?: string,
-    _code?: string,
+    code?: string,
     _bybitHost?: unknown,
     _subaccount?: boolean,
   ) {
     super({ key, secret })
+
+    const broker = code?.trim().replace(/\s+/g, ' ').toUpperCase()
+    this.broker =
+      broker && /^[A-Z0-9]{4}( [A-Z0-9]{4}){3}$/.test(broker)
+        ? broker
+        : undefined
 
     const isDemo = process.env.KRAKEN_ENV === 'demo'
 
@@ -1905,6 +1916,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         limitPrice: type === 'LIMIT' ? price : undefined,
         cliOrdId: newClientOrderId,
         reduceOnly,
+        ...this.brokerParams(),
       }
 
       return this.derivativesClient
@@ -1986,6 +1998,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           ? this.krakenClOrdId(newClientOrderId)
           : undefined,
         ...this.xstockParams(symbol),
+        ...this.brokerParams(),
       })
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -2682,6 +2695,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           cl_ord_id: this.krakenClOrdId(order.newClientOrderId),
         })),
         ...this.xstockParams(symbol),
+        ...this.brokerParams(),
       })
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       if (!result.result || result.error?.length) {
@@ -2822,6 +2836,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     return this.symbolMapper.isTokenized(ourSymbol)
       ? { asset_class: 'tokenized_asset' }
       : {}
+  }
+
+  /**
+   * API Partner tag for order placement (spot `AddOrder` / `AddOrderBatch`,
+   * futures `sendorder`). Omitted when the caller sent no valid code, so an
+   * order is never refused over attribution.
+   */
+  private brokerParams(): { broker?: string } {
+    return this.broker ? { broker: this.broker } : {}
   }
 
   /**

@@ -174,11 +174,25 @@ class OKXExchange extends AbstractExchange implements Exchange {
    * OKX Europe X-Perp (instType=FUTURES, ruleType=xperp) instFamily -> live instId
    * map, e.g. `BTC-USD_UM_XPERP` -> `BTC-USD_UM_XPERP-310404`. Populated from the
    * instruments feed; the expiry suffix rolls rarely so we cache it (1h).
+   *
+   * Process-wide, not per instance: the service builds a fresh exchange for
+   * every request, so an instance map was empty on every order and every
+   * order re-downloaded the whole FUTURES instrument list. When that public
+   * call failed (a burst of bot orders trips its rate limit) the failure was
+   * swallowed, `updateSymbol` handed OKX the bare instFamily and the order was
+   * rejected with 51001 ("Instrument ID ... doesn't exist"). The instFamily ->
+   * instId mapping is the same on every OKX host, so one copy serves all.
    */
-  private xperpMap = new Map<string, string>()
-  private xperpMapLoaded = 0
-  /** Last refresh triggered by a cache MISS (see {@link ensureXperpMap}). */
-  private xperpMapMissLoaded = 0
+  private static xperpMap = new Map<string, string>()
+  private static xperpMapLoaded = 0
+  /**
+   * Last refresh triggered by a cache MISS, per instFamily (see
+   * {@link ensureXperpMap}). Per pair because the map is shared: one pair OKX
+   * does not serve must not hold back the refresh another pair needs.
+   */
+  private static xperpMapMissLoaded = new Map<string, number>()
+  /** In-flight instruments refresh, shared so a burst of orders asks once. */
+  private static xperpMapLoading?: Promise<void>
 
   /**
    * In-flight de-duplication for `GET /api/v5/account/config`.
@@ -816,11 +830,11 @@ class OKXExchange extends AbstractExchange implements Exchange {
   ) {
     for (const s of res) {
       if (s.ruleType === 'xperp' && s.state === 'live') {
-        this.xperpMap.set(s.instFamily, s.instId)
+        OKXExchange.xperpMap.set(s.instFamily, s.instId)
       }
     }
-    if (this.xperpMap.size) {
-      this.xperpMapLoaded = +new Date()
+    if (OKXExchange.xperpMap.size) {
+      OKXExchange.xperpMapLoaded = +new Date()
     }
   }
 
@@ -836,7 +850,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       return
     }
     const now = +new Date()
-    const fresh = now - this.xperpMapLoaded < 60 * 60 * 1000
+    const fresh = now - OKXExchange.xperpMapLoaded < 60 * 60 * 1000
     // A map that is fresh but does NOT hold the instFamily we are about to
     // translate is worthless for this call: `updateSymbol` falls through to
     // `?? s` and hands OKX the bare instFamily, which it rejects with 51001
@@ -845,19 +859,32 @@ class OKXExchange extends AbstractExchange implements Exchange {
     // run until the 1h cache happens to expire. Refresh on the miss instead —
     // rate-limited, so an instrument OKX genuinely does not serve cannot turn
     // every call into an instruments fetch.
-    const missing =
-      !!symbolHint && !this.xperpMap.has(this.clearSymbol(symbolHint))
-    const missRetryable = now - this.xperpMapMissLoaded >= XPERP_MISS_RETRY_MS
-    if (this.xperpMap.size && fresh && !force && !(missing && missRetryable)) {
+    const family = symbolHint ? this.clearSymbol(symbolHint) : ''
+    const missing = !!family && !OKXExchange.xperpMap.has(family)
+    const missRetryable =
+      now - (OKXExchange.xperpMapMissLoaded.get(family) ?? 0) >=
+      XPERP_MISS_RETRY_MS
+    const usable = OKXExchange.xperpMap.size > 0 && fresh && !force
+    if (usable && !(missing && missRetryable)) {
       return
     }
-    if (missing) {
-      this.xperpMapMissLoaded = now
+    if (usable && missing) {
+      OKXExchange.xperpMapMissLoaded.set(family, now)
     }
-    const res = await this.client
-      .getInstruments({ instType: 'FUTURES' })
-      .catch(() => [] as Awaited<ReturnType<OKXRestClient['getInstruments']>>)
-    this.setXperpMap(res)
+    if (!OKXExchange.xperpMapLoading) {
+      OKXExchange.xperpMapLoading = this.client
+        .getInstruments({ instType: 'FUTURES' })
+        .then((res) => this.setXperpMap(res))
+        .catch((e: Error & { msg?: string; code?: string }) => {
+          Logger.warn(
+            `OKX X-Perp instrument refresh failed: ${e?.message ?? e?.msg ?? e} (${e?.code ?? ''})`,
+          )
+        })
+        .finally(() => {
+          OKXExchange.xperpMapLoading = undefined
+        })
+    }
+    await OKXExchange.xperpMapLoading
   }
 
   private getCategory() {
@@ -881,7 +908,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('cancelOrder', 3000, 25, timeProfile)) ||
       timeProfile
-    await this.ensureXperpMap()
+    await this.ensureXperpMap(false, order.symbol)
     const { newClientOrderId, symbol: _symbol } = order
     const symbol = this.updateSymbol(_symbol)
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
@@ -943,7 +970,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
     timeProfile =
       (await this.checkLimits('cancelOrder', 3000, 25, timeProfile)) ||
       timeProfile
-    await this.ensureXperpMap()
+    await this.ensureXperpMap(false, order.symbol)
     const { orderId, symbol } = order
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
     return this.client
@@ -1387,7 +1414,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       (await this.checkLimits('getOrderDetails', 3000, 25, timeProfile)) ||
       timeProfile
 
-    await this.ensureXperpMap()
+    await this.ensureXperpMap(false, data.symbol)
     const { newClientOrderId, symbol: _symbol } = data
     const symbol = this.updateSymbol(_symbol)
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
@@ -1452,7 +1479,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
   private updateSymbol(s: string) {
     if (this.isEuPerp || this.isXperpPair(s)) {
       // gainium pair == instFamily (BTC-USD_UM_XPERP) -> live instId with expiry
-      return this.xperpMap.get(s) ?? s
+      return OKXExchange.xperpMap.get(s) ?? s
     }
     return `${s}${this.futures ? '-SWAP' : ''}`
   }
@@ -1504,7 +1531,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       positionSide,
       marginType,
     } = order
-    await this.ensureXperpMap()
+    await this.ensureXperpMap(false, _symbol)
     const symbol = this.updateSymbol(_symbol)
     const spotTdMode = this.futures ? undefined : await this.spotTdMode()
     const request: OrderRequest = {
@@ -2050,6 +2077,19 @@ class OKXExchange extends AbstractExchange implements Exchange {
         }
       } else {
         const message = e.message
+        const symbol = (args[0] as { symbol?: unknown } | undefined)?.symbol
+        if (`${e.code}` === '51001' && typeof symbol === 'string') {
+          // Name the instId we actually sent, so a recurrence says whether we
+          // built it wrong or OKX does not serve it. A stale X-Perp entry (its
+          // expiry tag rolled) is dropped so the next call refetches.
+          const instId = this.updateSymbol(symbol)
+          Logger.warn(
+            `OKX 51001 on ${cb.name} for ${symbol}: sent instId ${instId}, X-Perp map ${OKXExchange.xperpMap.size} rows`,
+          )
+          if (this.isXperpPair(symbol)) {
+            OKXExchange.xperpMapLoaded = 0
+          }
+        }
         return this.returnBad(timeProfile)(new Error(message))
       }
     }

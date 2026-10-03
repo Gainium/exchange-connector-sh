@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.3] - 2026-10-03
+
+### Fixed
+
+- **OKX X-Perp orders were sometimes rejected as "Instrument ID ... doesn't exist".** A bot's order on an OKX Europe X-Perp (stock, commodity and crypto `*-USD_UM_XPERP` pairs) must carry the instrument's live ID with its expiry tag. The connector looked that ID up from OKX's public instrument list, held per request, so every order, cancel and order lookup downloaded the whole list again. When that call failed (several bots placing orders at the same moment can trip its rate limit) the failure was ignored and the order went out under the bare pair name, which OKX rejects. The list is now cached once per process and refreshed by a single shared request. Order, cancel and lookup also name the pair they need, so a pair missing from the cache is refetched, and accounts not on OKX Europe resolve X-Perp pairs as well. When OKX does return this error, the ID that was sent is logged and the cache is refreshed on the next call.
+
 ## [1.27.2] - 2026-10-01
 
 ### Added

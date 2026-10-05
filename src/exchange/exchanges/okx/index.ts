@@ -1911,11 +1911,9 @@ class OKXExchange extends AbstractExchange implements Exchange {
     const price = +(order.avgPx ?? order.px) || +order.px
     // OKX states the fee it charged on the order itself: `fee` with `feeCcy`
     // naming the currency. It is reported NEGATIVE for a charge and positive
-    // for a rebate (OKX's sign convention is "effect on the balance"), which
-    // `normalizeOrderFee` turns into the magnitude of the cost. `rebate` is a
-    // separate field and deliberately not netted off here — a rebate is a
-    // credit, not a smaller fee, and the deal's cost basis is the fee.
-    const fee = normalizeOrderFee(order.fee, order.feeCcy)
+    // for a rebate (OKX's sign convention is "effect on the balance"), so a
+    // positive `fee` is a maker rebate and is not reported as a cost.
+    const fee = normalizeOrderFee(order.fee, order.feeCcy, 'charge-negative')
     return {
       ...fee,
       symbol: this.clearSymbol(order.instId),

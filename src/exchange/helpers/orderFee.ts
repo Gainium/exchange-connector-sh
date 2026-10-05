@@ -15,10 +15,12 @@
  * 1. **A fee we cannot observe is omitted, never reported as 0.** Callers keep
  *    their existing estimate when the field is absent; a `0` would tell them
  *    the order was free. This is the single most important property here.
- * 2. **Magnitude, not sign.** OKX, Bitget and Hyperliquid report a fee as a
- *    NEGATIVE number (money leaving the account) and a rebate as a positive
- *    one. `feePaid` is defined as the cost, so it is always the magnitude of a
- *    charge; a net rebate is not a fee and is omitted.
+ * 2. **Net cost, by the venue's own sign.** OKX and Bitget report a charge as
+ *    a NEGATIVE number (money leaving the account) and a rebate as a positive
+ *    one. Hyperliquid, Binance, Bybit, KuCoin and Coinbase do the opposite: a
+ *    charge is positive and a maker rebate negative. Each caller states which
+ *    (`FeeSign`). `feePaid` is the cost, so a rebate on the same order lowers
+ *    it, and a currency that nets to a rebate is not a fee and is omitted.
  * 3. **The currency is stated, never assumed.** Where the venue names the
  *    currency we pass its ticker through as `feeAsset`. Where the venue names
  *    a side of the pair instead (Kraken's `oflags`), the mapper sets `feeSide`.
@@ -34,43 +36,57 @@ export type OrderFeeFields = {
   feeBreakdown?: { asset: string; amount: string }[]
 }
 
+/**
+ * Which way round the venue writes a charge. There is no default: getting it
+ * wrong turns every rebate into a fee, so each mapper has to say.
+ */
+export type FeeSign = 'charge-positive' | 'charge-negative'
+
 /** One raw fee line as a venue reported it, before any normalisation. */
 export type RawFeeEntry = {
-  /** The venue's own number. May be negative (a charge on OKX/Bitget/HL). */
+  /** The venue's own number, signed by the venue's convention (`FeeSign`). */
   amount: string | number | undefined | null
   /** The venue's own currency ticker, when it names one. */
   asset: string | undefined | null
 }
 
 /**
- * True when the venue's number is a usable charge.
+ * The venue's number as a signed cost: positive for a charge, negative for a
+ * rebate. `undefined` when there is nothing usable.
  *
  * Zero is excluded on purpose. A venue that has not settled the fee yet
  * reports `0`, and that is indistinguishable from a genuinely free fill; the
  * safe reading of an ambiguous 0 is "not observed", which leaves the caller's
  * estimate in force.
  */
-function chargeMagnitude(amount: RawFeeEntry['amount']): number | undefined {
+function signedCost(
+  amount: RawFeeEntry['amount'],
+  sign: FeeSign,
+): number | undefined {
   const n = Number(amount)
   if (!Number.isFinite(n) || n === 0) {
     return undefined
   }
-  return Math.abs(n)
+  return sign === 'charge-negative' ? -n : n
 }
 
 /**
  * Collapse a venue's fee lines into the `CommonOrder` fee fields.
  *
- * Lines in the same currency are summed (a partially filled order settles fee
- * per trade). Lines in different currencies are kept apart — they cannot be
+ * Lines in the same currency are netted (a partially filled order settles fee
+ * per trade, and one order can carry both a taker fee and a maker rebate). A
+ * currency that nets to zero or less is dropped. Lines in different currencies are kept apart — they cannot be
  * added, and converting them here would mean inventing an FX rate, which is
  * exactly the kind of assumption this whole change exists to remove.
  */
-export function normalizeOrderFees(entries: RawFeeEntry[]): OrderFeeFields {
+export function normalizeOrderFees(
+  entries: RawFeeEntry[],
+  sign: FeeSign,
+): OrderFeeFields {
   const byAsset = new Map<string, number>()
   for (const entry of entries ?? []) {
-    const magnitude = chargeMagnitude(entry?.amount)
-    if (magnitude === undefined) {
+    const cost = signedCost(entry?.amount, sign)
+    if (cost === undefined) {
       continue
     }
     const asset = `${entry?.asset ?? ''}`.trim().toUpperCase()
@@ -80,9 +96,9 @@ export function normalizeOrderFees(entries: RawFeeEntry[]): OrderFeeFields {
       // by setting `feeSide` themselves.
       continue
     }
-    byAsset.set(asset, (byAsset.get(asset) ?? 0) + magnitude)
+    byAsset.set(asset, (byAsset.get(asset) ?? 0) + cost)
   }
-  const assets = [...byAsset.entries()]
+  const assets = [...byAsset.entries()].filter(([, amount]) => amount > 0)
   if (assets.length === 0) {
     return {}
   }
@@ -106,8 +122,9 @@ export function normalizeOrderFees(entries: RawFeeEntry[]): OrderFeeFields {
 export function normalizeOrderFee(
   amount: RawFeeEntry['amount'],
   asset: RawFeeEntry['asset'],
+  sign: FeeSign,
 ): OrderFeeFields {
-  return normalizeOrderFees([{ amount, asset }])
+  return normalizeOrderFees([{ amount, asset }], sign)
 }
 
 /**
@@ -121,10 +138,11 @@ export function normalizeOrderFee(
 export function normalizeSidedOrderFee(
   amount: RawFeeEntry['amount'],
   feeSide: 'base' | 'quote',
+  sign: FeeSign,
 ): { feePaid?: string; feeSide?: 'base' | 'quote' } {
-  const magnitude = chargeMagnitude(amount)
-  if (magnitude === undefined) {
+  const cost = signedCost(amount, sign)
+  if (cost === undefined || cost <= 0) {
     return {}
   }
-  return { feePaid: `${magnitude}`, feeSide }
+  return { feePaid: `${cost}`, feeSide }
 }

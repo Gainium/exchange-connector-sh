@@ -464,6 +464,7 @@ export const convertUtaOrder = (
         amount: f?.fee,
         asset: `${f?.feeCoin ?? ''}`,
       })),
+      'charge-negative',
     ),
     symbol: inverse ? platformCoinmSymbol(order.symbol) : order.symbol,
     orderId: order.orderId,

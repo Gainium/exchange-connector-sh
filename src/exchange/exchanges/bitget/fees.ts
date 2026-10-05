@@ -48,6 +48,7 @@ export function bitgetSpotFeeDetail(feeDetail: unknown): OrderFeeFields {
   }
   return normalizeOrderFees(
     entries.map((e) => ({ amount: e.amount as string, asset: e.asset })),
+    'charge-negative',
   )
 }
 

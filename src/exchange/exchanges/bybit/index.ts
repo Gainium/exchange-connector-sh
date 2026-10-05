@@ -1940,6 +1940,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
     if (detail && typeof detail === 'object') {
       const fromDetail = normalizeOrderFees(
         Object.entries(detail).map(([asset, amount]) => ({ amount, asset })),
+        'charge-positive',
       )
       if (fromDetail.feePaid || fromDetail.feeBreakdown) {
         return fromDetail
@@ -1952,7 +1953,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
       : order.side === 'Buy'
         ? 'base'
         : 'quote'
-    return normalizeSidedOrderFee(order.cumExecFee, feeSide)
+    return normalizeSidedOrderFee(order.cumExecFee, feeSide, 'charge-positive')
   }
 
   private async convertPosition(position: PositionV5): Promise<PositionInfo> {

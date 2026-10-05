@@ -1072,7 +1072,7 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
     // QUOTE currency, so the side is stated directly rather than recovered by
     // splitting `product_id`.
     return {
-      ...normalizeSidedOrderFee(order.total_fees, 'quote'),
+      ...normalizeSidedOrderFee(order.total_fees, 'quote', 'charge-positive'),
       symbol: order.product_id,
       orderId: order.order_id,
       clientOrderId: order.client_order_id,

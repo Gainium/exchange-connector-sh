@@ -144,6 +144,11 @@ describe('venue-fee-capture', () => {
       async () => fee(await okx.convertOrder(okxOrder({ fee: '0' }))),
       {},
     )
+    expectFee(
+      'okx positive fee is a rebate, not a charge',
+      async () => fee(await okx.convertOrder(okxOrder({ fee: '0.02' }))),
+      {},
+    )
   })
 
   describe('KuCoin', () => {

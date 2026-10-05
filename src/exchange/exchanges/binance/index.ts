@@ -3330,6 +3330,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       'fills' in order && Array.isArray(order.fills) ? order.fills : []
     const fee = normalizeOrderFees(
       fills.map((f) => ({ amount: f.commission, asset: f.commissionAsset })),
+      'charge-positive',
     )
     return {
       ...fee,

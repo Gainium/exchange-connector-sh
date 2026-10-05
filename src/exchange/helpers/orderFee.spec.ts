@@ -37,24 +37,73 @@ function expect(label: string, actual: unknown, want: unknown) {
 
 describe('orderFee', () => {
   // 1) The happy path: one fee, one currency, ticker passed through upper-cased.
-  expect('single fee', normalizeOrderFee('0.42', 'USDT'), {
+  expect('single fee', normalizeOrderFee('0.42', 'USDT', 'charge-positive'), {
     feePaid: '0.42',
     feeAsset: 'USDT',
   })
-  expect('lower-case ticker is normalised', normalizeOrderFee('1', 'usdt'), {
-    feePaid: '1',
-    feeAsset: 'USDT',
-  })
-
-  // 2) Sign. OKX, Bitget and Hyperliquid report a CHARGE as negative (effect on
-  //    the balance). `feePaid` is the cost, so it is always the magnitude.
   expect(
-    'negative charge becomes magnitude',
-    normalizeOrderFee(-0.113, 'USDT'),
+    'lower-case ticker is normalised',
+    normalizeOrderFee('1', 'usdt', 'charge-positive'),
+    {
+      feePaid: '1',
+      feeAsset: 'USDT',
+    },
+  )
+
+  // 2) Sign. Each venue states its own convention. OKX and Bitget report a
+  //    CHARGE as negative (effect on the balance) and a rebate as positive;
+  //    Hyperliquid, Binance, Bybit, KuCoin and Coinbase report a charge as
+  //    positive and a rebate as negative. `feePaid` is the net cost, so a
+  //    rebate lowers it and a net rebate is not a fee at all.
+  expect(
+    'negative charge becomes the cost',
+    normalizeOrderFee(-0.113, 'USDT', 'charge-negative'),
     {
       feePaid: '0.113',
       feeAsset: 'USDT',
     },
+  )
+  expect(
+    'okx positive rebate is not a fee',
+    normalizeOrderFee('0.02', 'USDT', 'charge-negative'),
+    {},
+  )
+  // Hyperliquid fills: `fee` positive for a charge, negative for a maker rebate
+  // (taker fills always positive, maker fills on a rebate tier negative).
+  const hlFills = (fees: string[]) =>
+    normalizeOrderFees(
+      fees.map((amount) => ({ amount, asset: 'USDC' })),
+      'charge-positive',
+    )
+  expect('hyperliquid fee only', hlFills(['0.1']), {
+    feePaid: '0.1',
+    feeAsset: 'USDC',
+  })
+  expect('hyperliquid rebate only is not a fee', hlFills(['-0.017784']), {})
+  expect(
+    'hyperliquid fee and rebate on one order net off',
+    hlFills(['0.1', '-0.04']),
+    {
+      feePaid: `${0.1 - 0.04}`,
+      feeAsset: 'USDC',
+    },
+  )
+  expect(
+    'hyperliquid fills netting to a rebate are not a fee',
+    hlFills(['0.01', '-0.04']),
+    {},
+  )
+  expect(
+    'a currency that nets to a rebate is dropped from a breakdown',
+    normalizeOrderFees(
+      [
+        { amount: '-0.05', asset: 'USDT' },
+        { amount: '0.002', asset: 'BNB' },
+        { amount: '0.01', asset: 'USDT' },
+      ],
+      'charge-positive',
+    ),
+    { feePaid: '0.002', feeAsset: 'BNB' },
   )
 
   // 3) Nothing observable → nothing emitted. Never `{ feePaid: '0' }`.
@@ -66,15 +115,26 @@ describe('orderFee', () => {
     ['null', null],
     ['NaN', 'not-a-number'],
   ] as [string, any][]) {
-    expect(`no fee emitted for ${label}`, normalizeOrderFee(amount, 'USDT'), {})
+    expect(
+      `no fee emitted for ${label}`,
+      normalizeOrderFee(amount, 'USDT', 'charge-positive'),
+      {},
+    )
   }
-  expect('no fee emitted without a currency', normalizeOrderFee('0.5', ''), {})
+  expect(
+    'no fee emitted without a currency',
+    normalizeOrderFee('0.5', '', 'charge-positive'),
+    {},
+  )
   expect(
     'no fee emitted for an all-empty list',
-    normalizeOrderFees([
-      { amount: '0', asset: 'USDT' },
-      { amount: null, asset: null },
-    ]),
+    normalizeOrderFees(
+      [
+        { amount: '0', asset: 'USDT' },
+        { amount: null, asset: null },
+      ],
+      'charge-positive',
+    ),
     {},
   )
 
@@ -82,20 +142,26 @@ describe('orderFee', () => {
   //    settles its fee per trade.
   expect(
     'same-currency lines are summed',
-    normalizeOrderFees([
-      { amount: '0.1', asset: 'USDT' },
-      { amount: '0.2', asset: 'USDT' },
-    ]),
+    normalizeOrderFees(
+      [
+        { amount: '0.1', asset: 'USDT' },
+        { amount: '0.2', asset: 'USDT' },
+      ],
+      'charge-positive',
+    ),
     { feePaid: '0.30000000000000004', feeAsset: 'USDT' },
   )
 
   // 5) Lines in DIFFERENT currencies are never added. `feePaid` is deliberately
   //    left unset so a consumer reading only `feePaid` cannot take one leg for
   //    the whole cost.
-  const mixed = normalizeOrderFees([
-    { amount: '0.1', asset: 'USDT' },
-    { amount: '0.002', asset: 'BNB' },
-  ])
+  const mixed = normalizeOrderFees(
+    [
+      { amount: '0.1', asset: 'USDT' },
+      { amount: '0.002', asset: 'BNB' },
+    ],
+    'charge-positive',
+  )
   expect('mixed currencies produce a breakdown', mixed, {
     feeBreakdown: [
       { asset: 'USDT', amount: '0.1' },
@@ -105,18 +171,31 @@ describe('orderFee', () => {
   expect('mixed currencies leave feePaid unset', mixed.feePaid, undefined)
 
   // 6) The sided form, for venues that name a side rather than a ticker.
-  expect('sided fee', normalizeSidedOrderFee('0.01', 'quote'), {
-    feePaid: '0.01',
-    feeSide: 'quote',
-  })
-  expect('sided fee omits a zero', normalizeSidedOrderFee('0', 'quote'), {})
   expect(
-    'sided fee takes the magnitude',
-    normalizeSidedOrderFee('-2', 'base'),
+    'sided fee',
+    normalizeSidedOrderFee('0.01', 'quote', 'charge-positive'),
+    {
+      feePaid: '0.01',
+      feeSide: 'quote',
+    },
+  )
+  expect(
+    'sided fee omits a zero',
+    normalizeSidedOrderFee('0', 'quote', 'charge-positive'),
+    {},
+  )
+  expect(
+    'sided charge-negative fee becomes the cost',
+    normalizeSidedOrderFee('-2', 'base', 'charge-negative'),
     {
       feePaid: '2',
       feeSide: 'base',
     },
+  )
+  expect(
+    'sided rebate is not a fee',
+    normalizeSidedOrderFee('-2', 'base', 'charge-positive'),
+    {},
   )
 
   // 7) Bitget spot `feeDetail`. Sent as a JSON STRING on the wire; mixes a

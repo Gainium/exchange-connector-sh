@@ -1523,8 +1523,9 @@ class KucoinExchange extends AbstractExchange implements Exchange {
     const fee = fills.length
       ? normalizeOrderFees(
           fills.map((f) => ({ amount: f.fee, asset: f.feeCurrency })),
+          'charge-positive',
         )
-      : normalizeOrderFee(order.fee, order.feeCurrency)
+      : normalizeOrderFee(order.fee, order.feeCurrency, 'charge-positive')
     return {
       ...fee,
       symbol: this.convertSymbol(order.symbol),

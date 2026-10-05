@@ -3399,8 +3399,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         symbol: order.symbol,
         limit: '1',
       })
-      const opposite =
-        order.side === 'BUY' ? book?.data?.a : book?.data?.b
+      const opposite = order.side === 'BUY' ? book?.data?.a : book?.data?.b
       if (
         book?.code === '00000' &&
         Array.isArray(opposite) &&
@@ -4019,9 +4018,9 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     // it is settled in `marginCoin` — the same coin the position is margined
     // in, which the payload names, so no rule has to be inferred from the
     // symbol. Bitget's sign convention is "effect on the balance", i.e. a
-    // charge arrives negative; `normalizeOrderFee` takes the magnitude.
+    // charge arrives negative and a rebate positive.
     return {
-      ...normalizeOrderFee(order.fee, order.marginCoin),
+      ...normalizeOrderFee(order.fee, order.marginCoin, 'charge-negative'),
       symbol: order.symbol,
       orderId: order.orderId,
       clientOrderId: order.clientOid,

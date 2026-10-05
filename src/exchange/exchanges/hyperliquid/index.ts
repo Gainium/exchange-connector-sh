@@ -2268,6 +2268,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
                   amount: f.fee,
                   asset: aliasToken(f.feeToken),
                 })),
+                'charge-positive',
               )
             }
             timeProfile = this.endProfilerTime(timeProfile, 'exchange')

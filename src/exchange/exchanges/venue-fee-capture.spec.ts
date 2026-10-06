@@ -23,6 +23,7 @@ import BybitExchange from './bybit'
 import OkxExchange from './okx'
 import KucoinExchange from './kucoin'
 import BitgetExchange from './bitget'
+import { convertUtaOrder } from './bitget/uta'
 import CoinbaseExchange from './coinbase'
 import BinanceExchange from './binance'
 
@@ -245,6 +246,40 @@ describe('venue-fee-capture', () => {
           }),
         ),
       { feePaid: '0.113', feeAsset: 'USDT' },
+    )
+  })
+
+  describe('Bitget UTA', () => {
+    // v3 `feeDetail[].fee` is positive for a charge — the opposite of classic.
+    const utaOrder = (feeDetail: unknown) =>
+      fee(
+        convertUtaOrder({
+          category: 'spot',
+          symbol: 'ETHUSDT',
+          orderId: '1',
+          clientOid: 'D-1',
+          orderStatus: 'filled',
+          orderType: 'limit',
+          side: 'buy',
+          price: '2000',
+          avgPrice: '2000',
+          qty: '0.01',
+          cumExecQty: '0.01',
+          cumExecValue: '20',
+          createdTime: '1',
+          updatedTime: '2',
+          feeDetail,
+        } as any),
+      )
+    expectFee(
+      'bitget uta reads the documented positive feeDetail as a charge',
+      () => utaOrder([{ feeCoin: 'ETH', fee: '0.00000744' }]),
+      { feePaid: '0.00000744', feeAsset: 'ETH' },
+    )
+    expectFee(
+      'bitget uta treats a negative feeDetail line as a rebate',
+      () => utaOrder([{ feeCoin: 'USDT', fee: '-0.004' }]),
+      {},
     )
   })
 

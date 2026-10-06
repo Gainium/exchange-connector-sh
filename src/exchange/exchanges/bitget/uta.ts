@@ -464,7 +464,8 @@ export const convertUtaOrder = (
         amount: f?.fee,
         asset: `${f?.feeCoin ?? ''}`,
       })),
-      'charge-negative',
+      // v3 writes a charge as a positive number, unlike classic spot/futures.
+      'charge-positive',
     ),
     symbol: inverse ? platformCoinmSymbol(order.symbol) : order.symbol,
     orderId: order.orderId,

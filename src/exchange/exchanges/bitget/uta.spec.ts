@@ -395,7 +395,7 @@ describe('bitget UTA — conversions', () => {
         orderStatus: 'filled',
         cumExecQty: '0.03',
         cumExecValue: '9.936',
-        feeDetail: [{ feeCoin: 'rAAPL', fee: '-0.00003' }],
+        feeDetail: [{ feeCoin: 'rAAPL', fee: '0.00003' }],
       }) as any,
     )
     eq(

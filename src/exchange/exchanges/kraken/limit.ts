@@ -217,6 +217,108 @@ function applyPairDecayState(p: PairState) {
   p.lastAccess = now
 }
 
+// ── Kraken Futures (derivatives) budget ─────────────────────────────────────
+/**
+ * Kraken Futures does NOT use the spot counter/decay model above. Its private
+ * derivatives endpoints share one cost budget per client — "up to 500 every 10
+ * seconds" — and each endpoint has a published cost
+ * (https://docs.kraken.com/api/docs/guides/futures-rate-limits). Public
+ * endpoints "do not have a cost and therefore do not count against any rate
+ * limiting budget".
+ *
+ * Futures calls used to be charged through the spot model (a 20-token bucket
+ * refilling at 0.5/s, plus the spot per-pair matching-engine counter at 8 per
+ * cancel), so a burst of order-status reads was paced at one call every two
+ * seconds per account while Kraken's own budget had ~25x the room.
+ *
+ * Modelled as a sliding window: a call is admitted when the cost spent in the
+ * last 10 seconds plus its own cost stays within 500. That is the strictest
+ * reading of "500 every 10 seconds" — any 10s span carries at most 500 —
+ * and so never sends more than Kraken allows under either a fixed-window or a
+ * rolling-window interpretation.
+ *
+ * Keyed by the same per-account key as the spot model when
+ * KRAKEN_PER_ACCOUNT_LIMITS is on (the balancer pins an account's private
+ * Kraken routes to one instance, so this process sees all of its usage);
+ * otherwise one process-wide window.
+ */
+const FUTURES_WINDOW_MS = 10 * 1000
+const FUTURES_BUDGET = 500
+
+/**
+ * Published per-endpoint costs, keyed by the method name the exchange passes to
+ * `checkLimits`. `null` = a public endpoint (free). A method absent from this
+ * table is charged {@link FUTURES_UNKNOWN_COST}: a private call we forgot to
+ * list must not be free.
+ */
+const FUTURES_COSTS: Record<string, number | null> = {
+  submitOrder: 10, // sendorder
+  cancelOrder: 10, // cancelorder
+  amendOrder: 10, // editorder
+  getOrders: 1, // orders/status
+  getOpenOrders: 2, // openorders
+  getAccountBalance: 2, // accounts
+  getOpenPositions: 2, // openpositions
+  getFills: 2, // fills, no lastFillTime
+  getFillsSince: 25, // fills with lastFillTime
+  getLeveragePreferences: 2, // GET leveragepreferences
+  setLeveragePreference: 10, // PUT leveragepreferences
+  setLeverageSettings: 10, // PUT leveragepreferences
+  // Public — no cost.
+  getTicker: null,
+  getTickers: null,
+  getInstruments: null,
+  getCandles: null,
+  getTradeHistory: null,
+  getRecentTrades: null,
+  getFundingRateHistory: null,
+  getAssetPairs: null,
+}
+const FUTURES_UNKNOWN_COST = 10
+
+/** Cost of one Kraken Futures call, or 0 for a public endpoint. */
+export function krakenFuturesCost(method: string): number {
+  if (!(method in FUTURES_COSTS)) return FUTURES_UNKNOWN_COST
+  return FUTURES_COSTS[method] ?? 0
+}
+
+type FuturesState = {
+  // [timestamp, cost], oldest first.
+  spends: Array<[number, number]>
+  spent: number
+  lastAccess: number
+}
+const futuresWindows = new Map<string, FuturesState>()
+
+function getFuturesState(key: string): FuturesState {
+  const existing = futuresWindows.get(key)
+  const now = Date.now()
+  if (existing) {
+    futuresWindows.delete(key)
+    futuresWindows.set(key, existing)
+    existing.lastAccess = now
+    return existing
+  }
+  const state: FuturesState = { spends: [], spent: 0, lastAccess: now }
+  futuresWindows.set(key, state)
+  if (futuresWindows.size > MAX_ACCOUNTS) {
+    const oldest = futuresWindows.keys().next().value
+    if (oldest !== undefined) futuresWindows.delete(oldest)
+  }
+  return state
+}
+
+function expireFutures(s: FuturesState, now: number) {
+  while (s.spends.length && s.spends[0][0] <= now - FUTURES_WINDOW_MS) {
+    s.spent -= s.spends.shift()![1]
+  }
+  if (!s.spends.length) s.spent = 0
+}
+
+function futuresKey(accountKey: string | undefined): string {
+  return perAccountEnabled() && accountKey ? accountKey : 'global'
+}
+
 class KrakenLimits {
   static instance: KrakenLimits
 
@@ -538,6 +640,52 @@ class KrakenLimits {
   }
 
   /**
+   * Charge one Kraken Futures call against its account's 500-per-10s window: 0
+   * if it may go now (and the cost is spent), else how long until enough of
+   * the window has expired to admit it (nothing is spent). Public endpoints are
+   * free and always admitted. Synchronous: the check and the spend cannot be
+   * interleaved by another call.
+   */
+  async addFuturesCall(method: string, accountKey?: string): Promise<number> {
+    const cost = krakenFuturesCost(method)
+    if (cost <= 0) return 0
+    const now = Date.now()
+    const s = getFuturesState(futuresKey(accountKey))
+    expireFutures(s, now)
+    // A single call costs at most 25 against a budget of 500, so this is
+    // always satisfiable once the window has drained.
+    let excess = s.spent + cost - FUTURES_BUDGET
+    if (excess <= 0) {
+      s.spends.push([now, cost])
+      s.spent += cost
+      return 0
+    }
+    for (const [ts, spent] of s.spends) {
+      excess -= spent
+      if (excess <= 0) {
+        return ts + FUTURES_WINDOW_MS - now + 50 // +50ms buffer
+      }
+    }
+    return FUTURES_WINDOW_MS
+  }
+
+  /**
+   * Record a real Kraken Futures `apiLimitExceeded` for an account: treat its
+   * window as full from now, so the next calls wait a whole window instead of
+   * re-hitting a budget Kraken says is spent.
+   */
+  noteFuturesRateLimited(accountKey?: string) {
+    const now = Date.now()
+    const s = getFuturesState(futuresKey(accountKey))
+    expireFutures(s, now)
+    const fill = FUTURES_BUDGET - s.spent
+    if (fill > 0) {
+      s.spends.push([now, fill])
+      s.spent += fill
+    }
+  }
+
+  /**
    * Record a real Kraken rate-limit rejection for an account: downgrade it to
    * the Starter tier for a cooldown window, then it probes back up. No-op when
    * per-account limits are disabled or the account is unknown.
@@ -578,6 +726,7 @@ class KrakenLimits {
         { type: 'rest', value: maxRest },
         { type: 'matching_engine', value: maxPair },
         { type: 'krakenAccounts', value: accountRest.size },
+        { type: 'krakenFutures', value: this.futuresUsage() },
       ]
     }
 
@@ -603,7 +752,28 @@ class KrakenLimits {
     return [
       { type: 'rest', value: restUsage },
       { type: 'matching_engine', value: avgPairUsage },
+      { type: 'krakenFutures', value: this.futuresUsage() },
     ]
+  }
+
+  /**
+   * The hottest futures window as a ratio of its budget, in [0,1]. Published as
+   * its own `krakenFutures` usage type: the balancer routes Kraken on `rest`
+   * only and ignores types it does not filter for, so this is visibility, not a
+   * routing input. Also drops windows idle past the account TTL.
+   */
+  private futuresUsage(): number {
+    const now = Date.now()
+    let max = 0
+    for (const [k, s] of futuresWindows) {
+      expireFutures(s, now)
+      if (!s.spends.length && now - s.lastAccess > ACCOUNT_TTL_MS) {
+        futuresWindows.delete(k)
+        continue
+      }
+      max = Math.max(max, s.spent / FUTURES_BUDGET)
+    }
+    return Math.min(1, max)
   }
 }
 
@@ -613,6 +783,8 @@ export default {
   addRestCall: limits.addRestCall.bind(limits),
   addOrderCall: limits.addOrderCall.bind(limits),
   addOrderBatchCall: limits.addOrderBatchCall.bind(limits),
+  addFuturesCall: limits.addFuturesCall.bind(limits),
+  noteFuturesRateLimited: limits.noteFuturesRateLimited.bind(limits),
   getUsage: limits.getUsage.bind(limits),
   noteRateLimited: limits.noteRateLimited.bind(limits),
 }
@@ -623,4 +795,6 @@ export {
   AMEND_ORDER_COST,
   REST_MAX_COUNTER,
   MATCHING_ENGINE_THRESHOLD,
+  FUTURES_BUDGET,
+  FUTURES_WINDOW_MS,
 }

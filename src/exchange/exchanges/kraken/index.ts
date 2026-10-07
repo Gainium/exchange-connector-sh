@@ -823,7 +823,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       // account's private budget — attributing it to one would throttle an
       // unrelated account's private throughput for congestion it did not cause.
       if (isAccountRateLimit) {
-        limitHelper.noteRateLimited(hashKrakenKey(this.key))
+        if (this.usdm) {
+          limitHelper.noteFuturesRateLimited(hashKrakenKey(this.key))
+        } else {
+          limitHelper.noteRateLimited(hashKrakenKey(this.key))
+        }
       }
       // A provider-wide OUTAGE (HTTP 5xx, or Kraken spot's own
       // `EService:Unavailable`/`EService:Busy`) is not an ordinary per-request
@@ -949,6 +953,12 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     const accountKey = hashKrakenKey(this.key)
 
     const charge = async () => {
+      // Kraken Futures has its own per-key cost budget (500 per 10s, published
+      // per-endpoint costs, public endpoints free) and none of the spot
+      // counter/matching-engine model applies to it. See `limit.ts`.
+      if (this.usdm) {
+        return await limitHelper.addFuturesCall(method, accountKey)
+      }
       if (batch && symbol) {
         return await limitHelper.addOrderBatchCall(
           symbol,
@@ -1369,6 +1379,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   ): Promise<number | null> {
     if (!this.derivativesClient || (!orderId && !clientOrderId)) return null
     try {
+      await this.checkLimits('getFills')
       const result = await this.derivativesClient.getFills()
       if (result.result !== 'success') {
         // An application-layer refusal at HTTP 200. This is where a key that
@@ -1624,8 +1635,11 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     }
 
     timeProfile =
-      (await this.checkLimits('getTradesHistory', undefined, timeProfile)) ||
-      timeProfile
+      (await this.checkLimits(
+        sinceMs ? 'getFillsSince' : 'getFills',
+        undefined,
+        timeProfile,
+      )) || timeProfile
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
     return this.derivativesClient

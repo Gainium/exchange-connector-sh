@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.4] - 2026-10-07
+
+### Fixed
+
+- **Kraken Futures requests queued during busy moments.** Kraken Futures calls were throttled with the Kraken spot rate-limit model: a small bucket refilling at one call every two seconds, plus spot's per-pair order cost. Kraken Futures uses a different limit, a budget of 500 per 10 seconds per key with a published cost per endpoint (1 for an order-status read, 10 for placing or cancelling an order). Futures calls are now charged against that budget, public futures endpoints are not charged, and a Kraken Futures rate-limit rejection pauses the key for one window. Kraken spot limits are unchanged.
+
 ## [1.27.3] - 2026-10-03
 
 ### Fixed

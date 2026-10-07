@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.5] - 2026-10-07
+
+### Fixed
+
+- **OKX orders reported as refused while live on the exchange.** After OKX accepted an order, the connector read it back. If that read failed, or the answer to the submit was lost, the connector submitted the order again under the same client order ID. OKX answered "client order ID already exists", and the bot wrote off an order that was live on the exchange. A failed read-back now retries only the read. A failed submit asks OKX before submitting again, and an "already exists" answer for an order OKX has returns that order as placed. The order sent to OKX is unchanged.
+
 ## [1.27.4] - 2026-10-07
 
 ### Fixed

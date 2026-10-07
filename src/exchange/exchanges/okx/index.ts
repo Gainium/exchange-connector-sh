@@ -151,6 +151,24 @@ const XPERP_MISS_RETRY_MS = 5 * 60 * 1000
  * typical recovery costs ~1-3s and four retries still fit inside the 30s
  * budget with room for the calls themselves.
  */
+/**
+ * OKX `51016`: an order under this clOrdId already exists. Matched on the
+ * sCode and, as a fallback, on the text OKX has used for it.
+ */
+const isDuplicateClOrdId = (e: {
+  code?: unknown
+  msg?: string
+  data?: { sCode?: string; sMsg?: string }[]
+}) => {
+  const first = e?.data?.[0]
+  if (`${first?.sCode ?? e?.code}` === '51016') return true
+  const text = `${first?.sMsg ?? e?.msg ?? ''}`.toLowerCase()
+  return (
+    text.includes('duplicated clordid') ||
+    text.includes('client order id already exists')
+  )
+}
+
 const tooManyRequestsBackoff = (attempts: number) => {
   const base = Math.min(1000 * 2 ** Math.max(0, attempts - 1), 8000)
   return Math.round(base * (0.5 + Math.random()))
@@ -1567,53 +1585,130 @@ class OKXExchange extends AbstractExchange implements Exchange {
       request.px = this.convertNumberToString(price)
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.orderClient
-      .submitOrder(request)
-      .then(async () => {
+    // The submit and the read-back are separate on purpose. Once OKX has
+    // accepted the order, submitting it again under the same clOrdId can only
+    // earn a 51016 ("already exists"), which the caller reads as a refusal and
+    // writes off an order that is live on the venue. So a failed read-back
+    // retries the READ (`getOrder`), and a failed submit asks OKX before it
+    // re-submits (`resubmitOrder`).
+    const submitError = await this.orderClient.submitOrder(request).then(
+      () => undefined,
+      (e) => e ?? new Error('OKX submit failed'),
+    )
+    if (submitError) {
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (newClientOrderId && isDuplicateClOrdId(submitError)) {
+        const existing = await this.findOrderByClientId(
+          symbol,
+          newClientOrderId,
+          timeProfile,
+        )
+        if (existing) {
+          Logger.warn(
+            `OKX ${newClientOrderId} already exists on ${symbol}, returning the existing order`,
+          )
+          return existing
+        }
+      }
+      return this.handleOkxErrors(
+        this.resubmitOrder,
+        order,
+        timeProfile,
+      )(submitError)
+    }
+    try {
+      timeProfile =
+        (await this.checkLimits('getOrderDetails', 3000, 25, timeProfile)) ||
+        timeProfile
+      const search = {
+        clOrdId: order.newClientOrderId,
+        instId: symbol,
+      }
+      let orderData = await this.client.getOrderDetails(search)
+
+      if (!orderData.length) {
+        Logger.warn(
+          `OKX Order data not found for ${order.newClientOrderId}. Sleep 1s`,
+        )
+        await sleep(1000)
         timeProfile =
           (await this.checkLimits('getOrderDetails', 3000, 25, timeProfile)) ||
           timeProfile
-        const search = {
-          clOrdId: order.newClientOrderId,
-          instId: symbol,
-        }
-        let orderData = await this.client.getOrderDetails(search)
-
-        if (!orderData.length) {
-          Logger.warn(
-            `OKX Order data not found for ${order.newClientOrderId}. Sleep 1s`,
-          )
-          await sleep(1000)
-          timeProfile =
-            (await this.checkLimits(
-              'getOrderDetails',
-              3000,
-              25,
-              timeProfile,
-            )) || timeProfile
-          orderData = await this.client.getOrderDetails(search)
-          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        }
+        orderData = await this.client.getOrderDetails(search)
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (orderData.length) {
-          return this.returnGood<CommonOrder>(timeProfile)(
-            await this.convertOrder(orderData[0]),
-          )
-        }
+      }
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (orderData.length) {
+        return this.returnGood<CommonOrder>(timeProfile)(
+          await this.convertOrder(orderData[0]),
+        )
+      }
 
-        return this.handleOkxErrors(
-          this.getOrder,
-          { symbol, newClientOrderId },
-          timeProfile,
-        )(new OKXError('Cannot find order', 0))
-      })
-      .catch(
-        this.handleOkxErrors(
-          this.openOrder,
-          order,
-          this.endProfilerTime(timeProfile, 'exchange'),
-        ),
+      return this.handleOkxErrors(
+        this.getOrder,
+        { symbol, newClientOrderId },
+        timeProfile,
+      )(new OKXError('Cannot find order', 0))
+    } catch (e) {
+      // The order is on OKX; only reading it back failed. `getOrder` maps the
+      // pair itself, so it gets the Gainium pair, not the instId.
+      return this.handleOkxErrors(
+        this.getOrder,
+        { symbol: _symbol, newClientOrderId },
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(e as any)
+    }
+  }
+
+  /**
+   * The retry target for a failed submit. The failure may have been a lost
+   * response to an order OKX did accept, so ask first and only re-submit when
+   * OKX does not have it.
+   */
+  private async resubmitOrder(
+    order: Parameters<OKXExchange['openOrder']>[0],
+    timeProfile: TimeProfile,
+  ): Promise<BaseReturn<CommonOrder>> {
+    if (order.newClientOrderId) {
+      const existing = await this.findOrderByClientId(
+        this.updateSymbol(order.symbol),
+        order.newClientOrderId,
+        timeProfile,
       )
+      if (existing) {
+        Logger.warn(
+          `OKX ${order.newClientOrderId} reached ${order.symbol} despite the failed submit, not re-submitting`,
+        )
+        return existing
+      }
+    }
+    return this.openOrder(order, timeProfile)
+  }
+
+  /**
+   * One read of an order by clOrdId. `undefined` when OKX does not have it OR
+   * the read itself failed; the callers then fall back to what they would have
+   * done without asking, so this never throws.
+   */
+  private async findOrderByClientId(
+    instId: string,
+    clOrdId: string,
+    timeProfile: TimeProfile,
+  ): Promise<BaseReturn<CommonOrder> | undefined> {
+    try {
+      timeProfile =
+        (await this.checkLimits('getOrderDetails', 3000, 25, timeProfile)) ||
+        timeProfile
+      const found = await this.client.getOrderDetails({ instId, clOrdId })
+      if (found.length) {
+        return this.returnGood<CommonOrder>(timeProfile)(
+          await this.convertOrder(found[0]),
+        )
+      }
+    } catch {
+      // unknown — the caller decides without the answer
+    }
+    return undefined
   }
 
   private convertInterval(interval: ExchangeIntervals): string {

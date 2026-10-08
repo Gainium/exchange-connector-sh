@@ -52,6 +52,10 @@ class KucoinError extends Error {
   }
 }
 
+/** Active-orders page size (KuCoin's documented default) and pages a reconcile batch reads. */
+const KUCOIN_OPEN_ORDERS_PAGE = 50
+const KUCOIN_OPEN_ORDERS_MAX_PAGES = 10
+
 const intervalMap: { [x in ExchangeIntervals]: string } = {
   '1m': '1min',
   '3m': '3min',
@@ -1824,6 +1828,88 @@ class KucoinExchange extends AbstractExchange implements Exchange {
         ),
       )
   }
+  /**
+   * Resolve a reconcile pass's orders from the account's ACTIVE orders on the
+   * pair instead of one lookup per order. KuCoin has no multi-id order lookup;
+   * its active-orders list costs the same weight (2) as one order lookup and
+   * pages up to {@link KUCOIN_OPEN_ORDERS_PAGE} orders per call.
+   *
+   * Ids may be client ids (spot) or KuCoin order ids (futures — main-app asks
+   * futures orders by the venue id), so a row matches on either. A row still
+   * on the list is converted exactly as `getOrder` converts it: futures as is,
+   * spot with its fills when it has traded (that is what `spot_getOrder`
+   * does; an untouched order has none). An order NOT on the list has filled
+   * or been cancelled since, and is left out: the caller looks it up itself.
+   * A good answer may therefore be empty.
+   */
+  override async getOrdersBatch({
+    symbol,
+    newClientOrderIds,
+  }: {
+    symbol: string
+    newClientOrderIds: string[]
+  }): Promise<BaseReturn<CommonOrder[]>> {
+    let timeProfile = this.getEmptyTimeProfile()
+    const wanted = new Set(newClientOrderIds.map((id) => `${id}`))
+    if (!symbol || !wanted.size) {
+      return super.getOrdersBatch({ symbol, newClientOrderIds })
+    }
+    const futures = !!this.futures
+    const orders: CommonOrder[] = []
+    let found = 0
+    for (let page = 1; page <= KUCOIN_OPEN_ORDERS_MAX_PAGES; page++) {
+      timeProfile =
+        (await this.checkLimits(
+          futures ? 'futures_getAllOpenOrders' : 'spot_getAllOpenOrders',
+          futures ? LimitType.futures : LimitType.spot,
+          2,
+          timeProfile,
+        )) || timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      // The client types omit the paging params; KuCoin reads them from the
+      // query string like the rest.
+      const paging = {
+        currentPage: page,
+        pageSize: KUCOIN_OPEN_ORDERS_PAGE,
+      } as Record<string, number>
+      const res = await (
+        futures
+          ? this.client.getFuturesOrders({
+              symbol: this.convertSymbolToKucoin(symbol),
+              status: 'active',
+              ...paging,
+            })
+          : this.client.getOrders({
+              symbol,
+              status: 'active',
+              tradeType: 'TRADE',
+              ...paging,
+            })
+      ).catch(() => null)
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (res?.status !== StatusEnum.ok || !res.data) {
+        // Nothing read: decline, and the caller resolves every order itself.
+        // A later page failing leaves the rows already found valid — an order
+        // absent from the answer is looked up, never taken as gone.
+        if (page === 1) {
+          return super.getOrdersBatch({ symbol, newClientOrderIds })
+        }
+        break
+      }
+      for (const o of res.data.items ?? []) {
+        if (!wanted.has(`${o.clientOid}`) && !wanted.has(`${o.id}`)) {
+          continue
+        }
+        found++
+        orders.push(await this.convertOrder(o, !futures && +o.dealSize > 0))
+      }
+      if (found >= wanted.size || page >= (res.data.totalPage ?? 0)) {
+        break
+      }
+    }
+    return this.returnGood<CommonOrder[]>(timeProfile)(orders)
+  }
+
   async getOrder(data: {
     symbol: string
     newClientOrderId: string

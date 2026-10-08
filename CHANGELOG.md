@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.7] - 2026-10-08
+
+### Changed
+
+- **KuCoin order reconciliation reads the active-orders list.** KuCoin has no lookup for several orders at once, so checking a bot's open orders against the exchange cost one request per order. The connector now answers the check from the account's active orders on the pair (50 per request, the same rate-limit weight as a single order lookup). Orders still active are resolved from that list, converted exactly as a single lookup converts them, and only orders that have since filled or been cancelled are looked up individually. Works for spot (by client order ID) and futures (by KuCoin order ID).
+
 ## [1.27.6] - 2026-10-08
 
 ### Fixed

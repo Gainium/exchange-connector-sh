@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.6] - 2026-10-08
+
+### Fixed
+
+- **OKX requests queued behind other accounts' requests.** The connector rate-limited OKX private calls (orders, cancels, order lookups, balances, positions, account settings) in one bucket per method, shared by every OKX account on that connector, and smaller than what OKX allows a single account. A burst from one account parked everyone else's orders. Private calls are now limited per account, at OKX's published per-account rates split across the connector instances. A call that has to wait now waits only until the current window resets, not a whole new window. Public endpoints are unchanged.
+
+### Changed
+
+- **OKX order reconciliation reads the open-orders list.** When a bot checks its open orders against the exchange, OKX answered one order per request. The connector now answers the whole check from the account's open orders on the pair (100 per request): orders still open are resolved from that list, and only orders that have since filled or been cancelled are looked up individually.
+
 ## [1.27.5] - 2026-10-07
 
 ### Fixed

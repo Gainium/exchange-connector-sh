@@ -34,6 +34,7 @@ import {
   InstrumentType,
   RestClient as OKXRestClient,
   OrderDetails,
+  OrderListItem,
   OrderRequest,
   SetLeverageRequest,
   type APICredentials,
@@ -125,6 +126,10 @@ const candleMaxSize = 300
  * the 1h map cache.
  */
 const XPERP_MISS_RETRY_MS = 5 * 60 * 1000
+
+/** `orders-pending` page size (OKX's maximum) and how many pages a reconcile batch reads. */
+const OKX_OPEN_ORDERS_PAGE = 100
+const OKX_OPEN_ORDERS_MAX_PAGES = 5
 
 /**
  * Backoff for OKX `50011 Too many requests`.
@@ -261,11 +266,19 @@ class OKXExchange extends AbstractExchange implements Exchange {
   private static acctLvCache = new Map<string, { at: number; acctLv: string }>()
   private static readonly ACCT_LV_TTL = 10 * 60 * 1000
 
-  private async getAcctLv(): Promise<string | undefined> {
-    const cacheKey = createHash('sha256')
+  /**
+   * Digest of the credential plus the OKX origin (global and Europe are
+   * separate accounts) — identifies the account without holding its key.
+   */
+  private limitAccountRef(): string {
+    return createHash('sha256')
       .update(`${this.key ?? ''}|${this.okxSource ?? ''}`)
       .digest('hex')
       .slice(0, 16)
+  }
+
+  private async getAcctLv(): Promise<string | undefined> {
+    const cacheKey = this.limitAccountRef()
     const cached = OKXExchange.acctLvCache.get(cacheKey)
     if (cached && +new Date() - cached.at < OKXExchange.ACCT_LV_TTL) {
       return cached.acctLv
@@ -1421,6 +1434,79 @@ class OKXExchange extends AbstractExchange implements Exchange {
     )
   }
 
+  /**
+   * Resolve a reconcile pass's orders from the account's OPEN orders on the
+   * pair, a page of up to 100 per call, instead of one order-details call per
+   * order.
+   *
+   * OKX has no multi-id order lookup, so the reconcile pass asked for every
+   * open order of a bot one by one — one call per resting order, per pass.
+   *
+   * An order still on the open list is answered exactly as `getOrder` would
+   * (same row shape, same conversion). An order that is NOT on it has filled
+   * or been cancelled since, and is left out of the result: the caller then
+   * resolves it with its per-order lookup, which is the read that finds out
+   * which. So only the orders that changed cost a call of their own. The
+   * answer is good even when nothing matched — "none of these are open" is
+   * the venue's answer, not a failure to ask.
+   */
+  override async getOrdersBatch({
+    symbol,
+    newClientOrderIds,
+  }: {
+    symbol: string
+    newClientOrderIds: string[]
+  }): Promise<BaseReturn<CommonOrder[]>> {
+    let timeProfile = this.getEmptyTimeProfile()
+    const wanted = new Set(newClientOrderIds)
+    if (!symbol || !wanted.size) {
+      return super.getOrdersBatch({ symbol, newClientOrderIds })
+    }
+    await this.ensureXperpMap(false, symbol)
+    const instId = this.updateSymbol(symbol)
+    const orders: CommonOrder[] = []
+    let after: string | undefined
+    for (let page = 0; page < OKX_OPEN_ORDERS_MAX_PAGES; page++) {
+      timeProfile =
+        (await this.checkLimits('getOrderList', 3000, 25, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      let rows: OrderListItem[]
+      try {
+        rows = await this.client.getOrderList({
+          instType: this.instTypeParam(),
+          instId,
+          limit: `${OKX_OPEN_ORDERS_PAGE}`,
+          ...(after ? { after } : {}),
+        })
+      } catch {
+        // Nothing read: decline, and the caller resolves every order itself.
+        // A later page failing still leaves the rows already found valid —
+        // an order absent from the answer is resolved per order, never
+        // taken as gone.
+        if (page === 0) {
+          return super.getOrdersBatch({ symbol, newClientOrderIds })
+        }
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        break
+      }
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      for (const o of rows ?? []) {
+        if (wanted.has(o.clOrdId)) {
+          orders.push(await this.convertOrder(o))
+        }
+      }
+      if (!rows?.length || rows.length < OKX_OPEN_ORDERS_PAGE) {
+        break
+      }
+      if (orders.length === wanted.size) {
+        break
+      }
+      after = rows[rows.length - 1].ordId
+    }
+    return this.returnGood<CommonOrder[]>(timeProfile)(orders)
+  }
+
   async getOrder(
     data: {
       symbol: string
@@ -2201,8 +2287,17 @@ class OKXExchange extends AbstractExchange implements Exchange {
     if (timeProfile) {
       timeProfile = this.startProfilerTime(timeProfile, 'queue')
     }
+    // Private endpoints are limited per account at OKX: count them in this
+    // account's own bucket, never in one shared by every account here.
+    const accountLimit = this.key ? limitHelper.okxPrivateLimit(id) : null
+    const bucket = accountLimit ? `${this.limitAccountRef()}|${id}` : id
     const limitInstance = new limitHelper.Limit()
-    const limit = await limitInstance.addMethod(id, frame, frameCount)
+    const limit = await limitInstance.addMethod(
+      bucket,
+      accountLimit?.frame ?? frame,
+      accountLimit?.frameCount ?? frameCount,
+      !!accountLimit,
+    )
     if (limit > 0) {
       await sleep(limit)
       await this.checkLimits(id, frame, frameCount)

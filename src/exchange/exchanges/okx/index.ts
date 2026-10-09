@@ -174,6 +174,25 @@ const isDuplicateClOrdId = (e: {
   )
 }
 
+/**
+ * OKX `51603` ("Order does not exist") on a read-back of an order it has just
+ * acknowledged. That is OKX not having indexed the order yet, not a refusal.
+ */
+const isOrderNotVisibleYet = (e: {
+  code?: unknown
+  msg?: string
+  data?: { sCode?: string; sMsg?: string }[]
+}) => {
+  const first = e?.data?.[0]
+  if (`${first?.sCode ?? e?.code}` === '51603') return true
+  return `${first?.sMsg ?? e?.msg ?? ''}`
+    .toLowerCase()
+    .includes('order does not exist')
+}
+
+/** Waits between read-backs of an acknowledged order: ~6.5s in total. */
+const acceptedOrderReadBackDelaysMs = [0, 500, 1000, 2000, 3000]
+
 const tooManyRequestsBackoff = (attempts: number) => {
   const base = Math.min(1000 * 2 ** Math.max(0, attempts - 1), 8000)
   return Math.round(base * (0.5 + Math.random()))
@@ -1677,8 +1696,13 @@ class OKXExchange extends AbstractExchange implements Exchange {
     // writes off an order that is live on the venue. So a failed read-back
     // retries the READ (`getOrder`), and a failed submit asks OKX before it
     // re-submits (`resubmitOrder`).
+    let submitAck: { ordId?: string; ts?: string } | undefined
     const submitError = await this.orderClient.submitOrder(request).then(
-      () => undefined,
+      (res: unknown) => {
+        submitAck = (Array.isArray(res) ? res[0] : undefined) as
+          { ordId?: string; ts?: string } | undefined
+        return undefined
+      },
       (e) => e ?? new Error('OKX submit failed'),
     )
     if (submitError) {
@@ -1710,23 +1734,74 @@ class OKXExchange extends AbstractExchange implements Exchange {
         clOrdId: order.newClientOrderId,
         instId: symbol,
       }
-      let orderData = await this.client.getOrderDetails(search)
-
-      if (!orderData.length) {
-        Logger.warn(
-          `OKX Order data not found for ${order.newClientOrderId}. Sleep 1s`,
-        )
-        await sleep(1000)
-        timeProfile =
-          (await this.checkLimits('getOrderDetails', 3000, 25, timeProfile)) ||
-          timeProfile
-        orderData = await this.client.getOrderDetails(search)
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      // OKX acknowledged the order, but can take seconds to serve it from the
+      // order-details endpoint, answering an empty list or `51603` "Order does
+      // not exist" meanwhile. Passing that answer on told the bot the order
+      // was refused while it rested live on the venue, untracked, holding the
+      // funds the bot's next attempt then lacked. So keep asking for a while.
+      let orderData: OrderDetails[] = []
+      for (const [i, delay] of acceptedOrderReadBackDelaysMs.entries()) {
+        if (delay) {
+          Logger.warn(
+            `OKX order ${order.newClientOrderId} not readable yet. Sleep ${delay}ms`,
+          )
+          await sleep(delay)
+        }
+        if (i) {
+          timeProfile =
+            (await this.checkLimits(
+              'getOrderDetails',
+              3000,
+              25,
+              timeProfile,
+            )) || timeProfile
+        }
+        try {
+          orderData = await this.client.getOrderDetails(search)
+        } catch (e) {
+          if (!isOrderNotVisibleYet(e as any)) throw e
+          orderData = []
+        }
+        if (orderData.length) break
       }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       if (orderData.length) {
         return this.returnGood<CommonOrder>(timeProfile)(
           await this.convertOrder(orderData[0]),
+        )
+      }
+      // Still not readable, but OKX's own submit answer carried an `ordId`:
+      // the order exists. Report it as resting; its fills arrive on the
+      // user stream. A market order has no price to report, so it is left
+      // to the bot's ambiguous-outcome check instead.
+      if (submitAck?.ordId && type === 'LIMIT') {
+        Logger.warn(
+          `OKX order ${order.newClientOrderId} acknowledged as ${submitAck.ordId} but not readable after ${acceptedOrderReadBackDelaysMs.length} attempts. Returning it as NEW`,
+        )
+        const ts = submitAck.ts || `${Date.now()}`
+        return this.returnGood<CommonOrder>(timeProfile)(
+          await this.convertOrder({
+            instId: symbol,
+            ordId: submitAck.ordId,
+            clOrdId: newClientOrderId,
+            px: request.px,
+            sz: request.sz,
+            side: request.side,
+            ordType: request.ordType,
+            posSide: request.posSide,
+            reduceOnly: request.reduceOnly,
+            state: 'live',
+            accFillSz: '0',
+            cTime: ts,
+            uTime: ts,
+          } as unknown as OrderDetails),
+        )
+      }
+      if (submitAck?.ordId) {
+        return this.returnBad(timeProfile)(
+          new Error(
+            `OKX order ${order.newClientOrderId} acknowledged as ${submitAck.ordId}, read-back timeout`,
+          ),
         )
       }
 

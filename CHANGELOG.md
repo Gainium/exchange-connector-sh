@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.8] - 2026-10-09
+
+### Fixed
+
+- OKX: an order OKX has acknowledged is no longer reported as "Order does not exist" when OKX takes a few seconds to make it readable. The connector keeps reading it back, and a limit order that is still not readable is returned as resting (from OKX's own acknowledgement) instead of as a failure that left it live and untracked.
+
 ## [1.27.7] - 2026-10-08
 
 ### Changed

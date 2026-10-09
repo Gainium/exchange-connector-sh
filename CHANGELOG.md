@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.9] - 2026-10-09
+
+### Fixed
+
+- OKX: cancelling an order by its OKX order id retried a transient failure through the client-order-id cancel with no client order id, so the retry was refused ("Either client order ID or order ID is required") and the order stayed open. It now retries the same call.
+
 ## [1.27.8] - 2026-10-09
 
 ### Fixed

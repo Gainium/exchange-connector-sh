@@ -1055,7 +1055,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         }
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         return this.handleOkxErrors(
-          this.cancelOrder,
+          this.cancelOrderByOrderIdAndSymbol,
           order,
           timeProfile,
         )(
@@ -1067,7 +1067,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       })
       .catch(
         this.handleOkxErrors(
-          this.cancelOrder,
+          this.cancelOrderByOrderIdAndSymbol,
           order,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),

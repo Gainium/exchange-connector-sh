@@ -22,6 +22,7 @@ import {
 } from 'binance'
 import { USDMClient, CoinMClient, MainClient } from '../../../binance-custom'
 import limitHelper from './limit'
+import { pooledMarginFromBinance } from './pooledMargin'
 import { normalizeOrderFees } from '../../helpers/orderFee'
 import {
   BaseReturn,
@@ -752,6 +753,40 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleBinanceErrors(
           this.futures_getBalance,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /**
+   * Pooled collateral in USD for a USDⓈ-M account in Multi-Assets mode (see
+   * {@link pooledMarginFromBinance}); `null` for spot, COIN-M and single-asset
+   * USDⓈ-M accounts.
+   *
+   * One read. Callers ask only after their own per-coin check has come up
+   * short.
+   */
+  async getMarginAvailableUsd(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<number | null>> {
+    if (!this.usdm || !this.usdmClient) {
+      return this.returnGood<number | null>(timeProfile)(null)
+    }
+    timeProfile =
+      (await this.checkLimits('getBalance', 'request', 5, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.usdmClient
+      .getAccountInformation()
+      .then((accountInfo: FuturesAccountInformation) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        return this.returnGood<number | null>(timeProfile)(
+          pooledMarginFromBinance(accountInfo),
+        )
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.getMarginAvailableUsd,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

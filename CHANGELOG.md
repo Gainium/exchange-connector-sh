@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.11] - 2026-10-12
+### Security
+- Updated dependencies to patched versions.
+
 ## [1.27.10] - 2026-10-12
 ### Fixed
 - Binance USDⓈ-M: an account in Multi-Assets mode now reports its pooled available margin (the account-level `availableBalance`) through `/marginAvailableUsd`. Every collateral coin margins every contract in that mode, so a per-asset balance understated what the account could commit — for example an account holding only USDC, with no USDT, trading USDT-quoted perpetuals. Single-asset accounts, COIN-M and spot still report no pool.

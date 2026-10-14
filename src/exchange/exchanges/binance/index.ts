@@ -23,6 +23,7 @@ import {
 import { USDMClient, CoinMClient, MainClient } from '../../../binance-custom'
 import limitHelper from './limit'
 import { pooledMarginFromBinance } from './pooledMargin'
+import { futuresAssetBalance } from './futuresBalance'
 import { normalizeOrderFees } from '../../helpers/orderFee'
 import {
   BaseReturn,
@@ -738,15 +739,9 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         ) => {
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
           return this.returnGood<FreeAsset>(timeProfile)(
-            accountInfo.assets.map((balance: FuturesAccountAsset) => ({
-              asset: balance.asset,
-              free: parseFloat(`${balance.maxWithdrawAmount}`),
-              locked:
-                parseFloat(`${balance.walletBalance}`) > 0
-                  ? parseFloat(`${balance.walletBalance}`) -
-                    parseFloat(`${balance.maxWithdrawAmount}`)
-                  : 0,
-            })),
+            accountInfo.assets.map((balance: FuturesAccountAsset) =>
+              futuresAssetBalance(balance),
+            ),
           )
         },
       )

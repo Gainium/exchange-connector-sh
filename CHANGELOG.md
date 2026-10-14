@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.13] - 2026-10-14
+### Fixed
+- Bybit USDT/USDC perpetuals and dated futures now report the exchange's minimum order value (`lotSizeFilter.minNotionalValue`) as the pair's quote minimum. It was reported as 0, so an order below the minimum was only caught when Bybit refused it. Inverse contracts keep 1, the contract size.
+
 ## [1.27.12] - 2026-10-14
 ### Fixed
 - Binance USDⓈ-M: a negative BNFCR wallet balance on a Multi-Assets (Credits mode) account is now reported in the futures balance as a negative `free`, as the user stream already reports it. The balance read used to write it as 0, so settled losses booked to BNFCR vanished from the stored balance after every refresh and the account's value left them out. Every other asset maps as before.

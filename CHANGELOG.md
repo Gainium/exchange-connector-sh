@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.16] - 2026-10-15
+
+### Added
+
+- Futures exchange info reports the delivery time of dated (non-perpetual) contracts on Bybit, Binance and KuCoin, read from each exchange's own instrument fields. Perpetuals report none.
+
 ## [1.27.15] - 2026-10-15
 
 ### Added

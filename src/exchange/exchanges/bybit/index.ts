@@ -59,6 +59,7 @@ import { Logger } from '@nestjs/common'
 import { sleep } from '../../../utils/sleepUtils'
 import { keyFingerprint } from '../../../utils/keyFingerprint'
 import { pageCandleRange } from '../../helpers/candlePager'
+import { datedDeliveryTime } from '../../helpers/deliveryTime'
 import { timeIntervalMap } from '../okx'
 
 /**
@@ -1118,6 +1119,8 @@ class BybitExchange extends AbstractExchange implements Exchange {
                       d.priceFilter.tickSize,
                     ),
                     type: d.contractType,
+                    // `deliveryTime` is "0" on perpetuals.
+                    deliveryTime: datedDeliveryTime(d.deliveryTime),
                     maxLeverage: d.leverageFilter.maxLeverage,
                     stepLeverage: d.leverageFilter.leverageStep,
                     minLeverage: d.leverageFilter.minLeverage,

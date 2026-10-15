@@ -41,6 +41,13 @@ export type ExchangeInfo = {
   }
   type?: string
   crossAvailable?: boolean
+  // Delivery (expiry) time, ms epoch, of a DATED futures contract, from the
+  // exchange's instrument info (Bybit `deliveryTime`, Binance `deliveryDate`
+  // on non-perpetual `contractType`s, KuCoin `expireDate`). Absent for
+  // perpetuals, spot and exchanges that do not publish it. Consumers keep
+  // dated contracts out of bulk pair selection and stop opening deals on them
+  // near delivery. See `helpers/deliveryTime.ts`.
+  deliveryTime?: number
 }
 export type PositionInfo = {
   symbol: string

@@ -9,6 +9,7 @@ import AbstractExchange, { Exchange } from '../../abstractExchange'
 import limitHelper, { LimitType } from './limit'
 import { exhaustedKucoinReason, noteKucoinAttempt } from './errorOutcome'
 import { normalizeOrderFee, normalizeOrderFees } from '../../helpers/orderFee'
+import { datedDeliveryTime } from '../../helpers/deliveryTime'
 import {
   BaseReturn,
   CandleResponse,
@@ -869,6 +870,8 @@ class KucoinExchange extends AbstractExchange implements Exchange {
                 // KuCoin publishes the max only (min is not in the contract
                 // info, so it is left unknown rather than assumed).
                 maxLeverage: d.maxLeverage,
+                // `expireDate` is null on perpetuals.
+                deliveryTime: datedDeliveryTime(d.expireDate),
               })),
           )
         }

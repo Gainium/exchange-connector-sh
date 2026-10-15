@@ -65,6 +65,7 @@ import { sleep } from '../../../utils/sleepUtils'
 import { safeStringify } from '../../../utils/redact'
 import { keyFingerprint } from '../../../utils/keyFingerprint'
 import { pageCandleRange } from '../../helpers/candlePager'
+import { binanceDeliveryTime } from '../../helpers/deliveryTime'
 import { timeIntervalMap } from '../okx'
 
 /**
@@ -1850,6 +1851,11 @@ class BinanceExchange extends AbstractExchange implements Exchange {
                   : undefined,
                 priceAssetPrecision: this.getPricePrecision(
                   `${priceFilter?.tickSize || '0.1'}`,
+                ),
+                // Quarterly contracts; perpetuals carry a placeholder date.
+                deliveryTime: binanceDeliveryTime(
+                  pair.contractType,
+                  pair.deliveryDate,
                 ),
                 priceMultiplier: multiplierFilter
                   ? {

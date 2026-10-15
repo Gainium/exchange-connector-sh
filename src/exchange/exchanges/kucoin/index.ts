@@ -866,6 +866,9 @@ class KucoinExchange extends AbstractExchange implements Exchange {
                 },
                 priceAssetPrecision: this.getPricePrecision(`${d.tickSize}`),
                 crossAvailable: d.supportCross,
+                // KuCoin publishes the max only (min is not in the contract
+                // info, so it is left unknown rather than assumed).
+                maxLeverage: d.maxLeverage,
               })),
           )
         }

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.15] - 2026-10-15
+
+### Added
+
+- KuCoin futures exchange info reports each contract's maximum leverage, like Bybit, Bitget, Hyperliquid and OKX already do.
+
 ## [1.27.14] - 2026-10-15
 ### Fixed
 - Reverted 1.27.13. Bybit USDT/USDC perpetuals report a quote minimum of 0 again. Bybit accepts API orders on these contracts below its published minimum order value, so reporting that value made bots raise or refuse orders the exchange would have filled.

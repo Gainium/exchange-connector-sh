@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.14] - 2026-10-15
+### Fixed
+- Reverted 1.27.13. Bybit USDT/USDC perpetuals report a quote minimum of 0 again. Bybit accepts API orders on these contracts below its published minimum order value, so reporting that value made bots raise or refuse orders the exchange would have filled.
+
 ## [1.27.13] - 2026-10-14
 ### Fixed
 - Bybit USDT/USDC perpetuals and dated futures now report the exchange's minimum order value (`lotSizeFilter.minNotionalValue`) as the pair's quote minimum. It was reported as 0, so an order below the minimum was only caught when Bybit refused it. Inverse contracts keep 1, the contract size.

@@ -90,12 +90,6 @@ class BybitError extends Error {
  * index arms are 1:1 passthroughs that only fire if Bybit literally emits that
  * value, so they can never produce a false positive.
  */
-/** A venue numeric string as a number; absent or unparsable reads as 0. */
-function finiteOrZero(value?: string): number {
-  const n = parseFloat(value ?? '')
-  return Number.isFinite(n) ? n : 0
-}
-
 function bybitAssetClass(symbolType?: string): ExchangeInfo['assetClass'] {
   switch (symbolType) {
     case 'xstocks':
@@ -1115,18 +1109,10 @@ class BybitExchange extends AbstractExchange implements Exchange {
                     },
                     quoteAsset: {
                       name: d.quoteCoin,
-                      // Linear: the venue's minimum order value. Inverse: the
-                      // 1-USD contract size, which is what coin-margined
-                      // consumers read this field as.
-                      minAmount: inverse
-                        ? 1
-                        : finiteOrZero(
-                            (
-                              d.lotSizeFilter as unknown as {
-                                minNotionalValue?: string
-                              }
-                            ).minNotionalValue,
-                          ),
+                      minAmount: !inverse
+                        ? 0
+                        : //@ts-ignore
+                          1 /* +`${d.lotSizeFilter.minNotionalValue || 1}` */,
                     },
                     priceAssetPrecision: this.getPricePrecision(
                       d.priceFilter.tickSize,

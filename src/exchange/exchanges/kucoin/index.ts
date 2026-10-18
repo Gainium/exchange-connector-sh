@@ -1484,6 +1484,11 @@ class KucoinExchange extends AbstractExchange implements Exchange {
           return 'PARTIALLY_FILLED'
         }
       }
+      // KuCoin closes a market order it could not execute (e.g. for lack of
+      // funds) without setting `cancelExist`: nothing executed is not a fill.
+      if (`${order.dealSize}` === '0') {
+        return 'CANCELED'
+      }
       if (!order.cancelExist) {
         return 'FILLED'
       }

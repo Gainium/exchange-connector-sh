@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.18] - 2026-10-18
+
+### Fixed
+
+- KuCoin orders that closed with nothing executed are reported CANCELED. A market order KuCoin closes unexecuted (for example, for lack of funds) carries no `cancelExist` flag, so it was reported FILLED with an executed quantity of 0.
+
 ## [1.27.17] - 2026-10-18
 
 ### Fixed

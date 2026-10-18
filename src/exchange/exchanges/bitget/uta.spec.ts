@@ -244,6 +244,51 @@ describe('bitget UTA — orders', () => {
     })
   })
 
+  describe('a Reality token order while its session is shut', () => {
+    const place = async (
+      reality = true,
+      msg = 'current operation is not supported',
+    ) => {
+      setRealitySymbols(reality ? ['RIVVUSDT'] : [])
+      const ex = stub(Futures.null, {
+        ...unified,
+        placeOrderV3: async () => {
+          throw bitgetError('40054', msg)
+        },
+      })
+      return ex.openOrder({
+        symbol: 'RIVVUSDT',
+        side: 'BUY',
+        quantity: 0.0555,
+        price: 269.98,
+        newClientOrderId: 'c-closed',
+        type: 'LIMIT',
+      })
+    }
+
+    it('is refused with a reason that says the market is closed', async () => {
+      const res = await place()
+      eq('status', res.status, StatusEnum.notok)
+      eq('reason', /market is closed/.test(`${res.reason}`), true)
+      eq('names the pair', /RIVVUSDT/.test(`${res.reason}`), true)
+    })
+
+    it('keeps Bitget wording for other pairs and other refusals', async () => {
+      eq(
+        'not reality',
+        (await place(false)).reason,
+        'current operation is not supported',
+      )
+      eq(
+        'other refusal',
+        /market is closed/.test(
+          `${(await place(true, 'Insufficient balance')).reason}`,
+        ),
+        false,
+      )
+    })
+  })
+
   it('spot limit order on a Reality token goes to v3 place-order', async () => {
     const sent: any[] = []
     const ex = stub(Futures.null, {

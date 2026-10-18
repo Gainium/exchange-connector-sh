@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.17] - 2026-10-18
+
+### Fixed
+
+- Bitget stock token (Reality) orders refused while the token's trading session is closed now say the market is closed, instead of Bitget's bare "current operation is not supported". Bitget keeps these tokens listed and priced outside their trading hours, so the refusal was the only signal.
+
 ## [1.27.16] - 2026-10-15
 
 ### Added

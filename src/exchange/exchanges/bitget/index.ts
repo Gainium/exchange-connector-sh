@@ -33,6 +33,8 @@ import {
   BitgetAccountMode,
   REALITY_NEEDS_UTA,
   realityNoLiquidityNotice,
+  realityMarketClosed,
+  isRealitySessionRefusal,
   UTA_COINM_UNSUPPORTED,
   UTA_MISSING_PERMISSIONS,
   UtaAsset,
@@ -3377,6 +3379,8 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   /**
    * Reality tokens stay listed and priced around the clock, but many have no
    * book outside US market hours: an order is accepted and then just waits.
+   * When their session is shut altogether the order is refused instead, with
+   * a reason that is rewritten to say the market is closed.
    * The order stands; when the side it trades against is empty, the result
    * carries a `notice` saying so. The check never fails or delays the order
    * beyond one book read — any error reading the book leaves the result as is.
@@ -3387,11 +3391,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
   ): Promise<BaseReturn<CommonOrder>> {
     if (
       this.futures ||
-      res.status !== StatusEnum.ok ||
-      !res.data ||
+      (res.status === StatusEnum.ok && !res.data) ||
       !(await this.isRealitySymbol(order.symbol))
     ) {
       return res
+    }
+    if (res.status !== StatusEnum.ok) {
+      return isRealitySessionRefusal(res.reason)
+        ? { ...res, reason: realityMarketClosed(order.symbol) }
+        : res
     }
     try {
       const book = await this.orderClient.getOrderBookV3({

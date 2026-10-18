@@ -154,6 +154,20 @@ export const REALITY_NEEDS_UTA =
 export const realityNoLiquidityNotice = (symbol: string, side: string) =>
   `Bitget has no ${side === 'BUY' ? 'sellers' : 'buyers'} on ${symbol} right now, so this order will wait until there are. Liquidity for Bitget stock tokens is mostly available around US market hours.`
 
+/**
+ * Bitget keeps a Reality token listed, `online` and priced while its own
+ * trading session is shut — weekends and US holidays for the tokens not on its
+ * 24/7 list, and every token when Bitget suspends weekend trading. An order
+ * then comes back as "current operation is not supported", with nothing to say
+ * the market is closed. The wording keeps "market is closed" so it lands on the
+ * existing Market closed error rule.
+ */
+export const realityMarketClosed = (symbol: string) =>
+  `Bitget is not accepting orders on ${symbol} right now: the market is closed for this stock token. Bitget trades stock tokens only during their supported hours, and many not on weekends or US holidays. Orders can be placed again once trading reopens.`
+
+export const isRealitySessionRefusal = (reason: unknown): boolean =>
+  `${reason ?? ''}`.toLowerCase().includes('current operation is not supported')
+
 export const UTA_MISSING_PERMISSIONS =
   'This Bitget API key does not carry the Unified Trading Account permissions. Edit the key on Bitget, enable UTA management (read) and UTA trading, and save it.'
 

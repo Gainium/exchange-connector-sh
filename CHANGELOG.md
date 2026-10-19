@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.19] - 2026-10-19
+
+### Fixed
+
+- Bitget spot limit orders that have not filled yet are reported at their limit price. Bitget sends an average price of 0 until the order fills, and that 0 was reported as the order's price.
+
 ## [1.27.18] - 2026-10-18
 
 ### Fixed

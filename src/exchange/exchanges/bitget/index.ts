@@ -4103,7 +4103,11 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           ? order.basePrice
             ? `${+order.basePrice || +order.priceAvg}`
             : order.priceAvg
-          : order.priceAvg,
+          : // `priceAvg` is "0" until a limit order fills; a resting one
+            // trades at its own limit price (spec 038).
+            +order.priceAvg
+            ? order.priceAvg
+            : order.price,
       origQty: order.size,
       executedQty: order.baseVolume,
       cummulativeQuoteQty: order.quoteVolume,

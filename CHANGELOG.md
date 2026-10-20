@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.20] - 2026-10-21
+
+### Fixed
+
+- Kraken spot: when a just-placed order could not be read back right away, the placement answer reported Kraken's order id as the client order id. It now carries the client order id that was sent.
+
 ## [1.27.19] - 2026-10-19
 
 ### Fixed

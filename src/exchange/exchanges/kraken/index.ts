@@ -2058,11 +2058,17 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
         // Last resort: prefer the Kraken txid so getOrder() re-routes through
         // the exact isKrakenSpotTxid() path; only fall back to the client-order-id
-        // lookup when no txid was returned at all.
-        return await this.getOrder(
+        // lookup when no txid was returned at all. Reading by txid labels the
+        // order with the txid, so put back the client id the caller sent: the
+        // answer to a placement names the order it was asked to place.
+        const lastResort = await this.getOrder(
           { symbol, newClientOrderId: txid || newClientOrderId || '' },
           timeProfile,
         )
+        if (txid && newClientOrderId && lastResort.status === StatusEnum.ok) {
+          lastResort.data.clientOrderId = newClientOrderId
+        }
+        return lastResort
       })
       .catch(
         this.handleKrakenErrors(

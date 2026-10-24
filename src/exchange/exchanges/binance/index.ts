@@ -80,6 +80,35 @@ import { timeIntervalMap } from '../okx'
 const SPOT_CANDLE_PAGE_SIZE = 1000
 const FUTURES_CANDLE_PAGE_SIZE = 1500
 
+/**
+ * The venue's own trade id for one fill of a spot FULL placement response.
+ *
+ * Binance sends `tradeId` on every such fill (a JSON integer — the same id
+ * the public trade tape and `myTrades` carry), even though the vendor SDK's
+ * `OrderFill` type leaves it out. Using it lets a fill be matched to the
+ * venue's trade exactly instead of by price/qty/time.
+ *
+ * Only a positive integer counts as a venue id. Anything else falls back to
+ * `${orderId}-${index}`, which can never be mistaken for one: an absent field,
+ * and the `-1` Binance reports for SOR allocations, which are not trades on
+ * the tape. Emitted as a string, as `CommonOrder.fills[].tradeId` is typed.
+ */
+const fillTradeId = (
+  fill: object,
+  orderId: number | string,
+  index: number,
+): string => {
+  // Not on the SDK's `OrderFill` type, so read it untyped.
+  const id = (fill as { tradeId?: unknown } | undefined)?.tradeId
+  if (typeof id === 'number' && Number.isSafeInteger(id) && id > 0) {
+    return `${id}`
+  }
+  if (typeof id === 'string' && /^[1-9]\d*$/.test(id)) {
+    return id
+  }
+  return `${orderId}-${index}`
+}
+
 export enum HttpMethod {
   GET = 'GET',
   HEAD = 'HEAD',
@@ -3393,10 +3422,7 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         qty: `${f.qty}`,
         commission: `${f.commission}`,
         commissionAsset: f.commissionAsset,
-        // Binance's spot FULL response omits `tradeId` on the fill; the index
-        // keeps the entries distinguishable without inventing an id that
-        // looks like the venue's.
-        tradeId: `${order.orderId}-${i}`,
+        tradeId: fillTradeId(f, order.orderId, i),
       })),
     }
   }

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.22] - 2026-10-29
+
+### Fixed
+
+- Kraken Futures: cancelling an order that had already part-filled could under-report what it executed. When fills raced the cancel, only the fills in the cancel response were counted and the order's earlier fills were dropped, so a part-filled order could report too small a size, or report as partially filled when the race completed it. The executed size now adds the fills Kraken says the order had before this response to the ones in it, without counting a fill twice when a snapshot already includes it. When the order filled before the cancel response, the response's own average price no longer stands in for the whole order: the average is read from the order's fills instead.
+- Hyperliquid: an order's fee and average fill price could be computed from only part of its fills. They are read from the account's fill history, which returns a limited number of fills per request, so on a busy account an order's fills could be cut off. The history is now read page by page until the fills add up to the order's executed size. If they still fall short, the fee is left out so the caller keeps its estimate instead of an under-reported fee, and the price is logged as coming from those fills only.
+
 ## [1.27.21] - 2026-10-24
 
 ### Fixed

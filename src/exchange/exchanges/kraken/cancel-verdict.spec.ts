@@ -131,6 +131,100 @@ describe('cancel-verdict', () => {
     'CANCELED',
   )
 
+  // --- fills made BEFORE the cancel batch are kept ----------------------------
+  // `orderPriorExecution.filled` is what had filled before the execution in
+  // this batch. Pre-fix only the batch's executions were counted, so an order
+  // that was already part-filled lost its earlier fills.
+  const execution = (amount: number, priorFilled: number, price = 100) => ({
+    type: 'EXECUTION',
+    executionId: `x${priorFilled}`,
+    price,
+    amount,
+    orderPriorEdit: orderJson({ quantity: 0.25, filled: priorFilled }),
+    orderPriorExecution: orderJson({ quantity: 0.25, filled: priorFilled }),
+  })
+
+  const batchOnly = ex.futures_readCancelOutcome({
+    status: 'cancelled',
+    orderEvents: [execution(0.05, 0)],
+  })
+  check('batch-only fill is counted', batchOnly.executedQty, 0.05)
+  check('batch-only fill keeps its price', batchOnly.avgPrice, 100)
+
+  const priorOnly = ex.futures_readCancelOutcome({
+    status: 'cancelled',
+    orderEvents: [
+      {
+        type: 'CANCEL',
+        uid: 'u1',
+        order: orderJson({ quantity: 0.25, filled: 0.17 }),
+      },
+    ],
+  })
+  check('prior-only fill is counted', priorOnly.executedQty, 0.17)
+
+  const priorPlusBatch = ex.futures_readCancelOutcome({
+    status: 'cancelled',
+    orderEvents: [execution(0.05, 0.17)],
+  })
+  check(
+    'prior fill + batch execution are added',
+    +priorPlusBatch.executedQty.toFixed(8),
+    0.22,
+  )
+  check(
+    'prior fill + batch execution still reports CANCELED',
+    ex.futures_deriveOrderStatus(
+      priorPlusBatch.rawStatus,
+      priorPlusBatch.executedQty,
+      priorPlusBatch.origQty,
+    ),
+    'CANCELED',
+  )
+  check(
+    'batch price is not used for a fill that started before the batch',
+    priorPlusBatch.avgPrice,
+    undefined,
+  )
+
+  const priorCompletes = ex.futures_readCancelOutcome({
+    status: 'filled',
+    orderEvents: [execution(0.08, 0.17)],
+  })
+  check(
+    'prior fill + completing execution = full quantity',
+    +priorCompletes.executedQty.toFixed(8),
+    0.25,
+  )
+  check(
+    'prior fill + completing execution reports FILLED',
+    ex.futures_deriveOrderStatus(
+      priorCompletes.rawStatus,
+      priorCompletes.executedQty,
+      priorCompletes.origQty,
+    ),
+    'FILLED',
+  )
+
+  // A post-execution snapshot that already includes the batch is not added
+  // on top of it.
+  const noDoubleCount = ex.futures_readCancelOutcome({
+    status: 'cancelled',
+    orderEvents: [
+      execution(0.05, 0.17),
+      {
+        type: 'CANCEL',
+        uid: 'u1',
+        order: orderJson({ quantity: 0.25, filled: 0.22 }),
+      },
+    ],
+  })
+  check(
+    'snapshot that includes the batch is not double counted',
+    +noDoubleCount.executedQty.toFixed(8),
+    0.22,
+  )
+
   // --- an ordinary, untouched cancel ------------------------------------------
   const plain = ex.futures_readCancelOutcome({
     status: 'cancelled',

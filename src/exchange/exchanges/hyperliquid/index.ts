@@ -26,6 +26,7 @@ import {
 } from '../../types'
 import * as hl from '@nktkas/hyperliquid'
 import { normalizeOrderFees, type OrderFeeFields } from '../../helpers/orderFee'
+import { collectOrderFills } from './orderFills'
 import { getWalletAddress } from '@nktkas/hyperliquid/signing'
 import { unknownPermissions } from '../../helpers/keyPermissions'
 import limitHelper from './limit'
@@ -2233,17 +2234,30 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               executedSz > 0))
         ) {
           try {
-            timeProfile =
-              (await this.checkLimits('userFillsByTime', 20, timeProfile)) ||
-              timeProfile
-            timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-            const fills = await this.infoClient
-              .userFillsByTime({
-                startTime: result.order.order.timestamp,
-                endTime: result.order.statusTimestamp,
-                user: this._key,
-              })
-              .then((r) => r.filter((f) => f.oid === result.order.order.oid))
+            const { fills, filledSz, complete } = await collectOrderFills({
+              oid: result.order.order.oid,
+              startTime: result.order.order.timestamp,
+              executedSz,
+              fetchPage: async (startTime) => {
+                timeProfile =
+                  (await this.checkLimits(
+                    'userFillsByTime',
+                    20,
+                    timeProfile,
+                  )) || timeProfile
+                timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+                return this.infoClient.userFillsByTime({
+                  startTime,
+                  endTime: result.order.statusTimestamp,
+                  user: this._key,
+                })
+              },
+            })
+            if (fills.length && !complete) {
+              Logger.warn(
+                `Fills for order ${data.newClientOrderId} cover ${filledSz} of executed ${executedSz}: price is from those fills only, fee left to the caller's estimate`,
+              )
+            }
             if (fills.length) {
               const base = fills.reduce((acc, fill) => acc + +fill.sz, 0)
               const quote = fills.reduce(
@@ -2263,13 +2277,18 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               // `feeToken` is HL's raw token name (UAVAX); alias it to the
               // ticker the pair is listed under (AVAX), or consumers can't
               // tell a base-asset fee from a third-asset one.
-              fee = normalizeOrderFees(
-                fills.map((f) => ({
-                  amount: f.fee,
-                  asset: aliasToken(f.feeToken),
-                })),
-                'charge-positive',
-              )
+              // Only when the fills account for the whole executed size: a fee
+              // summed over part of them would be reported as the order's fee
+              // and under-state it, where an omitted fee keeps the estimate.
+              if (complete) {
+                fee = normalizeOrderFees(
+                  fills.map((f) => ({
+                    amount: f.fee,
+                    asset: aliasToken(f.feeToken),
+                  })),
+                  'charge-positive',
+                )
+              }
             }
             timeProfile = this.endProfilerTime(timeProfile, 'exchange')
           } catch (e) {

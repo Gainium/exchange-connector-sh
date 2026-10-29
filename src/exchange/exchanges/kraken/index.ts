@@ -1229,11 +1229,41 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               : undefined),
       undefined,
     )
-    // EXECUTION events are the fills the cancel raced. Prefer them over the
-    // snapshot's `filled`, which predates the executions in this same batch.
-    const { executedQty: executedFromEvents, avgPrice } =
+    // EXECUTION events are only the fills the cancel raced; the order may have
+    // filled before this batch too. Each execution's `orderPriorExecution`
+    // states the order before it executed, so the earliest one's `filled` is
+    // what had filled before the batch, and adding the batch's amounts gives
+    // the total. A snapshot taken after the executions (a CANCEL's `order`)
+    // may already include them, so take the largest of these lower bounds
+    // instead of adding them up.
+    const { executedQty: executedFromEvents, avgPrice: batchAvgPrice } =
       this.futures_readExecutionPrice(events)
-    const executedQty = executedFromEvents || snapshot?.filled || 0
+    const priorFills = events.flatMap((e) =>
+      e.type === 'EXECUTION' && 'orderPriorExecution' in e
+        ? [e.orderPriorExecution?.filled || 0]
+        : [],
+    )
+    const filledBeforeBatch = priorFills.length ? Math.min(...priorFills) : 0
+    const snapshotFilled = events.reduce(
+      (acc, e) =>
+        Math.max(
+          acc,
+          ('order' in e ? e.order?.filled : undefined) || 0,
+          ('old' in e ? e.old?.filled : undefined) || 0,
+        ),
+      0,
+    )
+    const executedQty = Math.max(
+      filledBeforeBatch + executedFromEvents,
+      snapshotFilled,
+    )
+    // The batch's price only describes the whole fill when the batch is the
+    // whole fill. Otherwise leave it unset so the caller reads the order's
+    // fills rather than pricing earlier fills at this batch's average.
+    const avgPrice =
+      executedFromEvents > 0 && executedFromEvents >= executedQty
+        ? batchAvgPrice
+        : undefined
 
     if (cancelStatus.status === 'filled' && executedQty <= 0) {
       return unknownOutcome

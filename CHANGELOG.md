@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.23] - 2026-10-29
+
+### Fixed
+
+- Kraken Futures candles came back as mark-price candles. `getCandles` asked Kraken's charts API for `mark` candles, which carry mark prices and a volume of 0 on every bar, while the live price feed delivers trade candles. A futures series loaded through this endpoint and then extended live mixed two price sources, and volume-based indicators read 0 over the loaded part. It now asks for `trade` candles.
+
 ## [1.27.22] - 2026-10-29
 
 ### Fixed

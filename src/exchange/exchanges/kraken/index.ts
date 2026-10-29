@@ -4787,9 +4787,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
 
+      // `trade` candles, like every other venue's klines and like the live
+      // `candles_trade_*` feed the price connector archives. `mark` candles
+      // carry no volume (always 0) and mark prices, so a series backfilled
+      // here and extended by the live feed mixed two price sources, and every
+      // volume-based indicator read 0 over the backfilled part.
       return this.derivativesClient
         .getCandles({
-          tickType: 'mark',
+          tickType: 'trade',
           symbol: krakenSymbol,
           resolution: interval as FuturesGetCandlesParams['resolution'],
           from: from ? Math.floor(from / 1000) : undefined,

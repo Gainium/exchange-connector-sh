@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.24] - 2026-10-31
+
+### Fixed
+
+- Kraken Futures: an order no longer on the open-orders view was read back from the order history as it looked when it was placed. A MARKET order that executed a small part on placement and the rest a moment later was reported as partly filled at that small part, on every read. The read-back now uses the order's latest recorded state and, when that still shows less than the order size, adds up the account fills recorded for the order.
+
 ## [1.27.23] - 2026-10-29
 
 ### Fixed

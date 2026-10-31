@@ -522,6 +522,58 @@ const KRAKEN_AVG_PRICE_LOG_TTL = 60 * 60 * 1000
  */
 const KRAKEN_ORDER_PLACED_PROPAGATION_MS = 60 * 1000
 
+/** One order's state as recorded by a Kraken Futures order-history event. */
+export type KrakenHistoryOrderState = {
+  kind: 'placed' | 'updated' | 'cancelled' | 'rejected'
+  timestamp: number
+  order: any
+}
+
+/**
+ * The LATEST state Kraken's order history records for one client order id.
+ *
+ * `getOrderEvents` holds one event per change: `OrderPlaced` (a snapshot at
+ * placement), `OrderUpdated` (`newOrder` after each fill or edit),
+ * `OrderCancelled`, `OrderRejected`. Reading the first `OrderPlaced` match —
+ * as this used to — reports what the order looked like the instant it was
+ * accepted. For a MARKET order that is the slice executed on placement, e.g.
+ * 0.0042 of 0.1362, while the rest filled milliseconds later: the order was
+ * relayed as PARTIALLY_FILLED at a fraction of its size forever, the deal sat
+ * in start, and the real position was left on the venue untracked.
+ *
+ * Latest by event timestamp wins; at equal timestamps a terminal event beats
+ * an update, which beats the placement snapshot. Pure — no network.
+ */
+export function krakenLatestHistoryState(
+  elements: any[],
+  clientOrderId: string,
+): KrakenHistoryOrderState | null {
+  const rank = { placed: 0, updated: 1, cancelled: 2, rejected: 2 }
+  let best: KrakenHistoryOrderState | null = null
+  for (const e of elements ?? []) {
+    const ev = e?.event
+    if (!ev) continue
+    const candidates: [KrakenHistoryOrderState['kind'], any][] = [
+      ['placed', ev.OrderPlaced?.order],
+      ['updated', ev.OrderUpdated?.newOrder],
+      ['cancelled', ev.OrderCancelled?.order],
+      ['rejected', ev.OrderRejected?.order],
+    ]
+    for (const [kind, order] of candidates) {
+      if (!order || order.clientId !== clientOrderId) continue
+      const timestamp = +(e.timestamp || 0)
+      if (
+        !best ||
+        timestamp > best.timestamp ||
+        (timestamp === best.timestamp && rank[kind] > rank[best.kind])
+      ) {
+        best = { kind, timestamp, order }
+      }
+    }
+  }
+  return best
+}
+
 /**
  * Does this failure mean "this key will never be allowed to read fills", as
  * opposed to "try again later"?
@@ -1407,6 +1459,22 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     orderId?: string,
     clientOrderId?: string,
   ): Promise<number | null> {
+    return (
+      (await this.futures_getFillTotals(orderId, clientOrderId))?.avgPrice ??
+      null
+    )
+  }
+
+  /**
+   * Executed size and size-weighted price of one order, summed from the
+   * account fills Kraken reports against it. Same source and same failure
+   * handling as the average-price lookup it backs; `null` when the fills page
+   * holds nothing for this order or the call fails.
+   */
+  private async futures_getFillTotals(
+    orderId?: string,
+    clientOrderId?: string,
+  ): Promise<{ executedQty: number; avgPrice: number } | null> {
     if (!this.derivativesClient || (!orderId && !clientOrderId)) return null
     try {
       await this.checkLimits('getFills')
@@ -1437,7 +1505,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         size += fill.size
       }
       if (size <= 0) return null
-      return notional / size
+      // Summed floats: 0.0042 + 0.132 must compare equal to 0.1362.
+      return { executedQty: +size.toFixed(10), avgPrice: notional / size }
     } catch (e) {
       this.logAvgFillPriceFailure(e instanceof Error ? e.message : `${e}`)
       // Never break order recording over a price refinement — the caller still
@@ -3150,79 +3219,73 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 throw new Error('Failed to get order events')
               }
 
-              // Find the order by client order ID in events
-              // Events can be: OrderPlaced, OrderRejected, OrderCancelled
-              const orderEvent = eventsResult.elements.find((e: any) => {
-                const order =
-                  e.event?.OrderPlaced?.order ||
-                  e.event?.OrderRejected?.order ||
-                  e.event?.OrderCancelled?.order ||
-                  null
-                return order?.clientId === newClientOrderId
-              })
-
-              if (!orderEvent || !orderEvent.event) {
+              // The LATEST recorded state of this order, not its placement
+              // snapshot — see `krakenLatestHistoryState`.
+              const latest = krakenLatestHistoryState(
+                eventsResult.elements,
+                newClientOrderId,
+              )
+              if (!latest) {
                 throw new Error('Order not found in history')
               }
+              const order = latest.order
+              const quantity = parseFloat(order.quantity || '0')
+              let filled = parseFloat(order.filled || '0')
+              let avgFillPrice: number | null = null
 
-              // Extract order from event
-              const order =
-                orderEvent.event?.OrderPlaced?.order ||
-                orderEvent.event?.OrderRejected?.order ||
-                orderEvent.event?.OrderCancelled?.order ||
-                null
-
-              if (!order) {
-                throw new Error('Order data not found in event')
+              // History can still trail the venue, and it is all we have once
+              // the user stream is down. The account fills are what actually
+              // executed against this client order id; trust them over a
+              // snapshot that says less.
+              if (latest.kind !== 'rejected' && filled < quantity) {
+                const fromFills = await this.futures_getFillTotals(
+                  order.uid,
+                  newClientOrderId,
+                )
+                if (fromFills && fromFills.executedQty > filled) {
+                  filled = Math.min(fromFills.executedQty, quantity || Infinity)
+                  avgFillPrice = fromFills.avgPrice
+                }
               }
 
               // Determine status based on event type and filled amount
               let status = 'NEW'
-              if (
-                orderEvent.event.OrderRejected ||
-                orderEvent.event.OrderCancelled
-              ) {
+              if (latest.kind === 'rejected' || latest.kind === 'cancelled') {
                 status = 'CANCELED'
-              } else if (orderEvent.event.OrderPlaced) {
-                const filled = parseFloat(order.filled || '0')
-                const quantity = parseFloat(order.quantity || '0')
-
-                if (filled > 0) {
-                  status = filled >= quantity ? 'FILLED' : 'PARTIALLY_FILLED'
-                } else if (
-                  statusViewAnswered &&
-                  +new Date() - (orderEvent.timestamp || 0) >
-                    KRAKEN_ORDER_PLACED_PROPAGATION_MS
-                ) {
-                  // Bug #408. `OrderPlaced` records that Kraken once accepted
-                  // this order — it is not a snapshot of it. We only get here
-                  // because `getOrderStatus`, the authoritative live view, has
-                  // already said it does not know the id, so an old placement
-                  // with nothing filled is the record of how the phantom was
-                  // born, not evidence it is resting. Reporting NEW is what
-                  // survived the #375 fix: main-app's `_handleUnknownOrder`
-                  // treats a successful read as a resolution and clears its
-                  // `canceledMap` counter, so the 5-attempt force-cancel that
-                  // exists for exactly this case is never reached and the row
-                  // sits at NEW forever (7 cancels/18h on `GRID-RO-9BQqa08…`).
-                  //
-                  // Surfaced as a definitive not-found so `main-app`'s
-                  // `isDefinitiveOrderNotFound` matches and the counter can
-                  // finally saturate. Deliberately narrow: fills above are real
-                  // evidence at any age, a terminal cancel/reject is handled
-                  // above, and only a placement younger than the propagation
-                  // floor is still trusted — see that constant.
-                  throw new Error('Order not found in history')
-                }
+              } else if (filled > 0) {
+                status = filled >= quantity ? 'FILLED' : 'PARTIALLY_FILLED'
+              } else if (
+                statusViewAnswered &&
+                +new Date() - latest.timestamp >
+                  KRAKEN_ORDER_PLACED_PROPAGATION_MS
+              ) {
+                // Bug #408. `OrderPlaced` records that Kraken once accepted
+                // this order — it is not a snapshot of it. We only get here
+                // because `getOrderStatus`, the authoritative live view, has
+                // already said it does not know the id, so an old placement
+                // with nothing filled is the record of how the phantom was
+                // born, not evidence it is resting. Reporting NEW is what
+                // survived the #375 fix: main-app's `_handleUnknownOrder`
+                // treats a successful read as a resolution and clears its
+                // `canceledMap` counter, so the 5-attempt force-cancel that
+                // exists for exactly this case is never reached and the row
+                // sits at NEW forever (7 cancels/18h on `GRID-RO-9BQqa08…`).
+                //
+                // Surfaced as a definitive not-found so `main-app`'s
+                // `isDefinitiveOrderNotFound` matches and the counter can
+                // finally saturate. Deliberately narrow: fills above are real
+                // evidence at any age, a terminal cancel/reject is handled
+                // above, and only a state younger than the propagation floor
+                // is still trusted — see that constant.
+                throw new Error('Order not found in history')
               }
 
-              const avgFillPrice =
-                parseFloat(order.filled || '0') > 0
-                  ? await this.futures_getAvgFillPrice(
-                      order.uid,
-                      newClientOrderId,
-                    )
-                  : null
+              if (filled > 0 && avgFillPrice === null) {
+                avgFillPrice = await this.futures_getAvgFillPrice(
+                  order.uid,
+                  newClientOrderId,
+                )
+              }
               return this.returnGood<CommonOrder>(timeProfile)(
                 this.futures_convertOrder({
                   orderId: order.uid || '',
@@ -3230,8 +3293,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                   clientOrderId: newClientOrderId,
                   price: parseFloat(order.limitPrice || '0'),
                   avgPrice: avgFillPrice ?? undefined,
-                  origQty: parseFloat(order.quantity || '0'),
-                  executedQty: parseFloat(order.filled || '0'),
+                  origQty: quantity,
+                  executedQty: filled,
                   status: status,
                   type: order.orderType?.toLowerCase() || 'lmt',
                   side: order.direction?.toLowerCase() || 'buy',

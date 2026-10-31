@@ -2194,6 +2194,9 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       }
     }
     let fee: OrderFeeFields | undefined
+    // Set only when the fill history proves a cancel executed less than
+    // `origSz - sz` (spec 041).
+    let executedFromFills: number | undefined
     return this.infoClient
       .orderStatus({
         user: this._key,
@@ -2234,26 +2237,43 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               executedSz > 0))
         ) {
           try {
-            const { fills, filledSz, complete } = await collectOrderFills({
-              oid: result.order.order.oid,
-              startTime: result.order.order.timestamp,
-              executedSz,
-              fetchPage: async (startTime) => {
-                timeProfile =
-                  (await this.checkLimits(
-                    'userFillsByTime',
-                    20,
-                    timeProfile,
-                  )) || timeProfile
-                timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-                return this.infoClient.userFillsByTime({
-                  startTime,
-                  endTime: result.order.statusTimestamp,
-                  user: this._key,
-                })
-              },
-            })
-            if (fills.length && !complete) {
+            const { fills, filledSz, complete, exhausted } =
+              await collectOrderFills({
+                oid: result.order.order.oid,
+                startTime: result.order.order.timestamp,
+                executedSz,
+                fetchPage: async (startTime) => {
+                  timeProfile =
+                    (await this.checkLimits(
+                      'userFillsByTime',
+                      20,
+                      timeProfile,
+                    )) || timeProfile
+                  timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+                  return this.infoClient.userFillsByTime({
+                    startTime,
+                    endTime: result.order.statusTimestamp,
+                    user: this._key,
+                  })
+                },
+              })
+            // Hyperliquid can lower `sz` on a resting order without a trade
+            // (a reduce-only order shrunk to the position), so on a cancel
+            // `origSz - sz` is not evidence of a fill. When the whole window
+            // was read and the order's fills add up to less, the fills are
+            // what executed — none at all is 0 (spec 041). A history that was
+            // not read to the end keeps `origSz - sz`.
+            const shrunkWithoutFill =
+              result.order.status !== 'filled' &&
+              exhausted &&
+              !complete &&
+              filledSz < executedSz
+            if (shrunkWithoutFill) {
+              executedFromFills = filledSz
+              Logger.warn(
+                `Order ${data.newClientOrderId} (${result.order.status}) shows origSz - sz ${executedSz} but its fill history holds ${filledSz}: reporting ${filledSz} executed`,
+              )
+            } else if (fills.length && !complete) {
               Logger.warn(
                 `Fills for order ${data.newClientOrderId} cover ${filledSz} of executed ${executedSz}: price is from those fills only, fee left to the caller's estimate`,
               )
@@ -2280,7 +2300,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
               // Only when the fills account for the whole executed size: a fee
               // summed over part of them would be reported as the order's fee
               // and under-state it, where an omitted fee keeps the estimate.
-              if (complete) {
+              if (complete || shrunkWithoutFill) {
                 fee = normalizeOrderFees(
                   fills.map((f) => ({
                     amount: f.fee,
@@ -2305,6 +2325,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             result.order.statusTimestamp,
             price,
             fee,
+            executedFromFills,
           ),
         )
       })
@@ -3358,6 +3379,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
      * the real fill price.
      */
     fee?: OrderFeeFields,
+    /**
+     * The executed size read from the order's fills, when they prove less
+     * traded than `origSz - sz` (spec 041). Absent ⇒ `origSz - sz`.
+     */
+    executedFromFills?: number,
   ): Promise<CommonOrder> {
     const orderStatus: OrderStatusType =
       status === 'open' ? 'NEW' : status === 'filled' ? 'FILLED' : 'CANCELED'
@@ -3378,7 +3404,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     // limitPx is the slippage-padded IOC request price — nothing traded
     // there — so without a real fill price report 0 and let the consumer
     // fall back to the price it already knows (same shape as bug #426).
-    const executed = +order.origSz - +order.sz
+    const executed = executedFromFills ?? +order.origSz - +order.sz
     let quote =
       +(filledPrice || (orderType === 'LIMIT' ? order.limitPx : 0)) * executed
     if (isNaN(quote) || !isFinite(quote)) {
@@ -3393,7 +3419,7 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
       updateTime: timestamp || order.timestamp,
       price: filledPrice || order.limitPx,
       origQty: order.origSz,
-      executedQty: `${+order.origSz - +order.sz}`,
+      executedQty: `${executed}`,
       cummulativeQuoteQty: `${quote}`,
       status: orderStatus,
       type: orderType,

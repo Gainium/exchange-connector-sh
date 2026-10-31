@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.25] - 2026-10-31
+
+### Fixed
+
+- Hyperliquid: reading back a cancelled order whose remaining size had been lowered without a trade (Hyperliquid shrinks a resting reduce-only order to the position it can still reduce) reported the difference between the original and remaining size as executed. `getOrder` already reads the order's fills from Hyperliquid's fill history; when that history was read to the end and holds less than that difference, the executed size, quote and fee now come from those fills, which is zero when the order never traded. A history that could not be read to the end keeps the previous answer.
+
 ## [1.27.24] - 2026-10-31
 
 ### Fixed

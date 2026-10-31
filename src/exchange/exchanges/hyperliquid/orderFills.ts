@@ -15,6 +15,9 @@
  * executed size, a page comes back short, or `maxPages` is reached.
  * `complete` says whether the fills found account for the executed size;
  * callers must not present a fee summed over an incomplete list as final.
+ * `exhausted` says the whole window was read (a short page ended it), so
+ * `fills` is every fill the order has — the evidence a cancel whose `sz`
+ * shrank without trading needs (spec 041).
  *
  * Pure apart from `fetchPage` — exercised by `order-fills.spec.ts`.
  */
@@ -36,7 +39,12 @@ export async function collectOrderFills<F extends HlOrderFill>(params: {
   executedSz: number
   fetchPage: (startTime: number) => Promise<readonly F[]>
   maxPages?: number
-}): Promise<{ fills: F[]; filledSz: number; complete: boolean }> {
+}): Promise<{
+  fills: F[]
+  filledSz: number
+  complete: boolean
+  exhausted: boolean
+}> {
   const { oid, executedSz, fetchPage, maxPages = 5 } = params
   const fills: F[] = []
   const seen = new Set<number>()
@@ -44,6 +52,7 @@ export async function collectOrderFills<F extends HlOrderFill>(params: {
   const tolerance = Math.max(Math.abs(executedSz) * 1e-9, 1e-12)
   let filledSz = 0
   let startTime = params.startTime
+  let exhausted = false
 
   for (let page = 0; page < maxPages; page++) {
     const batch = await fetchPage(startTime)
@@ -59,6 +68,7 @@ export async function collectOrderFills<F extends HlOrderFill>(params: {
       break
     }
     if (batch.length < HL_FILLS_PAGE_LIMIT) {
+      exhausted = true
       break
     }
     const newest = batch.reduce((acc, f) => Math.max(acc, f.time), startTime)
@@ -73,5 +83,6 @@ export async function collectOrderFills<F extends HlOrderFill>(params: {
     fills,
     filledSz,
     complete: Math.abs(filledSz - executedSz) <= tolerance,
+    exhausted,
   }
 }

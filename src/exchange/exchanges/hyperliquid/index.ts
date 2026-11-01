@@ -2147,20 +2147,38 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
         if (order.type === 'MARKET') {
           await sleep(500)
         }
+        // A MARKET is sent as a GTC limit padded through the book (above), so
+        // when it does not fill at once it rests at the PADDED price, not the
+        // requested one: pass no price and let the read-back report the
+        // limitPx Hyperliquid actually holds. Hyperliquid also reports every
+        // order we send as `Limit`; the order type is the one we placed
+        // (spec 042).
         const price =
           'filled' in result.response.data.statuses[0]
             ? result.response.data.statuses[0].filled.avgPx
-            : `${order.price}`
+            : order.type === 'MARKET'
+              ? ''
+              : `${order.price}`
+        const asPlaced = (r: BaseReturn<CommonOrder>) => {
+          if (order.type === 'MARKET' && r.status === StatusEnum.ok && r.data) {
+            r.data.type = 'MARKET'
+          }
+          return r
+        }
         try {
-          return await this.getOrder(getOrderPayload, timeProfile, price, true)
+          return asPlaced(
+            await this.getOrder(getOrderPayload, timeProfile, price, true),
+          )
         } catch (e) {
-          return this.handleHyperliquidErrors(
-            this.getOrder,
-            getOrderPayload,
-            this.endProfilerTime(timeProfile, 'exchange'),
-            price,
-            true,
-          )(e)
+          return asPlaced(
+            await this.handleHyperliquidErrors(
+              this.getOrder,
+              getOrderPayload,
+              this.endProfilerTime(timeProfile, 'exchange'),
+              price,
+              true,
+            )(e),
+          )
         }
       })
       .catch(
@@ -3431,8 +3449,8 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     // ~18x price and +$684 profit on a $40 position (2026-08-26).
     // For a LIMIT order the limit price bounds every fill, so it is a safe
     // stand-in when no fills-derived price is available. A MARKET order's
-    // limitPx is the slippage-padded IOC request price — nothing traded
-    // there — so without a real fill price report 0 and let the consumer
+    // limitPx is the slippage-padded request price (sent as a GTC limit) —
+    // nothing traded there — so without a real fill price report 0 and let the consumer
     // fall back to the price it already knows (same shape as bug #426).
     const executed = executedFromFills ?? +order.origSz - +order.sz
     let quote =

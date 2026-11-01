@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.26] - 2026-10-31
+
+### Fixed
+
+- Hyperliquid: Hyperliquid's fill history only keeps an account's most recent fills, so reading back an order placed long enough ago could find none of its fills and report a real execution as zero. A cancelled order's executed size is now lowered below the original-minus-remaining size only when the retained history reaches back to the order's placement; otherwise the previous size is kept, priced from the fills that were found, and a warning is logged.
+
 ## [1.27.25] - 2026-10-31
 
 ### Fixed

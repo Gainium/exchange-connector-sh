@@ -86,3 +86,23 @@ export async function collectOrderFills<F extends HlOrderFill>(params: {
     exhausted,
   }
 }
+
+/**
+ * Whether the account's fill history still reaches back to `since` (spec 041
+ * §4.6). `userFillsByTime` serves only an account's most recent fills (about
+ * 10,000; a busy account measured on 2026-10-31 kept ~25h), so a window read
+ * to its end with no fill for the oid can mean "evicted", not "never filled".
+ * `oldestPage` is the answer for `startTime: 0` — HL returns the oldest
+ * retained fills first. A short page means nothing was ever evicted; otherwise
+ * its oldest fill must be strictly older than `since` (an eviction can cut
+ * inside one millisecond).
+ */
+export function fillHistoryCovers(
+  oldestPage: readonly { time: number }[],
+  since: number,
+): boolean {
+  if (oldestPage.length < HL_FILLS_PAGE_LIMIT) {
+    return true
+  }
+  return oldestPage.reduce((m, f) => Math.min(m, f.time), Infinity) < since
+}

@@ -19,6 +19,9 @@ process.env.NODE_ENV = 'testing'
  *   - §4.4 history not read to the end (page cap) or the lookup threw →
  *     unchanged origSz - sz (an unread history is not evidence of no fill)
  *   - §4.5 filled order → unchanged
+ *   - §4.6 the account's retained history does not reach back to the order's
+ *     placement (HL keeps only its most recent fills), or that could not be
+ *     read → unchanged origSz - sz; it does → §4.1/§4.2 as before
  *
  * Run: `npm test` (mocha). No network: the info client is a fake.
  */
@@ -72,7 +75,7 @@ function fill(tid: number, sz: string, oid = OID) {
 
 async function getOrder(
   orderStatus: unknown,
-  fillsByTime: () => Promise<unknown[]>,
+  fillsByTime: (q: { startTime: number }) => Promise<unknown[]>,
 ) {
   const ex = new HyperliquidExchange(
     Futures.usdm,
@@ -161,6 +164,44 @@ describe('hyperliquid getOrder shrunk cancel (spec 041)', () => {
   it('§4.4 history lookup threw → origSz - sz kept', async () => {
     const o = await getOrder(order('reduceOnlyCanceled', '0.041'), async () => {
       throw new Error('429')
+    })
+    check('executedQty', +(+o.executedQty).toFixed(9), 0.003)
+  })
+
+  // A full page for startTime 0 whose oldest fill is `oldest`: everything
+  // before it has been evicted from the account's history.
+  const retained = (oldest: number) =>
+    Array.from({ length: HL_FILLS_PAGE_LIMIT }, (_, i) => ({
+      ...fill(5000 + i, '1', 7),
+      time: oldest + i,
+    }))
+
+  it('§4.6 history evicted past the placement → origSz - sz kept', async () => {
+    const o = await getOrder(order('reduceOnlyCanceled', '0.041'), async (q) =>
+      q.startTime === 0 ? retained(PLACED + 60_000) : [],
+    )
+    check('executedQty', +(+o.executedQty).toFixed(9), 0.003)
+  })
+
+  it('§4.6 history evicted, one fill still retained → origSz - sz kept', async () => {
+    const o = await getOrder(order('reduceOnlyCanceled', '0.041'), async (q) =>
+      q.startTime === 0 ? retained(PLACED + 60_000) : [fill(1, '0.001')],
+    )
+    check('executedQty', +(+o.executedQty).toFixed(9), 0.003)
+    check('price from the retained fill', +o.price, 249.6)
+  })
+
+  it('§4.6 retained history reaches before the placement → 0, as today', async () => {
+    const o = await getOrder(order('reduceOnlyCanceled', '0.041'), async (q) =>
+      q.startTime === 0 ? retained(PLACED - 60_000) : [],
+    )
+    check('executedQty', +o.executedQty, 0)
+  })
+
+  it('§4.6 coverage probe threw → origSz - sz kept', async () => {
+    const o = await getOrder(order('reduceOnlyCanceled', '0.041'), async (q) => {
+      if (q.startTime === 0) throw new Error('429')
+      return []
     })
     check('executedQty', +(+o.executedQty).toFixed(9), 0.003)
   })

@@ -26,7 +26,7 @@ import {
 } from '../../types'
 import * as hl from '@nktkas/hyperliquid'
 import { normalizeOrderFees, type OrderFeeFields } from '../../helpers/orderFee'
-import { collectOrderFills } from './orderFills'
+import { collectOrderFills, fillHistoryCovers } from './orderFills'
 import { getWalletAddress } from '@nktkas/hyperliquid/signing'
 import { unknownPermissions } from '../../helpers/keyPermissions'
 import limitHelper from './limit'
@@ -2262,12 +2262,42 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
             // `origSz - sz` is not evidence of a fill. When the whole window
             // was read and the order's fills add up to less, the fills are
             // what executed — none at all is 0 (spec 041). A history that was
-            // not read to the end keeps `origSz - sz`.
-            const shrunkWithoutFill =
+            // not read to the end keeps `origSz - sz`, and so does one whose
+            // retained history does not reach back to the order's placement
+            // (HL keeps only an account's most recent fills, §4.6).
+            let shrunkWithoutFill =
               result.order.status !== 'filled' &&
               exhausted &&
               !complete &&
               filledSz < executedSz
+            if (shrunkWithoutFill) {
+              let covered = false
+              try {
+                timeProfile =
+                  (await this.checkLimits(
+                    'userFillsByTime',
+                    20,
+                    timeProfile,
+                  )) || timeProfile
+                covered = fillHistoryCovers(
+                  await this.infoClient.userFillsByTime({
+                    startTime: 0,
+                    user: this._key,
+                  }),
+                  result.order.order.timestamp,
+                )
+              } catch (e) {
+                Logger.warn(
+                  `Order ${data.newClientOrderId}: could not read the oldest retained fills: ${e?.message ?? e}`,
+                )
+              }
+              if (!covered) {
+                shrunkWithoutFill = false
+                Logger.warn(
+                  `Order ${data.newClientOrderId} (${result.order.status}) shows origSz - sz ${executedSz} but its fill history holds ${filledSz} and is not proven to reach back to placement at ${result.order.order.timestamp}: keeping origSz - sz`,
+                )
+              }
+            }
             if (shrunkWithoutFill) {
               executedFromFills = filledSz
               Logger.warn(

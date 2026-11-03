@@ -2218,7 +2218,11 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.infoClient
       .orderStatus({
         user: this._key,
-        oid: data.newClientOrderId as `0x${string}`,
+        // A venue oid must go as a JSON number — Hyperliquid 422s a numeric
+        // string. Cloids (0x-hex) pass through unchanged.
+        oid: /^\d+$/.test(`${data.newClientOrderId}`)
+          ? Number(data.newClientOrderId)
+          : (data.newClientOrderId as `0x${string}`),
       })
       .then(async (r: any) => {
         const result: OrderResponse = r
@@ -3003,14 +3007,83 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     })
   }
 
-  async cancelOrderByOrderIdAndSymbol(order: {
-    symbol: string
-    orderId: string
-  }): Promise<BaseReturn<CommonOrder>> {
-    return await this.cancelOrder({
-      symbol: order.symbol,
-      newClientOrderId: order.orderId,
-    })
+  /**
+   * Cancel by the VENUE order id — the `orderId` this connector reports for
+   * every Hyperliquid order (`oid`). The cloid path (`cancelOrder`) cannot take
+   * one: Hyperliquid rejects a non-hex cloid with "422 Failed to deserialize",
+   * and orders placed outside Gainium have no cloid at all. A cloid-shaped id
+   * is still accepted and routed to `cancelOrder`, so callers that already send
+   * the client id keep working.
+   */
+  async cancelOrderByOrderIdAndSymbol(
+    order: {
+      symbol: string
+      orderId: string
+    },
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<CommonOrder>> {
+    const id = `${order.orderId}`
+    if (/^0x[0-9a-f]{32}$/i.test(id)) {
+      return await this.cancelOrder(
+        { symbol: order.symbol, newClientOrderId: id },
+        timeProfile,
+      )
+    }
+    if (!/^\d+$/.test(id)) {
+      return this.returnBad(timeProfile)(
+        new Error(`Invalid Hyperliquid order id ${id}`),
+      )
+    }
+    timeProfile =
+      (await this.checkLimits('futuresCancelOrder', 1, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} cancelOrderByOrderIdAndSymbol ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
+    const cancel = {
+      a: +(await this.getCoinByPair(order.symbol, true)),
+      o: Number(id),
+    }
+    return this.exchangeClient
+      .cancel(
+        {
+          cancels: [cancel],
+        },
+        { vaultAddress: this.subaccount ? (this.key as `0x${string}`) : null },
+      )
+      .then(async (r: any) => {
+        const result: CancelOrderResponse = r
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (result.response.data.statuses[0] === 'success') {
+          return await this.getOrder(
+            { symbol: order.symbol, newClientOrderId: id },
+            timeProfile,
+            '',
+            true,
+          )
+        }
+        return this.handleHyperliquidErrors(
+          this.cancelOrderByOrderIdAndSymbol,
+          order,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        )(new HyperliquidError(result.response.data.statuses[0].error, 1))
+      })
+      .catch(
+        this.handleHyperliquidErrors(
+          this.cancelOrderByOrderIdAndSymbol,
+          order,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   /** Get exchange info for all pairs

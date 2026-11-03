@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.27] - 2026-11-03
+
+### Fixed
+
+- Hyperliquid: cancelling an order by its exchange order id (the id this connector reports as `orderId`) sent that id to Hyperliquid as a client order id, which Hyperliquid rejects as malformed, so the cancel always failed. It now cancels by the exchange order id and reads the order back by that id; a client-order-id-shaped value is still cancelled by client order id. Orders placed outside Gainium, which have no client order id, can now be cancelled this way too.
+
 ## [1.27.26] - 2026-10-31
 
 ### Fixed

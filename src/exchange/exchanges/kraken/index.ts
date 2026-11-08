@@ -45,7 +45,7 @@ import {
   krakenSpotWindowIsUnreachable,
 } from './candles'
 import { Logger } from '@nestjs/common'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { sleep } from '../../../utils/sleepUtils'
 import { safeStringify } from '../../../utils/redact'
 import {
@@ -1924,6 +1924,57 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       }
       return { ok: true, reason: '' }
     }
+  }
+
+  /**
+   * Check the key may READ and CANCEL orders ("Orders and trades - Query open
+   * orders & trades" and "- Cancel & close orders" on Kraken). A key that can
+   * only place orders passes the Balance and WebSocket probes, and a bot then
+   * runs blind: it cannot see its own orders, and when it is closed it cannot
+   * cancel them, so they keep resting on the exchange holding the user's funds.
+   *
+   * Both probes move nothing. Open orders is a read. The cancel addresses a
+   * fresh random `cl_ord_id` that no order can carry, so a permitted key gets
+   * `EOrder:Unknown order` and only a key without the permission gets
+   * `EGeneral:Permission denied`. As with the WebSocket probe, only a definite
+   * permission refusal reports `ok:false`; anything else (rate limit, 5xx, an
+   * unexpected answer) never blocks verification. Spot-only: Kraken Futures
+   * keys carry a different permission model.
+   */
+  async verifyOrderPermissions(): Promise<{
+    ok: boolean
+    missing?: 'query' | 'cancel'
+    reason: string
+  }> {
+    if (!this.spotClient) {
+      return { ok: true, reason: '' }
+    }
+    const client = this.spotClient
+    const denied = async (call: () => Promise<unknown>) => {
+      const isPermissionDenied = (s: string) =>
+        /EGeneral\s*:?\s*Permission denied/i.test(s)
+      try {
+        const res = await call()
+        const errors: string[] = Array.isArray((res as any)?.error)
+          ? (res as any).error
+          : []
+        return errors.some(isPermissionDenied) ? errors.join(',') : ''
+      } catch (e: any) {
+        const msg = e?.body?.error?.join?.(',') || e?.message || `${e}`
+        return isPermissionDenied(msg) ? msg : ''
+      }
+    }
+    const query = await denied(() => client.getOpenOrders())
+    if (query) {
+      return { ok: false, missing: 'query', reason: query }
+    }
+    const cancel = await denied(() =>
+      client.cancelOrder({ cl_ord_id: randomUUID() }),
+    )
+    if (cancel) {
+      return { ok: false, missing: 'cancel', reason: cancel }
+    }
+    return { ok: true, reason: '' }
   }
 
   /**

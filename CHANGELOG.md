@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.28] - 2026-11-08
+
+### Fixed
+
+- Kraken spot key verification also checks the "Query open orders & trades" and "Cancel & close orders" permissions (a read of open orders, and a cancel addressed to a random client order id no order carries) and refuses a key that lacks either, with the permission to enable. A key that could only place orders used to pass, and its bots could neither see nor cancel their orders.
+
 ## [1.27.27] - 2026-11-03
 
 ### Fixed

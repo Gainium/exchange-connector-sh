@@ -369,6 +369,25 @@ const verifyKraken = async (
               `"WebSocket interface" and save — then verify again.`,
           }
         }
+        // A key that can place orders but not read or cancel them leaves a
+        // bot unable to see its orders, and a closed bot's orders resting on
+        // the exchange with nothing able to cancel them.
+        const orders = await client.verifyOrderPermissions()
+        if (!orders.ok) {
+          const label =
+            orders.missing === 'cancel'
+              ? 'Cancel & close orders'
+              : 'Query open orders & trades'
+          return {
+            status: false,
+            reason:
+              `Your Kraken API key is missing the "${label}" permission, ` +
+              `which Gainium needs to manage the orders its bots place. ` +
+              `On Kraken go to Settings → API, edit this key, enable ` +
+              `"Query open orders & trades" and "Cancel & close orders" and ` +
+              `save — then verify again.`,
+          }
+        }
         return { status: true, reason: JSON.stringify(res) }
       })
       .catch((e) => ({ status: false, reason: `Kraken catch ${e}` })),

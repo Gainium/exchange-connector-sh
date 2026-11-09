@@ -179,6 +179,55 @@ describe('kraken spot openOrder: ambiguous submit errors', () => {
     check('never re-sends', () => calls.submitOrder, 1)
   })
 
+  describe('service timeout, order WAS placed, retry ladder on', () => {
+    const { ex, calls } = makeExchange({
+      submits: [() => ({ error: ['EService:Timeout'], result: undefined })],
+      open: () => ({ error: [], result: { open: { [PLACED]: row('open') } } }),
+    })
+    ex.retry = 10
+    let res: any
+    before(async () => {
+      res = await place(ex)
+    })
+    check('returns the placed order', () => res.data?.orderId, PLACED)
+    check('never re-sends', () => calls.submitOrder, 1)
+  })
+
+  describe('service timeout, lookup fails, retry ladder on', () => {
+    const { ex, calls } = makeExchange({
+      submits: [
+        () => ({ error: ['EService:Timeout'], result: undefined }),
+        accepted,
+      ],
+      open: () => ({ error: ['EAPI:Invalid nonce'], result: undefined }),
+    })
+    ex.retry = 10
+    let res: any
+    before(async () => {
+      res = await place(ex)
+    })
+    check('returns the original error', () => res.status, StatusEnum.notok)
+    check('is never blind-retried', () => calls.submitOrder, 1)
+  })
+
+  describe('service timeout on a read is still retried', () => {
+    const { ex } = makeExchange({ submits: [] })
+    let reads = 0
+    ex.retry = 10
+    ex.spotClient.getOrders = async () => {
+      reads++
+      return reads === 1
+        ? { error: ['EService:Timeout'], result: undefined }
+        : { error: [], result: { [PLACED]: row('open') } }
+    }
+    let res: any
+    before(async () => {
+      res = await ex.getOrder({ symbol: 'ZEC-EUR', newClientOrderId: PLACED })
+    })
+    check('succeeds after a retry', () => res.status, StatusEnum.ok)
+    check('read twice', () => reads, 2)
+  })
+
   describe('a definite rejection is not touched', () => {
     const { ex, calls } = makeExchange({
       submits: [

@@ -933,11 +933,19 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         'invalid nonce',
         'duplicate nonce',
       ])
-      const maxAttempts = isLockout
-        ? 0
-        : isRateLimit || isProviderOutage || isNonce
-          ? 3
-          : this.retry
+      // A spot submit whose outcome is unknown was already resolved by lookup
+      // (`recoverAmbiguousSpotSubmit`) before reaching here; re-sending it
+      // blind could place the order twice.
+      const isAmbiguousSubmit =
+        cb === this.openOrder &&
+        !this.usdm &&
+        matches(KrakenExchange.AMBIGUOUS_SUBMIT_ERRORS)
+      const maxAttempts =
+        isLockout || isAmbiguousSubmit
+          ? 0
+          : isRateLimit || isProviderOutage || isNonce
+            ? 3
+            : this.retry
 
       if (shouldRetry && timeProfile.attempts < maxAttempts) {
         const waitTime = isRateLimit
@@ -2239,16 +2247,20 @@ class KrakenExchange extends AbstractExchange implements Exchange {
    * guidance for `EService:Deadline elapsed` is "check OpenOrders before
    * retrying — the order may have been placed". `EGeneral:Expired request` is
    * undocumented and arrives seconds after the request was signed, so it is
-   * treated the same way.
+   * treated the same way. So is `EService:Timeout`, also undocumented: a
+   * timeout says nothing about whether the engine got the order.
    *
-   * Deliberately NOT on `retryErrors`: a blind re-send can place the order
-   * twice. Neither is it safe to report the order as failed: main-app retires
-   * it as CANCELED and nothing re-places it until the bot worker restarts, so
-   * a DCA deal sits without its next safety order for hours.
+   * A blind re-send can place the order twice, so for a spot submit these are
+   * never retried by `handleKrakenErrors` (`EService:Timeout` stays on
+   * `retryErrors` for every read, where a retry is harmless). Neither is it
+   * safe to report the order as failed: main-app retires it as CANCELED and
+   * nothing re-places it until the bot worker restarts, so a DCA deal sits
+   * without its next safety order for hours.
    */
   private static readonly AMBIGUOUS_SUBMIT_ERRORS = [
     'EGeneral:Expired request',
     'EService:Deadline elapsed',
+    'EService:Timeout',
   ]
 
   /** Client ids whose one re-send after an ambiguous submit is in flight. */

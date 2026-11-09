@@ -2220,13 +2220,186 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         }
         return lastResort
       })
-      .catch(
-        this.handleKrakenErrors(
+      .catch(async (error) => {
+        const recovered = await this.recoverAmbiguousSpotSubmit(order, error)
+        if (recovered) {
+          return recovered
+        }
+        return this.handleKrakenErrors(
           this.openOrder,
           order,
           this.endProfilerTime(timeProfile, 'exchange'),
-        ),
+        )(error)
+      })
+  }
+
+  /**
+   * Spot AddOrder errors whose outcome is UNKNOWN: Kraken gave up on the
+   * request, but the matching engine may still have accepted it. Kraken's own
+   * guidance for `EService:Deadline elapsed` is "check OpenOrders before
+   * retrying — the order may have been placed". `EGeneral:Expired request` is
+   * undocumented and arrives seconds after the request was signed, so it is
+   * treated the same way.
+   *
+   * Deliberately NOT on `retryErrors`: a blind re-send can place the order
+   * twice. Neither is it safe to report the order as failed: main-app retires
+   * it as CANCELED and nothing re-places it until the bot worker restarts, so
+   * a DCA deal sits without its next safety order for hours.
+   */
+  private static readonly AMBIGUOUS_SUBMIT_ERRORS = [
+    'EGeneral:Expired request',
+    'EService:Deadline elapsed',
+  ]
+
+  /** Client ids whose one re-send after an ambiguous submit is in flight. */
+  private readonly ambiguousResends = new Set<string>()
+
+  /**
+   * After an ambiguous spot submit, find out what actually happened before
+   * answering. Looks the order up by its `cl_ord_id` (open, then closed):
+   * - found → return it; the order exists and main-app tracks it as usual;
+   * - definitively absent on every read → re-send it ONCE, same client id;
+   * - any read failed → `undefined`, so the caller returns the original error
+   *   exactly as before. Never re-send on a lookup we could not trust.
+   *
+   * Returns `undefined` for every error that is not ambiguous, for orders with
+   * no client id (nothing to look up by), and for the re-send itself, so a
+   * second ambiguous answer cannot start a loop.
+   */
+  private async recoverAmbiguousSpotSubmit(
+    order: Parameters<KrakenExchange['openOrder']>[0],
+    error: any,
+  ): Promise<BaseReturn<CommonOrder> | undefined> {
+    const bodyError = error?.body?.error
+    const text = [
+      error?.message ?? '',
+      ...(Array.isArray(bodyError) ? bodyError : [bodyError ?? '']),
+    ].join(' ')
+    const ambiguous = KrakenExchange.AMBIGUOUS_SUBMIT_ERRORS.find((code) =>
+      text.includes(code),
+    )
+    const clientOrderId = order.newClientOrderId
+    if (
+      !ambiguous ||
+      !clientOrderId ||
+      this.ambiguousResends.has(clientOrderId)
+    ) {
+      return undefined
+    }
+
+    // Give the engine time to settle: an order it did accept can take a moment
+    // to surface in OpenOrders/ClosedOrders.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await sleep(1000)
+      const lookup = await this.findSpotOrderByClOrdId(
+        clientOrderId,
+        order.symbol,
       )
+      if (lookup.kind === 'failed') {
+        Logger.warn(
+          `Kraken ${ambiguous} for ${clientOrderId}: lookup failed (${lookup.reason}); reporting the original error, not re-sending`,
+        )
+        return undefined
+      }
+      if (lookup.kind === 'found') {
+        Logger.warn(
+          `Kraken ${ambiguous} for ${clientOrderId}: the order WAS placed (${lookup.order.data.orderId}); returning it`,
+        )
+        return lookup.order
+      }
+    }
+
+    Logger.warn(
+      `Kraken ${ambiguous} for ${clientOrderId}: not on the exchange after 3 reads; re-sending once`,
+    )
+    this.ambiguousResends.add(clientOrderId)
+    try {
+      return await this.openOrder(order)
+    } finally {
+      this.ambiguousResends.delete(clientOrderId)
+    }
+  }
+
+  /**
+   * Exact spot lookup by `cl_ord_id` that keeps "Kraken has no such order"
+   * apart from "the read failed" — unlike `getOrder`, whose not-found answer
+   * reads the same either way. Exact `cl_ord_id` match only: no legacy
+   * userref fallback, which collides across Gainium ids.
+   */
+  private async findSpotOrderByClOrdId(
+    clientOrderId: string,
+    symbol: string,
+  ): Promise<
+    | { kind: 'found'; order: BaseReturn<CommonOrder> }
+    | { kind: 'absent' }
+    | { kind: 'failed'; reason: string }
+  > {
+    const candidates = this.krakenClOrdIdCandidates(clientOrderId)
+    let timeProfile = this.getEmptyTimeProfile()
+    const toOrder = async (
+      orderId: string,
+      orderData: any,
+      defaultStatus: string,
+    ) =>
+      this.returnGood<CommonOrder>(timeProfile)(
+        this.convertOrder({
+          orderId,
+          symbol: await this.normalizeSymbol(orderData.descr?.pair || symbol),
+          clientOrderId,
+          fee: orderData.fee,
+          oflags: orderData.oflags,
+          price:
+            +(orderData.price || 0) > 0
+              ? orderData.price
+              : orderData.descr?.price || '0',
+          origQty: orderData.vol || '0',
+          executedQty: orderData.vol_exec || '0',
+          status: orderData.status || defaultStatus,
+          type: orderData.descr?.ordertype || 'limit',
+          side: orderData.descr?.type?.toUpperCase() || 'BUY',
+        }),
+      )
+    try {
+      timeProfile =
+        (await this.checkLimits('getOrders', symbol, timeProfile)) ||
+        timeProfile
+      const open = await this.spotClient!.getOpenOrders()
+      if (!open.result || open.error?.length) {
+        return {
+          kind: 'failed',
+          reason: open.error?.join(', ') || 'Failed to get open orders',
+        }
+      }
+      const openHit = Object.entries(open.result.open || {}).find(
+        ([, o]) => !!o.cl_ord_id && candidates.includes(o.cl_ord_id),
+      )
+      if (openHit) {
+        return { kind: 'found', order: await toOrder(...openHit, 'NEW') }
+      }
+      for (const candidate of candidates) {
+        timeProfile =
+          (await this.checkLimits('getClosedOrders', symbol, timeProfile)) ||
+          timeProfile
+        const closed = await this.spotClient!.getClosedOrders({
+          cl_ord_id: candidate,
+        })
+        if (!closed.result || closed.error?.length) {
+          return {
+            kind: 'failed',
+            reason: closed.error?.join(', ') || 'Failed to get closed orders',
+          }
+        }
+        const closedHit = Object.entries(closed.result.closed || {}).find(
+          ([, o]) => o.cl_ord_id === candidate,
+        )
+        if (closedHit) {
+          return { kind: 'found', order: await toOrder(...closedHit, 'FILLED') }
+        }
+      }
+      return { kind: 'absent' }
+    } catch (e) {
+      return { kind: 'failed', reason: (e as Error)?.message || `${e}` }
+    }
   }
 
   /**

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.27.29] - 2026-11-09
+
+### Fixed
+
+- Kraken spot: an order answered with an ambiguous timeout error (Expired request / Deadline elapsed) is now looked up by its client id before anything else — returned if it was placed, re-sent once only if it is definitely absent — instead of being reported as failed and left unplaced.
+
 ## [1.27.28] - 2026-11-08
 
 ### Fixed

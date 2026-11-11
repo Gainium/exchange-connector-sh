@@ -219,6 +219,36 @@ class KucoinExchange extends AbstractExchange implements Exchange {
       )
   }
 
+  /**
+   * GET /api/ua/v2/account/mode — whether these credentials belong to a
+   * Classic account or a Unified Trading Account (UTA).
+   *
+   * KuCoin answers a UTA's trading requests only on its UTA V2 endpoints; the
+   * classic spot and futures endpoints this adapter calls do not work for it.
+   *
+   * `null` when KuCoin did not answer (network, permission, an unrecognised
+   * reply). Callers must read `null` as "unknown", never as "classic".
+   */
+  async getAccountMode(
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<'CLASSIC' | 'UNIFIED' | null> {
+    timeProfile =
+      (await this.checkLimits(
+        'getAccountMode',
+        LimitType.management,
+        30,
+        timeProfile,
+      )) || timeProfile
+    return this.client
+      .getAccountMode()
+      .then((res) => {
+        const mode =
+          res.status === StatusEnum.ok ? res.data?.selfAccountMode : null
+        return mode === 'CLASSIC' || mode === 'UNIFIED' ? mode : null
+      })
+      .catch(() => null)
+  }
+
   async getUid(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<number>> {

@@ -22,6 +22,8 @@ import { getBinanceBase } from './exchaneUtils'
 import { parseBinanceRestrictions, unknownPermissions } from './keyPermissions'
 import { safeStringify } from '../../utils/redact'
 import fetch from 'isomorphic-unfetch'
+import { Logger } from '@nestjs/common'
+import { keyFingerprint } from '../../utils/keyFingerprint'
 
 // The `binance` client throws an Error-like object whose useful payload
 // (Binance's `{ code, msg }`) lives on `.body` / `.response.data` / `.message`.
@@ -137,6 +139,26 @@ const verifyBinance = async (
   }
 }
 
+/**
+ * Shown when a KuCoin key belongs to a Unified Trading Account (UTA). Prose on
+ * purpose: main-app shows a reason that is not a JSON envelope as written.
+ */
+export const KUCOIN_UTA_UNSUPPORTED_REASON =
+  'This KuCoin account is in Unified Trading Account (UTA) mode, which Gainium does not support yet. KuCoin does not accept trading requests from a UTA account on the API Gainium uses, so bots could not place orders. Connect an API key from a KuCoin account or sub-account in Classic mode instead.'
+
+/**
+ * A UTA account cannot trade through the classic API, so it fails verification
+ * whatever the balance read said. An unanswered mode probe (`null`) changes
+ * nothing: a key that is fine must never fail because the probe broke.
+ */
+export const applyKucoinAccountMode = (
+  result: VerifyResponse,
+  mode: 'CLASSIC' | 'UNIFIED' | null,
+): VerifyResponse =>
+  mode === 'UNIFIED'
+    ? { ...result, status: false, reason: KUCOIN_UTA_UNSUPPORTED_REASON }
+    : result
+
 const verifyKucoin = async (
   tradeType: TradeTypeEnum,
   key: string,
@@ -153,15 +175,24 @@ const verifyKucoin = async (
     secret,
     pass,
   )
-  return await withPermissions(client, () =>
-    client
-      .getBalance()
-      .then((res) => ({
-        status: res.status === StatusEnum.ok,
-        reason: JSON.stringify(res),
-      }))
-      .catch((e) => ({ status: false, reason: `Kucoin catch ${e}` })),
-  )
+  const [result, mode] = await Promise.all([
+    withPermissions(client, () =>
+      client
+        .getBalance()
+        .then((res) => ({
+          status: res.status === StatusEnum.ok,
+          reason: JSON.stringify(res),
+        }))
+        .catch((e) => ({ status: false, reason: `Kucoin catch ${e}` })),
+    ),
+    client.getAccountMode().catch(() => null),
+  ])
+  if (mode === 'UNIFIED') {
+    Logger.warn(
+      `KuCoin key#${keyFingerprint(key)} is a Unified Trading Account, refused at verification`,
+    )
+  }
+  return applyKucoinAccountMode(result, mode)
 }
 
 const verifyBitget = async (

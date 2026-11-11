@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.0] - 2026-11-11
+
+### Added
+
+- KuCoin: a key from a Unified Trading Account (UTA) is now refused when it is connected, with an explanation, instead of connecting and then failing every order. KuCoin accepts UTA trading requests only on its UTA API, which is not supported yet
+
 ## [1.27.30] - 2026-11-09
 
 ### Fixed

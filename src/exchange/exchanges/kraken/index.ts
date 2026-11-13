@@ -2641,13 +2641,29 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     }
 
     const orders: CommonOrder[] = []
+    let failure = ''
     for (let i = 0; i < txids.length; i += KRAKEN_QUERY_ORDERS_MAX) {
       const chunk = txids.slice(i, i + KRAKEN_QUERY_ORDERS_MAX)
       timeProfile =
         (await this.checkLimits('getOrders', symbol, timeProfile)) ||
         timeProfile
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-      const result = await this.spotClient.getOrders({ txid: chunk.join(',') })
+      let result: Awaited<ReturnType<SpotClient['getOrders']>>
+      try {
+        result = await this.spotClient.getOrders({ txid: chunk.join(',') })
+      } catch (error) {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        // The SDK throws on a venue error array even on HTTP 200 (e.g.
+        // `EGeneral:Permission denied` for a key that may not query orders).
+        // Uncaught, that became a bare 500. Message only — never the error
+        // object, which carries the signed request (see `querySpotOrdersChunk`).
+        failure = this.krakenErrorMessage(error)
+        Logger.warn(
+          `Kraken spot batch order lookup failed for ${chunk.length} orders on ${symbol}: ${failure}`,
+        )
+        this.noteKrakenRateLimit(error)
+        break
+      }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
       if (!result.result || result.error?.length) {
         // A partial batch is still useful: the caller resolves whatever came
@@ -2667,6 +2683,13 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     }
 
     if (!orders.length) {
+      // A thrown lookup answers with the venue's own reason, not the
+      // "not supported" decline: main-app latches batching off for the
+      // process on that wording, and a permission or transient error is not
+      // the venue lacking a batch route.
+      if (failure) {
+        return this.returnBad(timeProfile)(new Error(failure))
+      }
       return super.getOrdersBatch({ symbol, newClientOrderIds })
     }
     return this.returnGood<CommonOrder[]>(timeProfile)(orders)

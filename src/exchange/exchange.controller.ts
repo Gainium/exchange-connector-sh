@@ -68,6 +68,14 @@ export class ExchangeController {
     return this.exchangeService.getLatestPriceInExchange(exchange, symbol)
   }
 
+  @Get('/bookTicker')
+  async getBookTicker(
+    @Query('symbol') symbol: string,
+    @Query('exchange') exchange: ExchangeEnum,
+  ) {
+    return this.exchangeService.getBookTickerInExchange(exchange, symbol)
+  }
+
   @Get('/exchange')
   async getExchangeInfo(
     @Query('symbol') symbol: string,

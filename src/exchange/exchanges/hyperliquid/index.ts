@@ -1,4 +1,5 @@
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
   BaseReturn,
@@ -2455,6 +2456,55 @@ class HyperliquidExchange extends AbstractExchange implements Exchange {
     return this.returnGood<number>(res.timeProfile)(
       res.data.find((p) => p.pair === symbol)?.price ?? 0,
     )
+  }
+
+  /** Best bid / best ask for a pair: the top level of each side of l2Book */
+  async bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    timeProfile =
+      (await this.checkLimits('l2Book', 2, timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `Hyperliquid Queue time is too long ${diff / 1000} bookTicker ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
+    // An unlisted coin is answered 500/null by HL and would be retried as
+    // transient — reject it in one attempt (see getCandles).
+    const coin = await this.resolveCoin(symbol)
+    if (coin === null) {
+      return this.returnBad(timeProfile)(
+        new Error(`Unknown Hyperliquid pair ${symbol}`),
+      )
+    }
+    return this.infoClient
+      .l2Book({ coin })
+      .then((book) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const top = toBookTicker(
+          book?.levels?.[0]?.[0]?.px,
+          book?.levels?.[1]?.[0]?.px,
+        )
+        if (!top) {
+          return this.returnBad(timeProfile)(noBookTicker(symbol))
+        }
+        return this.returnGood<BookTicker>(timeProfile)(top)
+      })
+      .catch(
+        this.handleHyperliquidErrors(
+          this.bookTicker,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   async getExchangeInfo(symbol: string) {

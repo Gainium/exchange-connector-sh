@@ -5,7 +5,8 @@ import type {
   Position,
 } from '@gainium/kucoin-api/dist/types'
 import Kucoin from '@gainium/kucoin-api'
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import limitHelper, { LimitType } from './limit'
 import { exhaustedKucoinReason, noteKucoinAttempt } from './errorOutcome'
 import { normalizeOrderFee, normalizeOrderFees } from '../../helpers/orderFee'
@@ -1997,6 +1998,122 @@ class KucoinExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKucoinErrors(
           this.spot_latestPrice,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /** Best bid / best ask for a pair from the level-1 ticker */
+  async bookTicker(symbol: string): Promise<BaseReturn<BookTicker>> {
+    if (this.futures) {
+      return await this.futures_bookTicker(symbol)
+    }
+    return await this.spot_bookTicker(symbol)
+  }
+
+  async spot_bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    // The client signs the spot level-1 call and refuses it without keys, so
+    // a key-less instance reads the same best bid/ask (`buy`/`sell`) off the
+    // all-tickers list spot_latestPrice uses.
+    const signed = !!(this.key && this.secret && this.passphrase)
+    timeProfile =
+      (await this.checkLimits(
+        'spot_bookTicker',
+        LimitType.public,
+        signed ? 2 : 15,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    const request: Promise<{
+      status: string
+      data: { bid?: string; ask?: string } | null
+      reason: string
+      reasonCode?: string
+    }> = signed
+      ? this.client.getTicker(symbol).then((r) => ({
+          ...r,
+          data: r.data ? { bid: r.data.bestBid, ask: r.data.bestAsk } : null,
+        }))
+      : this.client.getAllTickers().then((r) => {
+          const row = r.data?.ticker?.find((t) => t.symbol === symbol)
+          return {
+            ...r,
+            data: row ? { bid: row.buy, ask: row.sell } : null,
+          }
+        })
+    return request
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res.status === StatusEnum.ok) {
+          const book = toBookTicker(res.data?.bid, res.data?.ask)
+          if (!book) {
+            return this.returnBad(timeProfile)(noBookTicker(symbol))
+          }
+          return this.returnGood<BookTicker>(timeProfile)(book)
+        }
+        return this.handleKucoinErrors(
+          this.spot_bookTicker,
+          symbol,
+          timeProfile,
+        )(new KucoinError(res.reason, res.reasonCode))
+      })
+      .catch(
+        this.handleKucoinErrors(
+          this.spot_bookTicker,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  async futures_bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    if (!this.futures) {
+      return this.errorFutures(timeProfile)
+    }
+    timeProfile =
+      (await this.checkLimits(
+        'futures_bookTicker',
+        LimitType.public,
+        2,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getFuturesTicker({ symbol: this.convertSymbolToKucoin(symbol) })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res.status === StatusEnum.ok) {
+          // The futures ticker names its sides bestBidPrice / bestAskPrice;
+          // the client's shared `Ticker` type only declares the spot names.
+          const d = res.data as typeof res.data & {
+            bestBidPrice?: string
+            bestAskPrice?: string
+          }
+          const book = toBookTicker(
+            d?.bestBidPrice ?? d?.bestBid,
+            d?.bestAskPrice ?? d?.bestAsk,
+          )
+          if (!book) {
+            return this.returnBad(timeProfile)(noBookTicker(symbol))
+          }
+          return this.returnGood<BookTicker>(timeProfile)(book)
+        }
+        return this.handleKucoinErrors(
+          this.futures_bookTicker,
+          symbol,
+          timeProfile,
+        )(new KucoinError(res.reason, res.reasonCode))
+      })
+      .catch(
+        this.handleKucoinErrors(
+          this.futures_bookTicker,
           symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),

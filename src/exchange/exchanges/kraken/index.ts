@@ -1,4 +1,5 @@
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
   BaseReturn,
@@ -4323,6 +4324,84 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleKrakenErrors(
           this.latestPrice,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /** Best bid / best ask for a pair from the venue's ticker */
+  async bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    if (this.usdm) {
+      if (!this.derivativesClient) {
+        return this.errorClient(timeProfile)
+      }
+
+      timeProfile =
+        (await this.checkLimits('getTicker', symbol, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+      return this.derivativesClient
+        .getTicker({ symbol: await this.toKrakenSymbol(symbol) })
+        .then((result) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+          if (result.result !== 'success' || !result.ticker) {
+            throw new Error(
+              `Failed to get ticker. Result: ${result.result || 'undefined'}, Ticker: ${!!result.ticker}`,
+            )
+          }
+
+          const book = toBookTicker(result.ticker.bid, result.ticker.ask)
+          if (!book) {
+            return this.returnBad(timeProfile)(noBookTicker(symbol))
+          }
+          return this.returnGood<BookTicker>(timeProfile)(book)
+        })
+        .catch(
+          this.handleKrakenErrors(
+            this.bookTicker,
+            symbol,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
+        )
+    }
+
+    if (!this.spotClient) {
+      return this.errorClient(timeProfile)
+    }
+
+    timeProfile =
+      (await this.checkLimits('getTicker', symbol, timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+
+    return this.spotClient
+      .getTicker({
+        pair: await this.toKrakenSymbol(symbol),
+        ...this.xstockParams(symbol),
+      })
+      .then((result) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+
+        if (!result.result || result.error?.length) {
+          throw new Error(result.error?.[0] || 'Failed to get ticker')
+        }
+
+        // b / a are [price, whole lot volume, lot volume].
+        const ticker = Object.values(result.result)[0]
+        const book = toBookTicker(ticker?.b?.[0], ticker?.a?.[0])
+        if (!book) {
+          return this.returnBad(timeProfile)(noBookTicker(symbol))
+        }
+        return this.returnGood<BookTicker>(timeProfile)(book)
+      })
+      .catch(
+        this.handleKrakenErrors(
+          this.bookTicker,
           symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),

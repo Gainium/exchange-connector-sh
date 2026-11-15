@@ -27,6 +27,9 @@ import type {
   KeyPermissions,
 } from './types'
 import { ExchangeIntervals, StatusEnum, PositionInfo } from './types'
+
+/** Top of the order book: best bid and best ask prices. */
+export type BookTicker = { bid: number; ask: number }
 import { convertNumberToString } from '../utils/math'
 import { unknownPermissions } from './helpers/keyPermissions'
 
@@ -118,6 +121,8 @@ export interface Exchange {
   }): Promise<BaseReturn<CommonOrder>>
 
   latestPrice(symbol: string): Promise<BaseReturn<number>>
+
+  bookTicker(symbol: string): Promise<BaseReturn<BookTicker>>
 
   getExchangeInfo(symbol: string): Promise<BaseReturn<ExchangeInfo>>
 
@@ -537,6 +542,19 @@ abstract class AbsctractExchange implements Exchange {
   abstract getAllExchangeInfo(): Promise<
     BaseReturn<(ExchangeInfo & { pair: string })[]>
   >
+
+  /**
+   * Best bid and best ask for a pair, read from the venue's public ticker at
+   * call time. Callers price a chasing limit on the waiting side of the book
+   * from it (a buy at the bid, a sell at the ask). Exchanges that do not
+   * override it report "not supported"; callers fall back to the last price.
+   */
+  async bookTicker(_symbol: string): Promise<BaseReturn<BookTicker>> {
+    return this.returnBad(
+      this.getEmptyTimeProfile(),
+      [],
+    )(new Error('Method not supported'))
+  }
 
   /**
    * Authoritative, account-scoped SPOT instrument universe. Only exchanges whose

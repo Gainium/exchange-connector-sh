@@ -1,4 +1,5 @@
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
   BaseReturn,
@@ -1597,6 +1598,36 @@ class OKXExchange extends AbstractExchange implements Exchange {
       }
       return res
     })
+  }
+
+  /** Best bid / best ask for a pair from the instrument's ticker */
+  async bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    timeProfile =
+      (await this.checkLimits('getTicker', 2000, 20, timeProfile)) ||
+      timeProfile
+    // An X-Perp pair is an instFamily; translate it to the live instId.
+    await this.ensureXperpMap(false, symbol)
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getTicker({ instId: this.updateSymbol(symbol) })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const book = toBookTicker(res?.[0]?.bidPx, res?.[0]?.askPx)
+        if (!book) {
+          return this.returnBad(timeProfile)(noBookTicker(symbol))
+        }
+        return this.returnGood<BookTicker>(timeProfile)(book)
+      })
+      .catch(
+        this.handleOkxErrors(
+          this.bookTicker,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
   }
 
   private updateSymbol(s: string) {

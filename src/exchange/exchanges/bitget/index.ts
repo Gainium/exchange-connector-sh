@@ -1,4 +1,5 @@
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
   BaseReturn,
@@ -3328,6 +3329,80 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       )
     }
     return this.returnGood<number>(res.timeProfile)(found.price)
+  }
+
+  /**
+   * Best bid / best ask for a pair from its public ticker. Same rails as the
+   * last-price reads: v2 for spot, USDⓈ-M and inverse delivery contracts; v3
+   * for inverse perpetuals, which v2 does not quote.
+   */
+  async bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    const answer = (bid: unknown, ask: unknown) => {
+      const book = toBookTicker(bid, ask)
+      if (!book) {
+        return this.returnBad(timeProfile)(noBookTicker(symbol))
+      }
+      return this.returnGood<BookTicker>(timeProfile)(book)
+    }
+    try {
+      if (this.coinm && !this.isCoinmDelivery(symbol)) {
+        timeProfile =
+          (await this.checkLimits('utaGetTickers', 0, timeProfile)) ||
+          timeProfile
+        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+        const res = await this.orderClient.getTickersV3({
+          category: this.utaCategory(symbol),
+          symbol: this.utaSymbol(symbol),
+        })
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const row = (Array.isArray(res?.data) ? res.data : [])[0]
+        return answer(row?.bid1Price, row?.ask1Price)
+      }
+      if (this.futures) {
+        timeProfile =
+          (await this.checkLimits('getFuturesTicker', 20, timeProfile)) ||
+          timeProfile
+        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+        const result = await this.client.getFuturesTicker({
+          symbol,
+          productType: this.getProductTypeBySymbol(symbol),
+        })
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (result.code !== '00000') {
+          return this.handleBitgetErrors(
+            this.bookTicker,
+            symbol,
+            timeProfile,
+          )(new BitgetError(result.msg, +result.code))
+        }
+        const row = result.data?.find((t) => t.symbol === symbol)
+        return answer(row?.bidPr, row?.askPr)
+      }
+      timeProfile =
+        (await this.checkLimits('getSpotTicker', 20, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      const result = await this.client.getSpotTicker({ symbol })
+      timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+      if (result.code !== '00000') {
+        return this.handleBitgetErrors(
+          this.bookTicker,
+          symbol,
+          timeProfile,
+        )(new BitgetError(result.msg, +result.code))
+      }
+      const row = result.data?.find((t) => t.symbol === symbol)
+      return answer(row?.bidPr, row?.askPr)
+    } catch (e) {
+      return this.handleBitgetErrors(
+        this.bookTicker,
+        symbol,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(new BitgetError(e?.body?.msg ?? e.message, 0))
+    }
   }
 
   async openOrder(order: {

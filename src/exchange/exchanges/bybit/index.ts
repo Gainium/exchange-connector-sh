@@ -1,4 +1,5 @@
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
   BaseReturn,
@@ -1520,6 +1521,46 @@ class BybitExchange extends AbstractExchange implements Exchange {
         .catch(
           this.handleBybitErrors(
             this.latestPrice,
+            symbol,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          ),
+        )
+    )
+  }
+
+  /** Best bid / best ask for a pair from the category's ticker */
+  async bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    timeProfile =
+      (await this.checkLimits('bookTicker', 'get', timeProfile)) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return (
+      this.client
+        //@ts-ignore
+        .getTickers({ category: this.getCategory(), symbol })
+        .then((res) => {
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          if (res.retMsg === 'OK') {
+            const row = (res.result?.list ?? []).find(
+              (r: { symbol: string }) => r.symbol === symbol,
+            ) as { bid1Price?: string; ask1Price?: string } | undefined
+            const book = toBookTicker(row?.bid1Price, row?.ask1Price)
+            if (!book) {
+              return this.returnBad(timeProfile)(noBookTicker(symbol))
+            }
+            return this.returnGood<BookTicker>(timeProfile)(book)
+          }
+          return this.handleBybitErrors(
+            this.bookTicker,
+            symbol,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          )(new BybitError(res.retMsg, res.retCode))
+        })
+        .catch(
+          this.handleBybitErrors(
+            this.bookTicker,
             symbol,
             this.endProfilerTime(timeProfile, 'exchange'),
           ),

@@ -1,4 +1,5 @@
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AccountInformation,
   FuturesAccountInformation,
@@ -1198,6 +1199,96 @@ class BinanceExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleBinanceErrors(
           this.futures_latestPrice,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /** Best bid / best ask for a pair from the venue's book ticker */
+  async bookTicker(symbol: string): Promise<BaseReturn<BookTicker>> {
+    if (this.futures) {
+      return await this.futures_bookTicker(symbol)
+    }
+    return await this.spot_bookTicker(symbol)
+  }
+
+  async spot_bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    if (!this.client) {
+      return this.errorClient(timeProfile)
+    }
+    timeProfile =
+      (await this.checkLimits(
+        'bookTicker',
+        'request',
+        this.isNewLimit ? 2 : 1,
+        timeProfile,
+      )) || timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.client
+      .getSymbolOrderBookTicker({ symbol })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const row = [res].flat().find((r) => r?.symbol === symbol)
+        const book = toBookTicker(row?.bidPrice, row?.askPrice)
+        if (!book) {
+          return this.returnBad(timeProfile)(noBookTicker(symbol))
+        }
+        return this.returnGood<BookTicker>(timeProfile)(book)
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.spot_bookTicker,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  async futures_bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!client) {
+      return this.errorClient(timeProfile)
+    }
+    if (!this.futures) {
+      return this.errorFutures(timeProfile)
+    }
+    timeProfile =
+      (await this.checkLimits('bookTicker', 'request', 2, timeProfile)) ||
+      timeProfile
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    if (timeProfile.inQueueStartTime && timeProfile.inQueueEndTime) {
+      const diff = timeProfile.inQueueEndTime - timeProfile.inQueueStartTime
+      if (diff >= this.timeout) {
+        Logger.error(
+          `BINANCE Queue time is too long ${diff / 1000} futures_bookTicker ${
+            this.usdm ? 'usdm' : 'coinm'
+          }`,
+        )
+        return this.returnBad(timeProfile)(new Error('Response timeout'))
+      }
+    }
+    return client
+      .getSymbolOrderBookTicker({ symbol })
+      .then((res) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        // USDⓈ-M answers one object, COIN-M an array.
+        const row = [res].flat().find((r) => r?.symbol === symbol)
+        const book = toBookTicker(row?.bidPrice, row?.askPrice)
+        if (!book) {
+          return this.returnBad(timeProfile)(noBookTicker(symbol))
+        }
+        return this.returnGood<BookTicker>(timeProfile)(book)
+      })
+      .catch(
+        this.handleBinanceErrors(
+          this.futures_bookTicker,
           symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),

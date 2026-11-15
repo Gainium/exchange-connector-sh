@@ -29,7 +29,7 @@ import {
   KeyPermissions,
 } from './types'
 import { unknownPermissions } from './helpers/keyPermissions'
-import AbstractExchange from './abstractExchange'
+import AbstractExchange, { type BookTicker } from './abstractExchange'
 import ExchangeChooser from './helpers/exchangeChooser'
 import { isExchangeEnabled } from '../utils/adminConfig'
 import {
@@ -50,6 +50,13 @@ export class ExchangeService {
     symbol: string,
   ): Promise<BaseReturn<number>> {
     return this.getExchange(exchange).latestPrice(symbol)
+  }
+
+  async getBookTickerInExchange(
+    exchange: ExchangeEnum,
+    symbol: string,
+  ): Promise<BaseReturn<BookTicker>> {
+    return this.getExchange(exchange).bookTicker(symbol)
   }
 
   async getAllPrices(

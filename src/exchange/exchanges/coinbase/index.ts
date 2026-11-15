@@ -1,4 +1,5 @@
-import AbstractExchange, { Exchange } from '../../abstractExchange'
+import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
   BaseReturn,
@@ -43,6 +44,7 @@ import {
   LimitOrderGTC,
   MarketOrder,
   Product,
+  PriceBook,
   Candle,
   PaginatedData,
   Account,
@@ -772,6 +774,36 @@ class CoinbaseExchange extends AbstractExchange implements Exchange {
       .catch(
         this.handleCoinbaseErrors(
           this.latestPrice,
+          symbol,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        ),
+      )
+  }
+
+  /** Best bid / best ask for a pair from the best_bid_ask endpoint */
+  async bookTicker(
+    symbol: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<BookTicker>> {
+    timeProfile =
+      (await this.checkLimits('private', timeProfile)) || timeProfile
+    this.getClientWithDefaultKeys()
+    timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+    return this.callWithTimeout<PriceBook[]>(() =>
+      this.client.rest.product.getBestAsksAndBids([symbol]),
+    )
+      .then((books) => {
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        const row = (books ?? []).find((b) => b?.product_id === symbol)
+        const book = toBookTicker(row?.bids?.[0]?.price, row?.asks?.[0]?.price)
+        if (!book) {
+          return this.returnBad(timeProfile)(noBookTicker(symbol))
+        }
+        return this.returnGood<BookTicker>(timeProfile)(book)
+      })
+      .catch(
+        this.handleCoinbaseErrors(
+          this.bookTicker,
           symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),

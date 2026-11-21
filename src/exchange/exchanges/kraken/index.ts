@@ -466,6 +466,7 @@ type KrakenSpotOrderRow = {
   vol_exec?: string
   status?: string
   opentm?: number
+  closetm?: number
 }
 
 /**
@@ -596,6 +597,33 @@ export function krakenFuturesTimeMs(v: unknown): number | undefined {
         ? Number(v)
         : Date.parse(String(v))
   return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+/**
+ * A Kraken spot QueryOrders / OpenOrders / ClosedOrders row's own times ->
+ * `convertOrder`'s `transactTime` / `updateTime`, in epoch ms. Kraken gives
+ * `opentm` / `closetm` in fractional SECONDS. `updateTime` is when the order
+ * closed (filled, cancelled, expired), else `lastupdated` when the venue sends
+ * one; an open row with neither is left undefined so `convertOrder` falls back
+ * to `Date.now()` as before. Without this every lookup said "this order last
+ * changed the instant you asked", and an old fill read as brand new to anything
+ * comparing that time (spec 047). Pure.
+ */
+export function krakenSpotOrderTimes(row: {
+  opentm?: unknown
+  closetm?: unknown
+  lastupdated?: unknown
+}): { transactTime?: number; updateTime?: number } {
+  const ms = (v: unknown) => {
+    const n = Number(v)
+    return v !== null && v !== '' && Number.isFinite(n) && n > 0
+      ? Math.round(n * 1000)
+      : undefined
+  }
+  return {
+    transactTime: ms(row?.opentm),
+    updateTime: ms(row?.closetm) ?? ms(row?.lastupdated),
+  }
 }
 
 /**
@@ -2379,6 +2407,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
     ) =>
       this.returnGood<CommonOrder>(timeProfile)(
         this.convertOrder({
+          ...krakenSpotOrderTimes(orderData),
           orderId,
           symbol: await this.normalizeSymbol(orderData.descr?.pair || symbol),
           clientOrderId,
@@ -2593,11 +2622,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       vol?: string
       vol_exec?: string
       status?: string
+      opentm?: number
+      closetm?: number
     },
     symbol: string,
     clientOrderId: string,
   ): Promise<CommonOrder> {
     return this.convertOrder({
+      ...krakenSpotOrderTimes(orderData),
       orderId: txid,
       symbol: await this.normalizeSymbol(orderData.descr?.pair || symbol),
       clientOrderId,
@@ -3726,6 +3758,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
           const [orderId, orderData] = found
           return this.returnGood<CommonOrder>(timeProfile)(
             this.convertOrder({
+              ...krakenSpotOrderTimes(orderData),
               orderId,
               symbol: await this.normalizeSymbol(
                 orderData.descr?.pair || symbol,
@@ -3839,6 +3872,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               const [orderId, orderData] = closedFound
               return this.returnGood<CommonOrder>(timeProfile)(
                 this.convertOrder({
+                  ...krakenSpotOrderTimes(orderData),
                   orderId,
                   symbol: await this.normalizeSymbol(
                     orderData.descr?.pair || symbol,
@@ -4255,6 +4289,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         for (const [orderId, order] of filteredOrders) {
           commonOrders.push(
             this.convertOrder({
+              ...krakenSpotOrderTimes(order),
               orderId,
               symbol: await this.normalizeSymbol(
                 order.descr?.pair || symbol || '',

@@ -114,6 +114,12 @@ type BitgetSpotGranularity = SpotKlineInterval | '3min'
  * inside the real cliff so a page can never land on the wrong side of it. The
  * numbers drift — re-measure by walking a window wider per granularity.
  */
+/**
+ * Most listed pairs a fee batch may leave out and still have each one asked
+ * per symbol: `trade-rate` allows 10 requests/s per UID, so 100 is ~10 s, far
+ * inside the balancer's deadline for `/fees/all`.
+ */
+const BITGET_FEE_GAP_MAX = 100
 const BITGET_FUTURES_MAX_SPAN_MS = 90 * 24 * 60 * 60 * 1000
 
 /**
@@ -1790,13 +1796,43 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       )
       return null
     }
+    // A pair the batch leaves out (e.g. the USDC-M contracts, which `mix`
+    // does not carry) is asked the per-symbol way, as the sweep would have.
+    // Only a small gap is filled: a large one would rebuild the fan-out this
+    // batch exists to avoid, so it keeps the listed rate instead.
+    const missing = listing.filter((p) => !rates.has(p.pair))
+    if (missing.length && missing.length <= BITGET_FEE_GAP_MAX) {
+      let refusal: string | undefined
+      for (let i = 0; i < missing.length && !refusal; i += 8) {
+        await Promise.all(
+          missing.slice(i, i + 8).map(async (p) => {
+            const f = await getOne(p.pair)
+            if (f.status === StatusEnum.notok) {
+              if (isUnifiedModeRefusal(f.reason) || isKeyRefusal(f.reason)) {
+                refusal = refusal ?? `${f.reason}`
+                return
+              }
+              Logger.warn(
+                `Error getting ${businessType} fees for ${p.pair} ${f.reason}`,
+              )
+            } else {
+              rates.set(p.pair, f.data)
+            }
+          }),
+        )
+      }
+      if (refusal) {
+        return this.returnBad(timeProfile)(new Error(refusal))
+      }
+    }
     return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
       listing.map((p) => {
         const r = rates.get(p.pair)
         return r
           ? { pair: p.pair, maker: r.maker, taker: r.taker }
-          : // Not in the venue's answer: the listed rate is a guess, and is
-            // marked so main-app never lets it replace a stored rate.
+          : // Neither the batch nor the pair's own call answered: the listed
+            // rate is a guess, and is marked so main-app never lets it
+            // replace a stored rate.
             {
               pair: p.pair,
               maker: p.makerFee,

@@ -5,6 +5,9 @@ process.env.NODE_ENV = 'testing'
  * business line instead of `trade-rate` once per listed pair (10 req/s/UID ×
  * ~3,660 spot pairs can never finish inside the balancer's 5-minute deadline).
  *
+ * Spec 049 — pairs the batch leaves out (USDC-M on `mix`) are asked per
+ * symbol; the `049 §…` cases below.
+ *
  * Run: `npm test` (mocha). No network — the REST clients are stubbed.
  */
 import { beforeEach, describe, it } from 'mocha'
@@ -112,21 +115,96 @@ describe('bitget classic fee sweep — all-trade-rate (spec 048)', () => {
     eq('pairs priced', res.data.length, PAIRS)
   })
 
-  it('§3.3 a pair the batch leaves out keeps the listed rate as a ladder fallback', async () => {
-    const { ex } = harness(Futures.null, { omit: ['C5USDT'] })
+  it('049 §3.1 a pair the batch leaves out is asked per-pair and gets the account rate', async () => {
+    const omit = Array.from({ length: 50 }, (_, i) => `C${i * 7}USDT`)
+    const { ex, calls } = harness(Futures.usdm, {
+      omit,
+      tradeRate: (p) =>
+        omit.includes(p.symbol)
+          ? {
+              code: '00000',
+              data: { makerFeeRate: '0.0001', takerFeeRate: '0.0003' },
+            }
+          : {
+              code: '00000',
+              data: { makerFeeRate: '0.0008', takerFeeRate: '0.0009' },
+            },
+    })
     const res = await ex.getAllUserFees()
     eq('status', res.status, StatusEnum.ok)
+    // probe + only the omitted pairs: the batched pairs are not re-asked
+    eq('per-pair calls', calls.one.length, 1 + omit.length)
+    eq('only omitted pairs re-asked', calls.one.slice(1).sort(), [...omit].sort())
+    eq('pairs priced', res.data.length, PAIRS)
+    const byPair = new Map(res.data.map((f: { pair: string }) => [f.pair, f]))
+    eq('omitted pair', byPair.get('C7USDT'), {
+      pair: 'C7USDT',
+      maker: 0.0001,
+      taker: 0.0003,
+    })
+    eq('present pair', byPair.get('C6USDT'), {
+      pair: 'C6USDT',
+      maker: 0.0008,
+      taker: 0.0009,
+    })
+    eq('listing order kept', res.data[7].pair, 'C7USDT')
+  })
+
+  it('049 §3.2 an omitted pair whose per-pair call also fails keeps the listed rate as a ladder fallback', async () => {
+    const { ex } = harness(Futures.null, {
+      omit: ['C5USDT', 'C9USDT'],
+      tradeRate: (p) =>
+        p.symbol === 'C5USDT'
+          ? { code: '40034', msg: 'the symbol has been removed' }
+          : {
+              code: '00000',
+              data: { makerFeeRate: '0.0008', takerFeeRate: '0.0009' },
+            },
+    })
+    const res = await ex.getAllUserFees()
+    eq('status', res.status, StatusEnum.ok)
+    const byPair = new Map(res.data.map((f: { pair: string }) => [f.pair, f]))
+    eq('failed omitted pair', byPair.get('C5USDT'), {
+      pair: 'C5USDT',
+      maker: 0.001,
+      taker: 0.001,
+      source: 'ladder',
+    })
+    eq('answered omitted pair', byPair.get('C9USDT'), {
+      pair: 'C9USDT',
+      maker: 0.0008,
+      taker: 0.0009,
+    })
+  })
+
+  it('049 §3.3 a key refusal while asking an omitted pair is the call result', async () => {
+    const { ex } = harness(Futures.usdm, {
+      omit: ['C5USDT'],
+      tradeRate: (p) =>
+        p.symbol === 'C5USDT'
+          ? { code: '40018', msg: 'invalid ip,current request ip 1.2.3.4' }
+          : {
+              code: '00000',
+              data: { makerFeeRate: '0.0008', takerFeeRate: '0.0009' },
+            },
+    })
+    const res = await ex.getAllUserFees()
+    eq('status', res.status, StatusEnum.notok)
+    eq('reason', res.reason, 'invalid ip,current request ip 1.2.3.4')
+  })
+
+  it('049 §3.4 more omitted pairs than the gap budget keep the listed rate without a fan-out', async () => {
+    const omit = Array.from({ length: 101 }, (_, i) => `C${i + 1}USDT`)
+    const { ex, calls } = harness(Futures.null, { omit })
+    const res = await ex.getAllUserFees()
+    eq('status', res.status, StatusEnum.ok)
+    eq('per-pair calls', calls.one.length, 1)
     const byPair = new Map(res.data.map((f: { pair: string }) => [f.pair, f]))
     eq('omitted pair', byPair.get('C5USDT'), {
       pair: 'C5USDT',
       maker: 0.001,
       taker: 0.001,
       source: 'ladder',
-    })
-    eq('present pair', byPair.get('C6USDT'), {
-      pair: 'C6USDT',
-      maker: 0.0008,
-      taker: 0.0009,
     })
   })
 

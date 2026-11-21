@@ -1,4 +1,7 @@
-import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import AbstractExchange, {
+  type BookTicker,
+  Exchange,
+} from '../../abstractExchange'
 import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
@@ -573,6 +576,26 @@ export function krakenLatestHistoryState(
     }
   }
   return best
+}
+
+/**
+ * A Kraken Futures time field → epoch ms, or undefined when Kraken gave none.
+ *
+ * `getOrderStatus` returns ISO strings (`timestamp`, `lastUpdateTimestamp`);
+ * `getOrderEvents` returns epoch ms. Callers pass the result as `updateTime` /
+ * `transactTime` so `futures_convertOrder` only falls back to `Date.now()` when
+ * the venue really said nothing — a `Date.now()` stand-in reads every old fill
+ * as brand new to anything comparing that time (spec 046). Pure.
+ */
+export function krakenFuturesTimeMs(v: unknown): number | undefined {
+  if (v === undefined || v === null || v === '') return undefined
+  const n =
+    typeof v === 'number'
+      ? v
+      : /^\d+$/.test(String(v))
+        ? Number(v)
+        : Date.parse(String(v))
+  return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
 /**
@@ -3459,6 +3482,8 @@ class KrakenExchange extends AbstractExchange implements Exchange {
               ),
               type: order.type || 'lmt',
               side: order.side || 'buy',
+              updateTime: krakenFuturesTimeMs(order.lastUpdateTimestamp),
+              transactTime: krakenFuturesTimeMs(order.timestamp),
             }),
           )
         })
@@ -3558,6 +3583,9 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                   status: status,
                   type: order.orderType?.toLowerCase() || 'lmt',
                   side: order.direction?.toLowerCase() || 'buy',
+                  // When Kraken recorded this state, not when we asked.
+                  updateTime: krakenFuturesTimeMs(latest.timestamp),
+                  transactTime: krakenFuturesTimeMs(order.timestamp),
                 }),
               )
             } catch (historyError) {

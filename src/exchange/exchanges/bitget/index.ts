@@ -1648,6 +1648,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     if (res.status === StatusEnum.notok) {
       return res
     }
+    const batch = await this.classic_getAllUserFeesBatch(
+      'mix',
+      res.data,
+      (pair) => this.futures_getUserFees(pair),
+      res.timeProfile,
+    )
+    if (batch) {
+      return batch
+    }
     const fees: (UserFee & { pair: string })[] = []
     const chunks: (typeof res.data)[] = []
     for (let i = 0; i < res.data.length; i += 8) {
@@ -1691,6 +1700,110 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     }
     return this.returnGood<(UserFee & { pair: string })[]>(res.timeProfile)(
       fees,
+    )
+  }
+
+  /**
+   * The whole business line's rates in ONE signed `all-trade-rate` call.
+   *
+   * `trade-rate` is limited to 10 requests/s per UID, so asking it once per
+   * listed pair needs over six minutes for the spot listing alone — longer
+   * than the balancer waits for `/fees/all` — and the pairs refused on the
+   * way fall back to the listed rate (spec 048).
+   *
+   * The batch is only trusted after one pair it carries has been asked the
+   * per-symbol way and agrees with it, so an answer that is not this
+   * account's own (e.g. standard rates for a VIP account) is never used.
+   *
+   * @returns `null` when the batch cannot be used and the caller should fall
+   * back to the per-pair sweep; a refusal that belongs to the key or the
+   * account mode is returned as the call's result.
+   */
+  private async classic_getAllUserFeesBatch(
+    businessType: 'spot' | 'mix',
+    listing: { pair: string; makerFee?: number; takerFee?: number }[],
+    getOne: (pair: string) => Promise<BaseReturn<UserFee>>,
+    timeProfile: TimeProfile,
+  ): Promise<BaseReturn<(UserFee & { pair: string })[]> | null> {
+    let rows: unknown
+    try {
+      timeProfile =
+        (await this.checkLimits('getAllTradeRate', 0, timeProfile)) ||
+        timeProfile
+      const get = await this.orderClient.getAllTradeRate({ businessType })
+      if (get?.code !== '00000') {
+        throw new BitgetError(get?.msg, 0)
+      }
+      rows = get.data
+    } catch (e) {
+      const reason = `${e?.body?.msg ?? e?.message ?? e}`
+      if (isUnifiedModeRefusal(reason) || isKeyRefusal(reason)) {
+        return this.returnBad(timeProfile)(new Error(reason))
+      }
+      Logger.warn(
+        `Bitget all-trade-rate ${businessType} unavailable, asking per pair: ${reason}`,
+      )
+      return null
+    }
+    if (!Array.isArray(rows)) {
+      Logger.warn(
+        `Bitget all-trade-rate ${businessType} returned no list, asking per pair`,
+      )
+      return null
+    }
+    const rates = new Map<string, UserFee>()
+    for (const r of rows as {
+      symbol?: string
+      makerFeeRate?: string
+      takerFeeRate?: string
+    }[]) {
+      const maker = Number(r?.makerFeeRate)
+      const taker = Number(r?.takerFeeRate)
+      if (
+        r?.symbol &&
+        r.makerFeeRate !== '' &&
+        r.takerFeeRate !== '' &&
+        Number.isFinite(maker) &&
+        Number.isFinite(taker)
+      ) {
+        rates.set(r.symbol, { maker, taker })
+      }
+    }
+    const probe = listing.find((p) => rates.has(p.pair))
+    if (!probe) {
+      Logger.warn(
+        `Bitget all-trade-rate ${businessType} matched no listed pair, asking per pair`,
+      )
+      return null
+    }
+    const one = await getOne(probe.pair)
+    if (one.status === StatusEnum.notok) {
+      // Same answer the per-pair sweep would have stopped at, or a transient
+      // failure that would have cost it the whole deadline: either way the
+      // caller keeps what it has stored.
+      return this.returnBad(timeProfile)(new Error(`${one.reason}`))
+    }
+    const batch = rates.get(probe.pair)
+    if (batch.maker !== one.data.maker || batch.taker !== one.data.taker) {
+      Logger.warn(
+        `Bitget all-trade-rate ${businessType} disagrees with trade-rate for ${probe.pair} (${batch.maker}/${batch.taker} vs ${one.data.maker}/${one.data.taker}), asking per pair`,
+      )
+      return null
+    }
+    return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
+      listing.map((p) => {
+        const r = rates.get(p.pair)
+        return r
+          ? { pair: p.pair, maker: r.maker, taker: r.taker }
+          : // Not in the venue's answer: the listed rate is a guess, and is
+            // marked so main-app never lets it replace a stored rate.
+            {
+              pair: p.pair,
+              maker: p.makerFee,
+              taker: p.takerFee,
+              source: 'ladder' as const,
+            }
+      }),
     )
   }
 
@@ -3062,6 +3175,15 @@ class BitgetExchange extends AbstractExchange implements Exchange {
     const res = await this.spot_getAllExchangeInfo()
     if (res.status === StatusEnum.notok) {
       return res
+    }
+    const batch = await this.classic_getAllUserFeesBatch(
+      'spot',
+      res.data,
+      (pair) => this.spot_getUserFees(pair),
+      res.timeProfile,
+    )
+    if (batch) {
+      return batch
     }
     const fees: (UserFee & { pair: string })[] = []
     const chunks: (typeof res.data)[] = []

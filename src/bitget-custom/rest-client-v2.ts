@@ -123,6 +123,13 @@ export class RestClientV2 extends BaseRestClient {
     return this.getPrivate(`/api/v2/common/trade-rate`, params)
   }
 
+  /** Every symbol's rate on one business line (`spot` | `mix` | `margin`). */
+  getAllTradeRate(params: {
+    businessType: string
+  }): Promise<APIResponse<any>> {
+    return this.getPrivate(`/api/v2/common/all-trade-rate`, params)
+  }
+
   /**
    *
    * * Common | Tax

@@ -367,11 +367,17 @@ class BybitExchange extends AbstractExchange implements Exchange {
         // and a missing symbol reads as a closed position. `symbol` is passed
         // to the handler (undefined here) so its retry re-enters this branch
         // instead of taking the TimeProfile as a symbol.
-        const failed = await this.client
-          .getPositionInfo({ category, limit: 200, settleCoin: coin })
+        const failed = await this.readAllPages((cursor) =>
+          this.client.getPositionInfo({
+            category,
+            limit: 200,
+            settleCoin: coin,
+            ...(cursor ? { cursor } : {}),
+          }),
+        )
           .then(async (result) => {
-            if (result.retMsg === 'OK') {
-              for (const p of result.result.list.filter(
+            if (result.ok) {
+              for (const p of result.list.filter(
                 (pos) => pos.positionStatus === 'Normal',
               )) {
                 data.push(await this.convertPosition(p))
@@ -399,13 +405,19 @@ class BybitExchange extends AbstractExchange implements Exchange {
       return this.returnGood<PositionInfo[]>(timeProfile)(data)
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .getPositionInfo({ category, limit: 200, symbol })
+    return this.readAllPages((cursor) =>
+      this.client.getPositionInfo({
+        category,
+        limit: 200,
+        symbol,
+        ...(cursor ? { cursor } : {}),
+      }),
+    )
       .then(async (result) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (result.retMsg === 'OK') {
+        if (result.ok) {
           const positions: PositionInfo[] = []
-          for (const p of result.result.list.filter(
+          for (const p of result.list.filter(
             (pos) => pos.positionStatus === 'Normal',
           )) {
             positions.push(await this.convertPosition(p))
@@ -414,12 +426,14 @@ class BybitExchange extends AbstractExchange implements Exchange {
         }
         return this.handleBybitErrors(
           this.futures_getPositions,
+          symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         )(new BybitError(result.retMsg, result.retCode))
       })
       .catch(
         this.handleBybitErrors(
           this.futures_getPositions,
+          symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
@@ -1214,52 +1228,74 @@ class BybitExchange extends AbstractExchange implements Exchange {
       }
       const coins = new Set(allPairs.data.map((p) => p.quoteAsset.name))
       const resultOrders: CommonOrder[] = []
-      let errorMessage = ''
-      let errorCode = 0
+      let count = 0
       timeProfile = this.startProfilerTime(timeProfile, 'exchange')
       for (const c of coins) {
-        await this.client
-          .getActiveOrders({ ...input, settleCoin: c })
+        // Every page of every settle coin, or the whole read fails: a short
+        // list stamped OK makes an order past the first page look gone.
+        const failed = await this.readAllPages((cursor) =>
+          this.client.getActiveOrders({
+            ...input,
+            settleCoin: c,
+            limit: 50,
+            ...(cursor ? { cursor } : {}),
+          }),
+        )
           .then(async (orders) => {
-            if (orders.retMsg === 'OK') {
+            if (orders.ok) {
+              count += orders.list.length
               if (returnOrders) {
-                for (const o of orders.result.list) {
-                  const data = await this.convertOrder(o)
-                  resultOrders.push(data)
+                for (const o of orders.list) {
+                  resultOrders.push(await this.convertOrder(o))
                 }
               }
-            } else {
-              errorMessage = orders.retMsg
-              errorCode = orders.retCode
+              return null
             }
+            return this.handleBybitErrors<BaseReturn<CommonOrder[] | number>>(
+              this.getAllOpenOrders,
+              symbol,
+              returnOrders,
+              this.endProfilerTime(timeProfile, 'exchange'),
+            )(new BybitError(orders.retMsg, orders.retCode))
           })
+          .catch(
+            this.handleBybitErrors<BaseReturn<CommonOrder[] | number>>(
+              this.getAllOpenOrders,
+              symbol,
+              returnOrders,
+              this.endProfilerTime(timeProfile, 'exchange'),
+            ),
+          )
+        if (failed) {
+          return failed
+        }
       }
       timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-      if (!errorMessage) {
-        if (returnOrders) {
-          return this.returnGood<CommonOrder[]>(timeProfile)(resultOrders)
-        }
-        return this.returnGood<number>(timeProfile)(resultOrders.length)
+      if (returnOrders) {
+        return this.returnGood<CommonOrder[]>(timeProfile)(resultOrders)
       }
-      return this.returnBad(timeProfile)(
-        new BybitError(errorMessage, errorCode),
-      )
+      return this.returnGood<number>(timeProfile)(count)
     }
     timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-    return this.client
-      .getActiveOrders(input)
+    return this.readAllPages((cursor) =>
+      this.client.getActiveOrders({
+        ...input,
+        limit: 50,
+        ...(cursor ? { cursor } : {}),
+      }),
+    )
       .then(async (orders) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        if (orders.retMsg === 'OK') {
+        if (orders.ok) {
           if (returnOrders) {
             const convertedOrders: CommonOrder[] = []
-            for (const o of orders.result.list) {
+            for (const o of orders.list) {
               const data = await this.convertOrder(o)
               convertedOrders.push(data)
             }
             return this.returnGood<CommonOrder[]>(timeProfile)(convertedOrders)
           }
-          return this.returnGood<number>(timeProfile)(orders.result.list.length)
+          return this.returnGood<number>(timeProfile)(orders.list.length)
         }
         return this.handleBybitErrors(
           this.getAllOpenOrders,
@@ -2038,6 +2074,57 @@ class BybitExchange extends AbstractExchange implements Exchange {
    *
    * If error code is in {@link BybitExchange#retryErrors} and attempt is less than {@link BybitExchange#retry} - retry action
    */
+  /**
+   * Read every page of a cursor-paged Bybit v5 list endpoint, one request at a
+   * time. Bybit answers one page per request (`/v5/order/realtime` defaults to
+   * 20 rows) and hands back `nextPageCursor` for the rest; reading only the
+   * first page drops rows silently.
+   *
+   * A page that answers a non-OK `retMsg` fails the whole read (`ok: false`),
+   * so a caller never presents part of the list as complete. A cursor that
+   * repeats, or a read still going after `maxPages`, fails it the same way.
+   * A rejected request propagates to the caller's `.catch`.
+   */
+  protected async readAllPages<T>(
+    read: (cursor?: string) => Promise<{
+      retCode: number
+      retMsg: string
+      result: { list: T[]; nextPageCursor?: string }
+    }>,
+    maxPages = 100,
+  ): Promise<{ ok: boolean; list: T[]; retMsg: string; retCode: number }> {
+    const list: T[] = []
+    const seen = new Set<string>()
+    let cursor: string | undefined
+    for (let page = 0; page < maxPages; page++) {
+      const res = await read(cursor)
+      if (res.retMsg !== 'OK') {
+        return { ok: false, list: [], retMsg: res.retMsg, retCode: res.retCode }
+      }
+      list.push(...(res.result?.list ?? []))
+      const next = res.result?.nextPageCursor
+      if (!next) {
+        return { ok: true, list, retMsg: res.retMsg, retCode: res.retCode }
+      }
+      if (seen.has(next)) {
+        return {
+          ok: false,
+          list: [],
+          retMsg: `Bybit list pagination repeated cursor after ${list.length} rows`,
+          retCode: -1,
+        }
+      }
+      seen.add(next)
+      cursor = next
+    }
+    return {
+      ok: false,
+      list: [],
+      retMsg: `Bybit list pagination did not end after ${maxPages} pages`,
+      retCode: -1,
+    }
+  }
+
   protected handleBybitErrors<T>(
     cb: (...args: any[]) => Promise<T>,
     ...args: any[]

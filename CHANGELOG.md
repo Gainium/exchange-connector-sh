@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.5] - 2026-11-22
+
+### Fixed
+
+- Bybit open-order and position reads now follow the venue's page cursor and request the largest page size, so accounts with more rows than one default page get the complete list; a failed or non-terminating page fails the whole read instead of returning a partial list as complete
+
 ## [1.29.4] - 2026-11-21
 
 ### Fixed

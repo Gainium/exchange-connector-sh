@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.6] - 2026-11-25
+
+### Fixed
+
+- Bitget USDT-M / USDC-M futures: the free balance is capped at the amount the exchange accepts for a new order, which already subtracts the unrealized loss of open cross positions. It no longer reports more free balance than the exchange will let a bot spend.
+
 ## [1.29.5] - 2026-11-22
 
 ### Fixed

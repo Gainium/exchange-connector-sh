@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.7] - 2026-11-25
+
+### Fixed
+
+- Bybit unified account: the free USDT/USDC balance is capped at the account's available balance, which nets out open positions' unrealized loss, so the bot no longer sends orders the venue refuses for available balance
+- Kraken Futures order lookups answer an order that has aged out of the order-events history from the account fills, instead of reporting it as not found
+
 ## [1.29.6] - 2026-11-25
 
 ### Fixed

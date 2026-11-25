@@ -1,4 +1,7 @@
-import AbstractExchange, { type BookTicker, Exchange } from '../../abstractExchange'
+import AbstractExchange, {
+  type BookTicker,
+  Exchange,
+} from '../../abstractExchange'
 import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
@@ -62,6 +65,7 @@ import { keyFingerprint } from '../../../utils/keyFingerprint'
 import { pageCandleRange } from '../../helpers/candlePager'
 import { datedDeliveryTime } from '../../helpers/deliveryTime'
 import { timeIntervalMap } from '../okx'
+import { unifiedSpendableCap } from './unifiedSpendable'
 
 /**
  * Most bars `/v5/market/kline` serves in one call, on every category.
@@ -1393,17 +1397,26 @@ class BybitExchange extends AbstractExchange implements Exchange {
               .filter((acc) => acc.accountType === accType)
               .flatMap((balance) =>
                 balance.coin.map((b) => {
-                  const locked =
+                  const committed =
                     parseFloat(b.locked || '0') +
                     parseFloat(b.totalOrderIM || '0') +
                     parseFloat(b.totalPositionIM || '0')
+                  const raw =
+                    accountType.data === 1 && !this.futures
+                      ? parseFloat(b.free || '0')
+                      : parseFloat(b.walletBalance || '0') - committed
+                  // Unified accounts: the venue checks a new order against the
+                  // account's `totalAvailableBalance`, which nets out open
+                  // positions' unrealized loss; `raw` does not. Cap (never
+                  // raise) and let `locked` take the rest (spec 052).
+                  const cap = unifiedSpendableCap(balance, b)
+                  const free = Number.isFinite(cap)
+                    ? Math.max(Math.min(raw, cap), 0)
+                    : raw
                   return {
                     asset: b.coin,
-                    free:
-                      accountType.data === 1 && !this.futures
-                        ? parseFloat(b.free || '0')
-                        : parseFloat(b.walletBalance || '0') - locked,
-                    locked,
+                    free,
+                    locked: committed + (raw - free),
                   }
                 }),
               ),

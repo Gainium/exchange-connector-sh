@@ -1534,7 +1534,15 @@ class KrakenExchange extends AbstractExchange implements Exchange {
   private async futures_getFillTotals(
     orderId?: string,
     clientOrderId?: string,
-  ): Promise<{ executedQty: number; avgPrice: number } | null> {
+  ): Promise<{
+    executedQty: number
+    avgPrice: number
+    /** From the fills themselves, for a caller that has nothing else. */
+    orderId: string
+    side: string
+    symbol: string
+    lastFillAt: number
+  } | null> {
     if (!this.derivativesClient || (!orderId && !clientOrderId)) return null
     try {
       await this.checkLimits('getFills')
@@ -1560,13 +1568,22 @@ class KrakenExchange extends AbstractExchange implements Exchange {
       if (!matches.length) return null
       let notional = 0
       let size = 0
+      let lastFillAt = 0
       for (const fill of matches) {
         notional += fill.price * fill.size
         size += fill.size
+        lastFillAt = Math.max(lastFillAt, +new Date(fill.fillTime) || 0)
       }
       if (size <= 0) return null
       // Summed floats: 0.0042 + 0.132 must compare equal to 0.1362.
-      return { executedQty: +size.toFixed(10), avgPrice: notional / size }
+      return {
+        executedQty: +size.toFixed(10),
+        avgPrice: notional / size,
+        orderId: `${matches[0].order_id ?? ''}`,
+        side: `${matches[0].side ?? 'buy'}`,
+        symbol: `${matches[0].symbol ?? ''}`,
+        lastFillAt,
+      }
     } catch (e) {
       this.logAvgFillPriceFailure(e instanceof Error ? e.message : `${e}`)
       // Never break order recording over a price refinement — the caller still
@@ -1809,7 +1826,14 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (result.result !== 'success' || !result.fills) {
           throw new Error(
-            `Failed to get fills. Result: ${result.result || 'undefined'}`,
+            // Kraken's own refusal word (`authenticationError` for a key
+            // without the query-trades permission) rides along, so a caller
+            // can tell a permanent refusal from a blip.
+            `Failed to get fills. Result: ${result.result || 'undefined'}${
+              (result as { error?: string }).error
+                ? ` (${(result as { error?: string }).error})`
+                : ''
+            }`,
           )
         }
         const fills: AccountFill[] = []
@@ -3543,7 +3567,48 @@ class KrakenExchange extends AbstractExchange implements Exchange {
                 newClientOrderId,
               )
               if (!latest) {
-                throw new Error('Order not found in history')
+                // The events page is Kraken's most recent slice of order
+                // history, so an order that filled while the user stream was
+                // down ages out of it within hours (2026-10-30: combo grid
+                // sells that filled during a venue outage were reported "not
+                // found" here, and main-app wrote them off as CANCELED with
+                // nothing executed). The account fills are a separate record
+                // of what actually executed against this client order id.
+                //
+                // Only when the live status view ANSWERED that it does not
+                // hold the id: then the order is not resting, and its fills
+                // are its whole execution. Kraken does not say how large the
+                // order was, so `origQty` is what executed; main-app keeps its
+                // own size and decides whether that was the whole order.
+                // No fills (a cancel or reject with nothing executed) stays
+                // the not-found it always was.
+                const fromFills = statusViewAnswered
+                  ? await this.futures_getFillTotals(
+                      undefined,
+                      newClientOrderId,
+                    )
+                  : null
+                if (!fromFills) {
+                  throw new Error('Order not found in history')
+                }
+                return this.returnGood<CommonOrder>(timeProfile)(
+                  this.futures_convertOrder({
+                    orderId: fromFills.orderId,
+                    symbol: await this.normalizeSymbol(
+                      fromFills.symbol || symbol,
+                    ),
+                    clientOrderId: newClientOrderId,
+                    price: fromFills.avgPrice,
+                    avgPrice: fromFills.avgPrice,
+                    origQty: fromFills.executedQty,
+                    executedQty: fromFills.executedQty,
+                    status: 'FILLED',
+                    type: 'lmt',
+                    side: fromFills.side.toLowerCase(),
+                    updateTime: fromFills.lastFillAt || undefined,
+                    transactTime: fromFills.lastFillAt || undefined,
+                  }),
+                )
               }
               const order = latest.order
               const quantity = parseFloat(order.quantity || '0')

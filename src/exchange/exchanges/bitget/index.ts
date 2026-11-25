@@ -1224,10 +1224,24 @@ class BitgetExchange extends AbstractExchange implements Exchange {
               ),
               walletBalance,
             )
+            // In cross mode the venue accepts a new order only up to its own
+            // `crossedMaxAvailable`, which also subtracts the open cross
+            // positions' unrealized loss; `walletBalance - committed` does
+            // not. Cap `free` at the venue figure (never raise it) and let
+            // `locked` take the rest, so the partition stays exact. Cross is
+            // the looser mode (it may also spend open profit), so the cap is
+            // never stricter than an isolated order would be either. Linear
+            // product types only: the inverse path keeps spec 011's anchor.
+            const spendable = this.coinm
+              ? NaN
+              : parseFloat(`${d.crossedMaxAvailable ?? ''}`)
+            const free = Number.isFinite(spendable)
+              ? Math.max(Math.min(walletBalance - committed, spendable), 0)
+              : walletBalance - committed
             res.push({
               asset: d.marginCoin,
-              free: walletBalance - committed,
-              locked: committed,
+              free,
+              locked: walletBalance - free,
             })
           })
         } else {

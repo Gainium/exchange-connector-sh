@@ -168,8 +168,10 @@ describe('bitget futures_getBalance — free + locked is the wallet balance', ()
     // The defect: before the fix this is 4999.79 + 4000 = 8999.79, i.e. 1.8x
     // the balance the venue holds.
     check('free + locked', b.free + b.locked, 5000)
-    check('locked', b.locked, 4000.21)
-    check('free', b.free, 999.79)
+    // Spec 051: free is capped at the venue's crossedMaxAvailable (799.79),
+    // which nets the open loss out; wallet - committed (999.79) does not.
+    check('locked', b.locked, 4200.21)
+    check('free', b.free, 799.79)
   })
 
   it('§1.1 isolated margin: same invariant, whichever mode the margin is in', async () => {
@@ -178,7 +180,8 @@ describe('bitget futures_getBalance — free + locked is the wallet balance', ()
     const b = usdt(res.data)
     if (!b) throw new Error('no USDT row returned')
     check('free + locked', b.free + b.locked, 5000)
-    check('locked', b.locked, 4000.21)
+    // Spec 051: capped at the venue's crossedMaxAvailable (799.79).
+    check('locked', b.locked, 4200.21)
   })
 
   it('§3 a flat account is unchanged: free = the whole balance, locked = 0', async () => {

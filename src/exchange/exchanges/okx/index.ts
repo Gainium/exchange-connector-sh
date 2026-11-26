@@ -49,6 +49,7 @@ import { RestClient as OKXOrderRestClient } from '../../../okx-custom/rest-clien
 import { round } from '../../../utils/math'
 import { okxCollateralIsPooled, pooledMarginFromOkx } from './pooledMargin'
 import { createHash } from 'crypto'
+import { okxFeeRateFor, type OkxFeeRow } from './feeGroup'
 
 class OKXError extends Error {
   code: number
@@ -1099,6 +1100,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res?.length) {
           this.setXperpMap(res)
+          this.setFeeGroups(res)
           return this.returnGood<
             (ExchangeInfo & { pair: string; maxLeverage?: string })[]
           >(timeProfile)(this.mapInstrumentsToInfo(res, category))
@@ -1254,6 +1256,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (res?.length) {
           this.setXperpMap(res)
+          this.setFeeGroups(res)
           return this.returnGood<
             (ExchangeInfo & { pair: string; maxLeverage?: string })[]
           >(timeProfile)(this.mapInstrumentsToInfo(res, category))
@@ -1333,8 +1336,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
   async getAllUserFees(
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<(UserFee & { pair: string })[]>> {
-    let maker = 0
-    let taker = 0
+    let feeRow: OkxFeeRow | undefined
     const pairs = await this.getAllExchangeInfo()
     timeProfile =
       (await this.checkLimits('getFeeRates', 3000, 3, timeProfile)) ||
@@ -1345,8 +1347,7 @@ class OKXExchange extends AbstractExchange implements Exchange {
       .then(async (fees) => {
         timeProfile = this.endProfilerTime(timeProfile, 'exchange')
         if (fees.length) {
-          maker = +fees[0].maker * -1
-          taker = +fees[0].taker * -1
+          feeRow = fees[0] as OkxFeeRow
           return
         }
         return this.handleOkxErrors(
@@ -1362,8 +1363,32 @@ class OKXExchange extends AbstractExchange implements Exchange {
       )
     timeProfile = this.endProfilerTime(timeProfile, 'exchange')
     return this.returnGood<(UserFee & { pair: string })[]>(timeProfile)(
-      (pairs.data ?? []).map((p) => ({ pair: p.pair, maker, taker })),
+      (pairs.data ?? []).map((p) => ({
+        pair: p.pair,
+        // Each pair at its own fee group's rate (spec 055).
+        ...okxFeeRateFor(feeRow, this.feeGroupByPair.get(p.pair)),
+      })),
     )
+  }
+
+  /** pair -> OKX instrument fee `groupId`, from the last instruments read. */
+  private feeGroupByPair = new Map<string, string>()
+
+  private setFeeGroups(
+    res:
+      | Awaited<ReturnType<OKXRestClient['getInstruments']>>
+      | Awaited<ReturnType<OKXRestClient['getAccountInstruments']>>,
+  ) {
+    const groups = new Map<string, string>()
+    for (const s of res) {
+      //@ts-ignore -- groupId is not on the SDK's typed Instrument
+      const groupId = s.groupId
+      const pair = this.futures ? s.instFamily : s.instId
+      if (pair && groupId !== undefined && `${groupId}` !== '') {
+        groups.set(pair, `${groupId}`)
+      }
+    }
+    this.feeGroupByPair = groups
   }
 
   /** Bybit get balance

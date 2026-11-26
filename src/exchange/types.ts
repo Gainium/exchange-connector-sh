@@ -165,6 +165,15 @@ export type AccountFill = {
   timestamp: number
   /** Venue's own classification, passed through unmapped for diagnostics. */
   fillType?: string
+  /**
+   * Who placed the order, as the venue records it, where it does (Bitget
+   * `enterPointSource`: `API`, `WEB`, `IOS`, `ANDROID`, `SYS`). Lets a caller
+   * tell an API order (a bot's) from a hand trade on a venue whose fills carry
+   * no client order id. Absent on venues that do not say.
+   */
+  source?: string
+  /** Fee paid on this fill in the quote coin, positive, where the venue says. */
+  fee?: string
 }
 
 export type FundingRateResponse = {

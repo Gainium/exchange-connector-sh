@@ -19,6 +19,7 @@ import {
   Futures,
   PositionSide,
   PositionInfo,
+  AccountFill,
   MarginType,
   TimeProfile,
   RebateOverview,
@@ -77,6 +78,10 @@ import {
 } from 'bitget-api'
 import { RestClientV2 as BitgetOrderClient } from '../../../bitget-custom/rest-client-v2'
 import limitHelper from './limit'
+import {
+  type BitgetFuturesFill,
+  bitgetFuturesFillToAccountFill,
+} from './accountFills'
 import { normalizeOrderFee } from '../../helpers/orderFee'
 import { bitgetSpotFeeDetail } from './fees'
 import { Logger } from '@nestjs/common'
@@ -1897,6 +1902,64 @@ class BitgetExchange extends AbstractExchange implements Exchange {
       }
     }
     return this.returnGood<PositionInfo[]>(timeProfile)(res)
+  }
+
+  /**
+   * Executions on the futures account, newest first (`/api/v2/mix/order/fills`,
+   * at most 100 per product line). `sinceMs` pages backwards: the fills BEFORE
+   * that time. Read-only.
+   *
+   * Bitget's fill record carries no client order id, so `clientOrderId` is
+   * always empty here. What it carries instead is who placed the order
+   * (`enterPointSource`: `API`, `WEB`, `IOS`, `ANDROID`, `SYS`), passed through
+   * as `source`, and the venue's own trade kind (`tradeSide`, e.g. `close_long`,
+   * `burst_close_long` for a liquidation), passed through as `fillType`. In
+   * hedge mode `side` names the POSITION (`buy` closes a long), so the
+   * direction of the trade is read off `tradeSide` when it says.
+   *
+   * Spot and Unified Trading Accounts answer an empty page — no such feed is
+   * read for them.
+   */
+  async getAccountFills(
+    sinceMs?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<AccountFill[]>> {
+    if (!this.futures || (await this.accountMode()) === 'uta') {
+      return this.returnGood<AccountFill[]>(timeProfile)([])
+    }
+    const fills: AccountFill[] = []
+    for (const productType of this.productTypes) {
+      timeProfile =
+        (await this.checkLimits('getFuturesFills', 10, timeProfile)) ||
+        timeProfile
+      timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+      try {
+        const result = await this.client.getFuturesFills({
+          productType,
+          limit: '100',
+          ...(sinceMs ? { endTime: `${sinceMs - 1}` } : {}),
+        })
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (result.code !== '00000') {
+          return this.handleBitgetErrors(
+            this.getAccountFills,
+            sinceMs,
+            this.endProfilerTime(timeProfile, 'exchange'),
+          )(new BitgetError(result.msg, +result.code))
+        }
+        for (const f of (result.data?.fillList ?? []) as BitgetFuturesFill[]) {
+          fills.push(bitgetFuturesFillToAccountFill(f))
+        }
+      } catch (e) {
+        return this.handleBitgetErrors(
+          this.getAccountFills,
+          sinceMs,
+          this.endProfilerTime(timeProfile, 'exchange'),
+        )(new BitgetError(e?.body?.msg ?? e.message, 0))
+      }
+    }
+    fills.sort((a, b) => b.timestamp - a.timestamp)
+    return this.returnGood<AccountFill[]>(timeProfile)(fills)
   }
 
   /**

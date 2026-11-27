@@ -291,16 +291,20 @@ export class ExchangeController {
   /**
    * Executions on the account, newest first — NOT the public tape (`/trades`).
    * Read-only, for reconciling what the venue did against what we recorded.
-   * `since` (ms) pages backwards through history.
+   * `since` (ms) pages backwards through history. `symbol` narrows the read
+   * to one pair; a venue whose fill feed is per-symbol (Binance futures)
+   * answers only when it is given.
    */
   @Get('/accountFills')
   async getAccountFills(
     @Headers() headers: AuthData,
     @Query('since') since: string = null,
+    @Query('symbol') symbol: string = null,
   ) {
     return this.exchangeService.getAccountFills(
       headers,
       since ? +since : undefined,
+      symbol || undefined,
     )
   }
 

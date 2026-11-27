@@ -25,6 +25,10 @@ import { USDMClient, CoinMClient, MainClient } from '../../../binance-custom'
 import limitHelper from './limit'
 import { pooledMarginFromBinance } from './pooledMargin'
 import { futuresAssetBalance } from './futuresBalance'
+import {
+  binanceTradesToAccountFills,
+  type BinanceFuturesTrade,
+} from './accountFills'
 import { normalizeOrderFees } from '../../helpers/orderFee'
 import {
   BaseReturn,
@@ -48,6 +52,7 @@ import {
   ReferralStatus,
   TraderSummary,
   KeyPermissions,
+  AccountFill,
 } from '../../types'
 import {
   AllPricesResponse,
@@ -3203,6 +3208,110 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
+  }
+
+  /**
+   * The account's futures trades on one symbol strictly before `sinceMs` (the
+   * last 7 days' when omitted), newest first, from `/fapi/v1/userTrades`
+   * (USDⓈ-M) or `/dapi/v1/userTrades` (COIN-M). That feed is per-symbol, so
+   * without a symbol — and on spot — this answers an empty page, as before.
+   *
+   * A trade carries no client order id, so each distinct order is looked up
+   * once (`getOrder` by order id) to tell the bot's own orders from a hand
+   * trade or the venue's own close; see `binanceOrderOrigin`. Lookups stop at
+   * `maxOrders`, and the answer is cut at the newest trade whose order could
+   * not be attributed, so it is always an unbroken newest-first run.
+   */
+  async getAccountFills(
+    sinceMs?: number,
+    symbol?: string,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<AccountFill[]>> {
+    const client = this.usdm ? this.usdmClient : this.coinmClient
+    if (!this.futures || !symbol || !client) {
+      return this.returnGood<AccountFill[]>(timeProfile)([])
+    }
+    const window = 7 * 24 * 60 * 60 * 1000
+    const limit = 1000
+    const maxPages = 5
+    const maxOrders = 20
+    const weight = this.usdm ? 5 : 20
+    const trades = new Map<string, BinanceFuturesTrade>()
+    const clientIds = new Map<string, string>()
+    try {
+      const endTime = sinceMs ? +sinceMs - 1 : undefined
+      let startTime = endTime ? endTime - window + 1 : undefined
+      for (let page = 0; page < maxPages; page++) {
+        timeProfile =
+          (await this.checkLimits(
+            'getAccountFills',
+            'request',
+            weight,
+            timeProfile,
+          )) || timeProfile
+        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+        const rows = ((await client.getAccountTrades({
+          symbol,
+          limit,
+          ...(startTime ? { startTime } : {}),
+          ...(endTime ? { endTime } : {}),
+        } as Parameters<USDMClient['getAccountTrades']>[0])) ??
+          []) as unknown as BinanceFuturesTrade[]
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        for (const r of rows) {
+          trades.set(`${r.id}`, r)
+        }
+        if (rows.length < limit) {
+          break
+        }
+        // A full page may be the oldest end of the window: step past its
+        // newest trade so the most recent ones are always read.
+        const newest = Math.max(...rows.map((r) => +r.time))
+        if (!Number.isFinite(newest) || (endTime && newest >= endTime)) {
+          break
+        }
+        startTime = newest + 1
+      }
+      const newestFirst = [...trades.values()].sort(
+        (a, b) => +b.time - +a.time,
+      )
+      for (const t of newestFirst) {
+        const orderId = `${t.orderId}`
+        if (clientIds.has(orderId)) {
+          continue
+        }
+        if (clientIds.size >= maxOrders) {
+          break
+        }
+        timeProfile =
+          (await this.checkLimits('getOrder', 'request', 1, timeProfile)) ||
+          timeProfile
+        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+        const order = await client
+          .getOrder({ symbol, orderId: +orderId })
+          .catch((e: Error & { code?: number }) => {
+            if (e?.code === -2013) {
+              return undefined
+            }
+            throw e
+          })
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (!order) {
+          break
+        }
+        clientIds.set(orderId, `${order.clientOrderId ?? ''}`)
+      }
+      return this.returnGood<AccountFill[]>(timeProfile)(
+        binanceTradesToAccountFills(newestFirst, clientIds, this.usdm),
+      )
+    } catch (e) {
+      return this.handleBinanceErrors<BaseReturn<AccountFill[]>>(
+        this.getAccountFills,
+        sinceMs,
+        symbol,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(e as Error & { code?: number })
+    }
   }
 
   /**

@@ -1922,6 +1922,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
    */
   async getAccountFills(
     sinceMs?: number,
+    _symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AccountFill[]>> {
     if (!this.futures || (await this.accountMode()) === 'uta') {
@@ -1944,6 +1945,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
           return this.handleBitgetErrors(
             this.getAccountFills,
             sinceMs,
+            _symbol,
             this.endProfilerTime(timeProfile, 'exchange'),
           )(new BitgetError(result.msg, +result.code))
         }
@@ -1954,6 +1956,7 @@ class BitgetExchange extends AbstractExchange implements Exchange {
         return this.handleBitgetErrors(
           this.getAccountFills,
           sinceMs,
+          _symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         )(new BitgetError(e?.body?.msg ?? e.message, 0))
       }

@@ -1801,6 +1801,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
    */
   async getAccountFills(
     sinceMs?: number,
+    _symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AccountFill[]>> {
     if (!this.usdm) {
@@ -1856,6 +1857,7 @@ class KrakenExchange extends AbstractExchange implements Exchange {
         this.handleKrakenErrors(
           this.getAccountFills,
           sinceMs,
+          _symbol,
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )

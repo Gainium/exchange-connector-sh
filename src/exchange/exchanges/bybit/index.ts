@@ -2423,6 +2423,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
    */
   async getAccountFills(
     sinceMs?: number,
+    _symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AccountFill[]>> {
     if (!this.futures) {
@@ -2466,6 +2467,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
       return this.handleBybitErrors<BaseReturn<AccountFill[]>>(
         this.getAccountFills,
         sinceMs,
+        _symbol,
         this.endProfilerTime(timeProfile, 'exchange'),
       )(e as BybitError & { code: number })
     }

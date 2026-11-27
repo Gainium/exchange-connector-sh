@@ -179,6 +179,11 @@ export type AccountFill = {
   source?: string
   /** Fee paid on this fill in the quote coin, positive, where the venue says. */
   fee?: string
+  /**
+   * Profit or loss the venue booked on this fill, where it says (Binance
+   * futures `realizedPnl`). Passed through for diagnostics.
+   */
+  realizedPnl?: string
 }
 
 export type FundingRateResponse = {

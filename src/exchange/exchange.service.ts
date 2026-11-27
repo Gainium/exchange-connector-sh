@@ -383,6 +383,7 @@ export class ExchangeService {
   getAccountFills(
     auth: AuthData,
     sinceMs?: number,
+    symbol?: string,
   ): Promise<BaseReturn<AccountFill[]>> {
     return this.getExchange(
       auth.exchange,
@@ -394,7 +395,7 @@ export class ExchangeService {
       auth.code,
       auth.bybithost,
       auth.subaccount,
-    ).getAccountFills(sinceMs)
+    ).getAccountFills(sinceMs, symbol || undefined)
   }
 
   verifyUser(

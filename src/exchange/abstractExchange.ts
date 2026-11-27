@@ -50,7 +50,10 @@ export interface Exchange {
 
   getSharedWallet(): Promise<BaseReturn<boolean | null>>
 
-  getAccountFills(sinceMs?: number): Promise<BaseReturn<AccountFill[]>>
+  getAccountFills(
+    sinceMs?: number,
+    symbol?: string,
+  ): Promise<BaseReturn<AccountFill[]>>
 
   openOrder(order: {
     symbol: string
@@ -476,7 +479,10 @@ abstract class AbsctractExchange implements Exchange {
    * Read-only, and heavier than an ordinary REST call on most venues: it must
    * go through the same rate-limit accounting as any other history endpoint.
    */
-  async getAccountFills(_sinceMs?: number): Promise<BaseReturn<AccountFill[]>> {
+  async getAccountFills(
+    _sinceMs?: number,
+    _symbol?: string,
+  ): Promise<BaseReturn<AccountFill[]>> {
     return this.returnGood<AccountFill[]>(this.getEmptyTimeProfile(), [])([])
   }
 

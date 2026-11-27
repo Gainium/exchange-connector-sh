@@ -5,12 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.30.4] - 2026-11-27
-
-### Fixed
-
-- Binance spot account fills now return the account's own trades on the requested symbol (read in 24 h slices over the 7 days before `sinceMs`), instead of an empty page
-
 ## [1.30.3] - 2026-11-27
 
 ### Fixed

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.30.3] - 2026-11-27
+
+### Fixed
+
+- Binance USDⓈ-M and COIN-M now answer the account-fills read for a given symbol, telling the bot's own trades apart from hand trades and venue closes, so a futures position closed outside the bot can be priced from the venue's own record
+- The account-fills read takes an optional `symbol`; other venues ignore it
+
 ## [1.30.2] - 2026-11-27
 
 ### Fixed

@@ -163,7 +163,12 @@ export type AccountFill = {
   price: string
   quantity: string
   timestamp: number
-  /** Venue's own classification, passed through unmapped for diagnostics. */
+  /**
+   * Venue's own classification, passed through for diagnostics. A venue whose
+   * forced-close names differ from the others' reports those in the shared
+   * vocabulary instead (Bybit `BustTrade` → `liquidation`, `AdlTrade` →
+   * `unwindCounterparty`), so callers recognise them without a per-venue case.
+   */
   fillType?: string
   /**
    * Who placed the order, as the venue records it, where it does (Bitget

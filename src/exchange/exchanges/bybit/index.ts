@@ -5,6 +5,7 @@ import AbstractExchange, {
 import { noBookTicker, toBookTicker } from '../bookTicker'
 import {
   AllPricesResponse,
+  AccountFill,
   BaseReturn,
   CandleResponse,
   FundingRateResponse,
@@ -66,6 +67,11 @@ import { pageCandleRange } from '../../helpers/candlePager'
 import { datedDeliveryTime } from '../../helpers/deliveryTime'
 import { timeIntervalMap } from '../okx'
 import { unifiedSpendableCap } from './unifiedSpendable'
+import {
+  BYBIT_FILL_EXEC_TYPES,
+  BybitExecution,
+  bybitExecutionToAccountFill,
+} from './accountFills'
 
 /**
  * Most bars `/v5/market/kline` serves in one call, on every category.
@@ -2405,6 +2411,67 @@ class BybitExchange extends AbstractExchange implements Exchange {
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
+  }
+
+  /**
+   * One page of the account's futures executions strictly before `sinceMs`
+   * (all of the last 7 days' when omitted), newest first, from
+   * `/v5/execution/list`. Only position-moving executions are kept (see
+   * `BYBIT_FILL_EXEC_TYPES`); the venue's own pages are followed until a
+   * page's worth of those is in hand, so a run of funding rows cannot end the
+   * history early. An empty page means there is nothing older in the window.
+   */
+  async getAccountFills(
+    sinceMs?: number,
+    timeProfile = this.getEmptyTimeProfile(),
+  ): Promise<BaseReturn<AccountFill[]>> {
+    if (!this.futures) {
+      return this.returnGood<AccountFill[]>(timeProfile)([])
+    }
+    const category = this.getCategory() as 'linear' | 'inverse'
+    const want = 100
+    const maxPages = 5
+    const fills: AccountFill[] = []
+    const seen = new Set<string>()
+    let cursor: string | undefined
+    try {
+      for (let page = 0; page < maxPages && fills.length < want; page++) {
+        timeProfile =
+          (await this.checkLimits('getAccountFills', 'get', timeProfile)) ||
+          timeProfile
+        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+        const res = await this.client.getExecutionList({
+          category,
+          limit: 100,
+          ...(sinceMs ? { endTime: +sinceMs - 1 } : {}),
+          ...(cursor ? { cursor } : {}),
+        })
+        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+        if (res.retMsg !== 'OK') {
+          throw new BybitError(res.retMsg, res.retCode)
+        }
+        for (const e of (res.result?.list ?? []) as BybitExecution[]) {
+          if (BYBIT_FILL_EXEC_TYPES.includes(`${e.execType}`)) {
+            fills.push(bybitExecutionToAccountFill(e, category === 'linear'))
+          }
+        }
+        const next = res.result?.nextPageCursor
+        if (!next || seen.has(next)) {
+          break
+        }
+        seen.add(next)
+        cursor = next
+      }
+    } catch (e) {
+      return this.handleBybitErrors<BaseReturn<AccountFill[]>>(
+        this.getAccountFills,
+        sinceMs,
+        this.endProfilerTime(timeProfile, 'exchange'),
+      )(e as BybitError & { code: number })
+    }
+    return this.returnGood<AccountFill[]>(timeProfile)(
+      fills.sort((a, b) => b.timestamp - a.timestamp),
+    )
   }
 
   async getTrades(

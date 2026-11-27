@@ -19,41 +19,6 @@ export type BinanceFuturesTrade = {
 }
 
 /**
- * The fields of one spot `/api/v3/myTrades` row this mapping reads. Spot rows
- * carry `isBuyer` instead of `side`, and no `realizedPnl`.
- */
-export type BinanceSpotTrade = {
-  id: number | string
-  orderId: number | string
-  symbol: string
-  isBuyer: boolean
-  price: string
-  qty: string
-  time: number
-  commission?: string
-  commissionAsset?: string
-}
-
-/**
- * A spot trade in the futures trade's shape, so one mapping serves both. The
- * fee rule is the same: it counts only when charged in the symbol's quote coin
- * (a fee taken in the base coin or in BNB is left out).
- */
-export const binanceSpotTradeAsTrade = (
-  t: BinanceSpotTrade,
-): BinanceFuturesTrade => ({
-  id: t.id,
-  orderId: t.orderId,
-  symbol: t.symbol,
-  side: t.isBuyer ? 'BUY' : 'SELL',
-  price: `${t.price}`,
-  qty: `${t.qty}`,
-  time: +t.time,
-  commission: t.commission,
-  commissionAsset: t.commissionAsset,
-})
-
-/**
  * Who placed an order, read off the client order id Binance stamps on every
  * order that was not given one over the API. A hand trade carries its channel
  * (`web_…`, `ios_…`, `android_…`, `electron_…` for the desktop app); the
@@ -89,8 +54,7 @@ export const binanceOrderOrigin = (
  * Fee in the quote coin, positive. USDⓈ-M charges in the margin coin unless
  * the account pays in BNB, so the fee counts only when `commissionAsset` is
  * the symbol's quote. COIN-M charges in the base coin, which a caller pricing
- * in the quote coin cannot add, so it gets none. `usdm` is "the fee may be in
- * the quote coin": true for USDⓈ-M and for spot, false for COIN-M.
+ * in the quote coin cannot add, so it gets none.
  */
 const quoteFee = (
   t: BinanceFuturesTrade,

@@ -19,9 +19,7 @@ import {
   binanceOrderOrigin,
   binanceTradeToAccountFill,
   binanceTradesToAccountFills,
-  binanceSpotTradeAsTrade,
   type BinanceFuturesTrade,
-  type BinanceSpotTrade,
 } from './accountFills'
 
 const DAY = 24 * 60 * 60 * 1000
@@ -42,7 +40,6 @@ const trade = (over: Partial<BinanceFuturesTrade>): BinanceFuturesTrade => ({
 
 type Stub = {
   trades?: (ask: Record<string, unknown>) => unknown[]
-  spotTrades?: (ask: Record<string, unknown>) => unknown[]
   orders?: Record<string, string>
   orderError?: (orderId: string) => unknown
 }
@@ -90,25 +87,20 @@ function stub(futures: Futures | null, s: Stub = {}) {
   ex.usdmClient = client
   ex.coinmClient = client
   ex.client = {
-    getAccountTradeList: async (params: Record<string, unknown>) => {
-      tradeAsks.push(params)
-      if (!s.spotTrades) {
-        throw new Error('spot must not be read')
-      }
-      return s.spotTrades(params)
+    getAccountTradeList: async () => {
+      throw new Error('spot must not be read')
     },
-    getOrder: client.getOrder,
   }
   return { ex, tradeAsks, orderAsks, limits }
 }
 
 describe('spec 057 — binance futures account fills', () => {
-  it('§1.1 (058 §1.1) spot with no symbol answers an empty page and reads nothing', async () => {
-    const { ex, orderAsks } = stub(null)
-    const res = await ex.getAccountFills()
+  it('§1.1 spot answers an empty page and reads nothing', async () => {
+    const { ex, tradeAsks, orderAsks } = stub(null)
+    const res = await ex.getAccountFills(undefined, 'BTCUSDT')
     assert.equal(res.status, StatusEnum.ok)
     assert.deepEqual(res.data, [])
-    assert.equal(orderAsks.length, 0)
+    assert.equal(tradeAsks.length + orderAsks.length, 0)
   })
 
   it('§1.1 futures with no symbol answers an empty page and reads nothing', async () => {
@@ -313,138 +305,6 @@ describe('spec 057 — binance futures account fills', () => {
         Object.assign(new Error('Invalid API-key'), { code: -2015 }),
     })
     const res = await ex.getAccountFills(undefined, 'IOTXUSDT')
-    assert.equal(res.status, StatusEnum.notok)
-  })
-})
-
-/**
- * Spec `specs/058.binance-spot-account-fills.md`. Spot answered an empty page,
- * so a spot deal whose take-profit fill the bot missed had no venue record any
- * caller could read. These pin the per-symbol `myTrades` read in 24 h slices.
- */
-const spotTrade = (over: Partial<BinanceSpotTrade>): BinanceSpotTrade => ({
-  id: 7,
-  orderId: 700,
-  symbol: 'JSTUSDT',
-  isBuyer: false,
-  price: '0.06318',
-  qty: '452.2',
-  time: 1776358800000,
-  commission: '0.0285',
-  commissionAsset: 'USDT',
-  ...over,
-})
-
-describe('spec 058 — binance spot account fills', () => {
-  it('§1.2 spot reads that symbol’s myTrades, weight 20, venue default with no sinceMs', async () => {
-    const { ex, tradeAsks, limits } = stub(null, {
-      spotTrades: () => [spotTrade({})],
-      orders: { '700': 'x-BKSVA3NTD-RO-abc' },
-    })
-    const res = await ex.getAccountFills(undefined, 'JSTUSDT')
-    assert.equal(res.status, StatusEnum.ok)
-    assert.equal(res.data.length, 1)
-    assert.equal(tradeAsks.length, 1)
-    assert.equal(tradeAsks[0].symbol, 'JSTUSDT')
-    assert.equal(tradeAsks[0].limit, 1000)
-    assert.equal('startTime' in tradeAsks[0], false)
-    assert.equal('endTime' in tradeAsks[0], false)
-    assert.deepEqual(
-      limits.find((l) => l.request === 'getAccountFills'),
-      { request: 'getAccountFills', weight: 20 },
-    )
-  })
-
-  it('§1.3 `sinceMs` reads seven 24 h slices strictly before it, newest first', async () => {
-    const since = 1776470400000 // 2026-04-18T00:00Z
-    const { ex, tradeAsks } = stub(null, {
-      spotTrades: () => [],
-    })
-    const res = await ex.getAccountFills(since, 'JSTUSDT')
-    assert.equal(res.status, StatusEnum.ok)
-    assert.deepEqual(res.data, [])
-    assert.equal(tradeAsks.length, 7)
-    tradeAsks.forEach((a, i) => {
-      assert.equal(a.endTime, since - 1 - i * DAY)
-      assert.equal(a.startTime, since - (i + 1) * DAY)
-      assert.ok(+(a.endTime as number) - +(a.startTime as number) < DAY)
-    })
-  })
-
-  it('§1.3 a trade two days back is found from one call', async () => {
-    const since = 1776470400000
-    const t = spotTrade({ time: since - 1.5 * DAY })
-    const { ex } = stub(null, {
-      spotTrades: (a) =>
-        +t.time >= +(a.startTime as number) && +t.time <= +(a.endTime as number)
-          ? [t]
-          : [],
-      orders: { '700': 'x-BKSVA3NTD-RO-abc' },
-    })
-    const res = await ex.getAccountFills(since, 'JSTUSDT')
-    assert.equal(res.status, StatusEnum.ok)
-    assert.equal(res.data.length, 1)
-    assert.equal(res.data[0].timestamp, +t.time)
-  })
-
-  it('§1.4 a spot trade maps with side from isBuyer and a quote fee', () => {
-    const sell = binanceSpotTradeAsTrade(spotTrade({}))
-    assert.equal(sell.side, 'SELL')
-    const buy = binanceSpotTradeAsTrade(
-      spotTrade({ isBuyer: true, commissionAsset: 'JST', commission: '0.4' }),
-    )
-    assert.equal(buy.side, 'BUY')
-    const [f] = binanceTradesToAccountFills(
-      [sell],
-      new Map([['700', 'x-BKSVA3NTD-RO-abc']]),
-      true,
-    )
-    assert.deepEqual(f, {
-      fillId: '7',
-      orderId: '700',
-      clientOrderId: 'x-BKSVA3NTD-RO-abc',
-      symbol: 'JSTUSDT',
-      side: 'SELL',
-      price: '0.06318',
-      quantity: '452.2',
-      timestamp: 1776358800000,
-      source: 'API',
-      fee: '0.0285',
-    })
-    const [b] = binanceTradesToAccountFills(
-      [buy],
-      new Map([['700', 'web_1']]),
-      true,
-    )
-    assert.equal(b.fee, undefined, 'a base-coin fee is not a quote fee')
-    assert.equal(b.clientOrderId, '')
-    assert.equal(b.source, 'WEB')
-  })
-
-  it('§1.5 spot attributes each order once through the spot getOrder', async () => {
-    const { ex, orderAsks, limits } = stub(null, {
-      spotTrades: () => [
-        spotTrade({ id: 1, orderId: 700 }),
-        spotTrade({ id: 2, orderId: 700, time: 1776358800001 }),
-        spotTrade({ id: 3, orderId: 701, time: 1776358700000 }),
-      ],
-      orders: { '700': 'x-BKSVA3NTD-RO-abc', '701': 'web_z' },
-    })
-    const res = await ex.getAccountFills(undefined, 'JSTUSDT')
-    assert.equal(res.status, StatusEnum.ok)
-    assert.equal(res.data.length, 3)
-    assert.equal(orderAsks.length, 2)
-    assert.equal(res.data[2].source, 'WEB')
-    assert.ok(limits.some((l) => l.request === 'getOrder' && l.weight >= 2))
-  })
-
-  it('§1.6 a spot venue error answers NOTOK instead of throwing', async () => {
-    const { ex } = stub(null, {
-      spotTrades: () => {
-        throw Object.assign(new Error('Invalid API-key'), { code: -2015 })
-      },
-    })
-    const res = await ex.getAccountFills(undefined, 'JSTUSDT')
     assert.equal(res.status, StatusEnum.notok)
   })
 })

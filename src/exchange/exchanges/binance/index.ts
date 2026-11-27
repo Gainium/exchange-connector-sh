@@ -27,7 +27,9 @@ import { pooledMarginFromBinance } from './pooledMargin'
 import { futuresAssetBalance } from './futuresBalance'
 import {
   binanceTradesToAccountFills,
+  binanceSpotTradeAsTrade,
   type BinanceFuturesTrade,
+  type BinanceSpotTrade,
 } from './accountFills'
 import { normalizeOrderFees } from '../../helpers/orderFee'
 import {
@@ -3211,10 +3213,13 @@ class BinanceExchange extends AbstractExchange implements Exchange {
   }
 
   /**
-   * The account's futures trades on one symbol strictly before `sinceMs` (the
-   * last 7 days' when omitted), newest first, from `/fapi/v1/userTrades`
-   * (USDⓈ-M) or `/dapi/v1/userTrades` (COIN-M). That feed is per-symbol, so
-   * without a symbol — and on spot — this answers an empty page, as before.
+   * The account's trades on one symbol strictly before `sinceMs`, newest
+   * first. Futures read `/fapi/v1/userTrades` (USDⓈ-M) or `/dapi/v1/userTrades`
+   * (COIN-M) over the 7 days before `sinceMs` (the venue's default 7 days when
+   * omitted). Spot reads `/api/v3/myTrades`, whose window is capped at 24 h,
+   * as seven 24 h slices covering the same 7 days (the venue's most recent
+   * trades when `sinceMs` is omitted). The feed is per-symbol, so without a
+   * symbol this answers an empty page.
    *
    * A trade carries no client order id, so each distinct order is looked up
    * once (`getOrder` by order id) to tell the bot's own orders from a hand
@@ -3227,50 +3232,75 @@ class BinanceExchange extends AbstractExchange implements Exchange {
     symbol?: string,
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<AccountFill[]>> {
-    const client = this.usdm ? this.usdmClient : this.coinmClient
-    if (!this.futures || !symbol || !client) {
+    const client = this.futures
+      ? this.usdm
+        ? this.usdmClient
+        : this.coinmClient
+      : this.client
+    if (!symbol || !client) {
       return this.returnGood<AccountFill[]>(timeProfile)([])
     }
-    const window = 7 * 24 * 60 * 60 * 1000
+    const day = 24 * 60 * 60 * 1000
+    // Spot caps a window at 24 h; futures at 7 days.
+    const window = this.futures ? 7 * day : day
+    const slices = this.futures ? 1 : 7
     const limit = 1000
     const maxPages = 5
     const maxOrders = 20
-    const weight = this.usdm ? 5 : 20
+    const weight = this.futures ? (this.usdm ? 5 : 20) : 20
+    const orderWeight = this.futures ? 1 : this.isNewLimit ? 4 : 2
     const trades = new Map<string, BinanceFuturesTrade>()
     const clientIds = new Map<string, string>()
+    const readTrades = async (params: { symbol: string } & Record<string, unknown>) => {
+      if (this.futures) {
+        return ((await (client as USDMClient).getAccountTrades(
+          params as unknown as Parameters<USDMClient['getAccountTrades']>[0],
+        )) ?? []) as unknown as BinanceFuturesTrade[]
+      }
+      const rows = ((await (client as MainClient).getAccountTradeList(
+        params as unknown as Parameters<MainClient['getAccountTradeList']>[0],
+      )) ?? []) as unknown as BinanceSpotTrade[]
+      return rows.map(binanceSpotTradeAsTrade)
+    }
     try {
-      const endTime = sinceMs ? +sinceMs - 1 : undefined
-      let startTime = endTime ? endTime - window + 1 : undefined
-      for (let page = 0; page < maxPages; page++) {
-        timeProfile =
-          (await this.checkLimits(
-            'getAccountFills',
-            'request',
-            weight,
-            timeProfile,
-          )) || timeProfile
-        timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-        const rows = ((await client.getAccountTrades({
-          symbol,
-          limit,
-          ...(startTime ? { startTime } : {}),
-          ...(endTime ? { endTime } : {}),
-        } as Parameters<USDMClient['getAccountTrades']>[0])) ??
-          []) as unknown as BinanceFuturesTrade[]
-        timeProfile = this.endProfilerTime(timeProfile, 'exchange')
-        for (const r of rows) {
-          trades.set(`${r.id}`, r)
-        }
-        if (rows.length < limit) {
+      for (let slice = 0; slice < slices; slice++) {
+        // Slices walk back from `sinceMs`, newest first. Without it there is
+        // no window to slice: one read of the venue's default.
+        if (!sinceMs && slice > 0) {
           break
         }
-        // A full page may be the oldest end of the window: step past its
-        // newest trade so the most recent ones are always read.
-        const newest = Math.max(...rows.map((r) => +r.time))
-        if (!Number.isFinite(newest) || (endTime && newest >= endTime)) {
-          break
+        const endTime = sinceMs ? +sinceMs - 1 - slice * window : undefined
+        let startTime = endTime ? endTime - window + 1 : undefined
+        for (let page = 0; page < maxPages; page++) {
+          timeProfile =
+            (await this.checkLimits(
+              'getAccountFills',
+              'request',
+              weight,
+              timeProfile,
+            )) || timeProfile
+          timeProfile = this.startProfilerTime(timeProfile, 'exchange')
+          const rows = await readTrades({
+            symbol,
+            limit,
+            ...(startTime ? { startTime } : {}),
+            ...(endTime ? { endTime } : {}),
+          })
+          timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+          for (const r of rows) {
+            trades.set(`${r.id}`, r)
+          }
+          if (rows.length < limit) {
+            break
+          }
+          // A full page may be the oldest end of the window: step past its
+          // newest trade so the most recent ones are always read.
+          const newest = Math.max(...rows.map((r) => +r.time))
+          if (!Number.isFinite(newest) || (endTime && newest >= endTime)) {
+            break
+          }
+          startTime = newest + 1
         }
-        startTime = newest + 1
       }
       const newestFirst = [...trades.values()].sort(
         (a, b) => +b.time - +a.time,
@@ -3284,10 +3314,14 @@ class BinanceExchange extends AbstractExchange implements Exchange {
           break
         }
         timeProfile =
-          (await this.checkLimits('getOrder', 'request', 1, timeProfile)) ||
-          timeProfile
+          (await this.checkLimits(
+            'getOrder',
+            'request',
+            orderWeight,
+            timeProfile,
+          )) || timeProfile
         timeProfile = this.startProfilerTime(timeProfile, 'exchange')
-        const order = await client
+        const order = await (client as USDMClient)
           .getOrder({ symbol, orderId: +orderId })
           .catch((e: Error & { code?: number }) => {
             if (e?.code === -2013) {
@@ -3302,7 +3336,12 @@ class BinanceExchange extends AbstractExchange implements Exchange {
         clientIds.set(orderId, `${order.clientOrderId ?? ''}`)
       }
       return this.returnGood<AccountFill[]>(timeProfile)(
-        binanceTradesToAccountFills(newestFirst, clientIds, this.usdm),
+        // Spot fees count in the quote coin, as on USDⓈ-M.
+        binanceTradesToAccountFills(
+          newestFirst,
+          clientIds,
+          !this.futures || !!this.usdm,
+        ),
       )
     } catch (e) {
       return this.handleBinanceErrors<BaseReturn<AccountFill[]>>(

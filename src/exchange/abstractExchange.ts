@@ -74,6 +74,8 @@ export interface Exchange {
   }: {
     symbol: string
     newClientOrderId: string
+    /** When the caller tried to place the order (epoch ms). Optional hint. */
+    since?: number
   }): Promise<BaseReturn<CommonOrder>>
 
   /**
@@ -515,6 +517,8 @@ abstract class AbsctractExchange implements Exchange {
   }: {
     symbol: string
     newClientOrderId: string
+    /** When the caller tried to place the order (epoch ms). Optional hint. */
+    since?: number
   }): Promise<BaseReturn<CommonOrder>>
 
   /** Cancel order

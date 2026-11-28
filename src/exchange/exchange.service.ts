@@ -198,7 +198,7 @@ export class ExchangeService {
   }
 
   getOrder(
-    data: { symbol: string; newClientOrderId: string },
+    data: { symbol: string; newClientOrderId: string; since?: number },
     auth: AuthData,
   ): Promise<BaseReturn<CommonOrder>> {
     return this.getExchange(
@@ -211,7 +211,11 @@ export class ExchangeService {
       auth.code,
       auth.bybithost,
       auth.subaccount,
-    ).getOrder({ symbol: data.symbol, newClientOrderId: data.newClientOrderId })
+    ).getOrder({
+      symbol: data.symbol,
+      newClientOrderId: data.newClientOrderId,
+      ...(data.since !== undefined ? { since: data.since } : {}),
+    })
   }
 
   getOrdersBatch(

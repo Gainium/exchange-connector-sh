@@ -185,8 +185,24 @@ export class ExchangeController {
     @Query('newClientOrderId') newClientOrderId: string,
     @Query('symbol') symbol: string,
     @Headers() headers: AuthData,
+    /**
+     * Optional: when the caller tried to place the order (epoch ms). Lets a
+     * venue whose history has a default time window search back far enough
+     * to say the order does not exist (Bybit). Ignored by the others.
+     */
+    @Query('since') since?: string,
   ) {
-    return this.exchangeService.getOrder({ newClientOrderId, symbol }, headers)
+    const placedAt = since !== undefined ? Number(since) : NaN
+    return this.exchangeService.getOrder(
+      {
+        newClientOrderId,
+        symbol,
+        ...(Number.isFinite(placedAt) && placedAt > 0
+          ? { since: placedAt }
+          : {}),
+      },
+      headers,
+    )
   }
 
   /**

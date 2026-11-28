@@ -68,6 +68,10 @@ import { datedDeliveryTime } from '../../helpers/deliveryTime'
 import { timeIntervalMap } from '../okx'
 import { unifiedSpendableCap } from './unifiedSpendable'
 import {
+  bybitHistoryWindows,
+  bybitOrderNotFoundReason,
+} from './historyWindows'
+import {
   BYBIT_FILL_EXEC_TYPES,
   BybitExecution,
   bybitExecutionToAccountFill,
@@ -1457,10 +1461,22 @@ class BybitExchange extends AbstractExchange implements Exchange {
     )
   }
 
+  /**
+   * Look an order up by our client order id: active orders first, then order
+   * history.
+   *
+   * `since` is when the caller tried to place the order (epoch ms). Without it
+   * an order found in neither list is NOT reported as absent: with no time
+   * range Bybit's history covers only the last 7 days, so an order that filled
+   * earlier is in neither answer. With it, history is searched in 7-day windows
+   * back to `since`, and only when every window answered empty is the order
+   * reported as `Order not found`. See {@link bybitHistoryWindows}.
+   */
   async getOrder(
     data: {
       symbol: string
       newClientOrderId: string
+      since?: number
     },
     timeProfile = this.getEmptyTimeProfile(),
   ): Promise<BaseReturn<CommonOrder>> {
@@ -1479,6 +1495,7 @@ class BybitExchange extends AbstractExchange implements Exchange {
               category,
               orderLinkId: newClientOrderId,
             })
+            let historyFailure: { retMsg: string; retCode: number } | undefined
             if (getOld.retMsg === 'OK') {
               if (getOld.result.list.length) {
                 timeProfile = this.endProfilerTime(timeProfile, 'exchange')
@@ -1498,13 +1515,40 @@ class BybitExchange extends AbstractExchange implements Exchange {
                     await this.convertOrder(getOld.result.list[0]),
                   )
                 }
+                // Empty in active orders and in the default 7-day history.
+                // Only an answer when history was searched back to the
+                // order's placement; otherwise fall through to the error.
+                const older = await this.searchOrderHistorySince(
+                  category,
+                  newClientOrderId,
+                  data.since,
+                  timeProfile,
+                )
+                timeProfile = older.timeProfile
+                if (older.order) {
+                  timeProfile = this.endProfilerTime(timeProfile, 'exchange')
+                  return this.returnGood<CommonOrder>(timeProfile)(
+                    await this.convertOrder(older.order),
+                  )
+                }
+                if (older.complete) {
+                  return this.returnBad(
+                    this.endProfilerTime(timeProfile, 'exchange'),
+                  )(new Error(bybitOrderNotFoundReason))
+                }
+                historyFailure = older.failure
               }
             }
             return this.handleBybitErrors(
               this.getOrder,
               data,
               this.endProfilerTime(timeProfile, 'exchange'),
-            )(new BybitError(getOld.retMsg, getOld.retCode))
+            )(
+              new BybitError(
+                (historyFailure ?? getOld).retMsg,
+                (historyFailure ?? getOld).retCode,
+              ),
+            )
           }
           timeProfile = this.endProfilerTime(timeProfile, 'exchange')
           return this.returnGood<CommonOrder>(timeProfile)(
@@ -1524,6 +1568,52 @@ class BybitExchange extends AbstractExchange implements Exchange {
           this.endProfilerTime(timeProfile, 'exchange'),
         ),
       )
+  }
+
+  /**
+   * Search order history for `orderLinkId` over the windows
+   * {@link bybitHistoryWindows} gives for `since`, after the default 7-day
+   * query already came back empty.
+   *
+   * `complete` is true only when every window answered with retCode 0 and an
+   * empty list, i.e. Bybit was asked about the order's whole life and holds no
+   * record of it. A failed window stops the search and is returned as
+   * `failure`, so the caller reports the venue's error rather than "not found".
+   */
+  private async searchOrderHistorySince(
+    category: CategoryV5,
+    orderLinkId: string,
+    since: number | undefined,
+    timeProfile: TimeProfile,
+  ): Promise<{
+    order?: AccountOrderV5
+    complete: boolean
+    failure?: { retMsg: string; retCode: number }
+    timeProfile: TimeProfile
+  }> {
+    const windows = bybitHistoryWindows(since, Date.now())
+    if (!windows) return { complete: false, timeProfile }
+    for (const w of windows) {
+      timeProfile =
+        (await this.checkLimits('getOrder', 'get', timeProfile)) || timeProfile
+      const res = await this.client.getHistoricOrders({
+        category,
+        orderLinkId,
+        startTime: w.startTime,
+        endTime: w.endTime,
+      })
+      if (res.retCode !== 0) {
+        return {
+          complete: false,
+          failure: { retMsg: res.retMsg, retCode: res.retCode },
+          timeProfile,
+        }
+      }
+      if (res.result?.list?.length) {
+        return { order: res.result.list[0], complete: false, timeProfile }
+      }
+    }
+    return { complete: true, timeProfile }
   }
 
   /** Get user fee for given pair
